@@ -8,20 +8,22 @@ spot execution runtime**. It will eventually support:
 3. Solana SPL / Token-2022 spot, initially via a Jupiter adapter
 4. much later: OpenSea NFT execution/scalping as a separate venue adapter
 
-## V0B status: `INK_SHADOW_READ_ONLY`
+## V0C status: `SOLANA_SHADOW_READ_ONLY`
 
 This repository currently implements the merged **V0A** offline deterministic
-core plus the bounded **V0B** Ink shadow adapter.
+core, the merged **V0B** Ink shadow adapter, and the bounded **V0C** Solana /
+Jupiter shadow adapter.
 See [docs/AUTHORITY.md](docs/AUTHORITY.md) for the binding statement of what
 this phase authorizes and forbids. In short:
 
-**V0B authorizes:** everything in V0A plus two-provider public Ink JSON-RPC
-reads, exact KRAKMASK/WETH9 V2 market observations, deterministic market
-quotes, shadow policy decisions, immutable evidence, and offline replay.
+**V0C authorizes:** everything in V0B plus bounded finalized Solana RPC mint
+reads, current Jupiter Swap V2 exact-input quote reads for the frozen exact
+mint pair, deterministic route/program evidence, shadow policy decisions,
+immutable evidence, and offline replay.
 
-**V0B forbids:** private-key access, wallet signing, transaction construction,
+**V0C forbids:** private-key access, wallet signing, transaction construction,
 transaction broadcast, live trading, venue discovery, automatic token
-selection, bridging, Solana, Robinhood, and OpenSea execution.
+selection, bridging, Robinhood, and OpenSea execution.
 
 Asset selection belongs to the user. Runtime asset admission is concerned with
 **exact identity and execution constraints**, not with judging whether a
@@ -38,6 +40,8 @@ project is good, bad, legitimate, or likely to rug.
   outcome is unknown (`qntyspot/ledger/replay.py`, `qntyspot/ledger/recovery.py`)
 - Typed interfaces for the chain/venue truth boundary (`qntyspot/boundary.py`)
 - The bounded Ink adapter (`qntyspot/ink.py`) with canonical evidence and replay
+- The bounded Solana/Jupiter adapter (`qntyspot/solana.py`) with exact mint,
+  route/program, stale-slot, version-0/ALT, canonical evidence, and replay
 
 ## Quickstart
 
@@ -50,7 +54,7 @@ pytest
 The offline test suite never requires network access; `tests/conftest.py`
 disables the `socket` module for the whole session. The source scan retains
 the no-secret/no-signing boundary while allowing the one standard-library
-public-read transport used by V0B.
+public-read transports used by V0B and V0C.
 
 ```python
 from qntyspot.policy import load_policy_file
@@ -69,7 +73,8 @@ with open_ledger("spot.sqlite3") as ledger:
 - [docs/AUTHORITY.md](docs/AUTHORITY.md) — what this phase authorizes and forbids
 - [docs/STATE_MACHINE.md](docs/STATE_MACHINE.md) — the intent lifecycle
 - [docs/POLICY_V0.md](docs/POLICY_V0.md) — the PolicyV0 schema
-- [docs/ROADMAP.md](docs/ROADMAP.md) — phases beyond V0B
+- [docs/ROADMAP.md](docs/ROADMAP.md) — phases beyond V0C
+- [docs/SOLANA_V0C.md](docs/SOLANA_V0C.md) — frozen Solana/Jupiter semantics
 - [docs/INK_V0B.md](docs/INK_V0B.md) — frozen Ink fixture and semantics
 
 ## KRAKMASK

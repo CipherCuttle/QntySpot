@@ -3,7 +3,7 @@
 ```
 V0A  OFFLINE CORE                     <- merged prerequisite
 V0B  INK SHADOW                        <- this repository, current phase
-V0C  SOLANA SHADOW
+V0C  SOLANA SHADOW                        <- this repository, current phase
 V0D  ROBINHOOD SHADOW
 V0E  HOSTILE FAILURE SUITE
 V0F  INK DUST LIVE
@@ -24,7 +24,7 @@ database-enforced exactly-once economic identity and atomic budget
 reservation, deterministic replay, and restart recovery. No network, no
 signer, no live-capital authority. See `docs/AUTHORITY.md`.
 
-## V0B — Ink shadow (current)
+## V0B — Ink shadow (merged prerequisite)
 
 The first adapter behind `qntyspot.boundary.ExecutionVenueAdapter`/
 `QuoteSource`/`ChainTruthSource` for the Ink chain (EVM). "Shadow" means it
@@ -40,12 +40,13 @@ common block, pins the verified pool bytecode hash and factory identity, and
 persists only canonical market observations and shadow decisions. It does not
 discover assets or venues and does not simulate transaction construction.
 
-## V0C — Solana shadow
+## V0C — Solana shadow (current)
 
-A Jupiter-based adapter for Solana SPL / Token-2022 spot, shadow mode only.
-Exercises the `SolanaInstrumentRef` identity path already present in V0A
-(cluster, mint address, token program) against a second, structurally
-different chain namespace.
+A bounded Jupiter Swap V2 and finalized Solana RPC adapter for Solana SPL /
+Token-2022 spot, shadow mode only. It exercises the `SolanaInstrumentRef`
+identity path already present in V0A (cluster, mint address, token program),
+uses no ticker lookup, and records explicit route/program and version-0/ALT
+semantics for deterministic replay.
 
 ## V0D — Robinhood shadow
 
