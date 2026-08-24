@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qntyspot"
+version = "0.0.1a0"
+description = "QntySpot V0A - offline deterministic core for a future policy-bound spot execution runtime"
+requires-python = ">=3.11"
+license = { text = "UNLICENSED" }
+dependencies = []
+
+# V0A DEPENDENCY BOUNDARY (enforced by tests/test_no_network.py):
+#   no web3, no viem, no solana/solders, no HTTP client, no database server.
+#   Standard library only. SQLite is the persistence substrate.
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[tool.setuptools.packages.find]
+include = ["qntyspot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"

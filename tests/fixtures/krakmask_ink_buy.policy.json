@@ -1,0 +1,64 @@
+{
+  "schema": "qntyspot.policy.v0",
+  "policy_name": "krakmask-ink-buy-v0a-fixture",
+  "side": "BUY",
+  "base": {
+    "ref": {
+      "namespace": "evm",
+      "chain_id": 57073,
+      "contract_address": "0xc0ffee0000000000000000000000000000000001"
+    },
+    "decimals": 18,
+    "display_symbol": "KRAKMASK"
+  },
+  "quote": {
+    "ref": {
+      "namespace": "evm",
+      "chain_id": 57073,
+      "contract_address": "0xc0ffee0000000000000000000000000000000002"
+    },
+    "decimals": 6,
+    "display_symbol": "USDC"
+  },
+  "entry_ladder": {
+    "levels": [
+      { "level_id": "E1", "trigger_price": "0.95", "input_amount": "100" },
+      { "level_id": "E2", "trigger_price": "0.85", "input_amount": "100" },
+      { "level_id": "E3", "trigger_price": "0.75", "input_amount": "100" }
+    ]
+  },
+  "exit_ladder": {
+    "levels": [
+      { "level_id": "X1", "trigger_price": "1.2", "input_ratio": "0.5" },
+      { "level_id": "X2", "trigger_price": "1.5", "input_ratio": "0.5" }
+    ]
+  },
+  "capital": {
+    "allocation_quote": "300",
+    "per_order_cap_quote": "150",
+    "per_instrument_cap_quote": "500",
+    "per_network_cap_quote": "800",
+    "global_portfolio_cap_quote": "1000",
+    "reserved_cash_quote": "100"
+  },
+  "limits": {
+    "max_executable_price": "1.1",
+    "min_executable_price": "1",
+    "max_price_impact_bps": 150,
+    "max_slippage_bps": 50
+  },
+  "timing": {
+    "valid_from_epoch_s": 1700000000,
+    "expiry_epoch_s": 1800000000,
+    "quote_ttl_s": 30
+  },
+  "reentry": {
+    "max_cycles": 5,
+    "rearm_hysteresis_bps": 300,
+    "rearm_cooldown_s": 3600
+  },
+  "recycling": {
+    "profit_recycle_ratio": "0.5",
+    "banked_profit_ratio": "0.5"
+  }
+}
