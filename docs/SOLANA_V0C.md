@@ -46,9 +46,13 @@ Token-2022 are distinct identity values even if the mint address is the same.
 - Instruction data is validated as canonical base64 and stored only as length
   plus SHA-256 evidence. It is never parsed into or treated as a trusted
   executable object.
-- The Jupiter `otherAmountThreshold` must equal the exact floor of the
-  reported output after the requested slippage. Policy output bounds remain
-  stricter where applicable and use the core's ceiling direction.
+- For an `ExactIn` quote, QntySpot computes its own minimum output as
+  `ceil(outAmount * (10000 - max_slippage_bps) / 10000)` using integer
+  arithmetic. The venue's `otherAmountThreshold` must satisfy
+  `0 < threshold <= outAmount` and must be at least that policy minimum. A
+  stricter venue threshold is accepted; a looser one fails closed. The frozen
+  observation records `requested_slippage_bps`,
+  `policy_min_threshold_atomic`, and `venue_threshold_atomic` separately.
 - A non-empty `addressesByLookupTableAddress` map is recorded as explicit
   `VERSION_0_ADDRESS_LOOKUP_TABLES`. A missing map fails closed. An empty map
   is recorded as `INLINE_ADDRESSES_ONLY_NOT_A_LEGACY_ASSERTION`.

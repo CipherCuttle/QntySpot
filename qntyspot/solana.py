@@ -56,6 +56,7 @@ __all__ = [
     "SPL_TOKEN_PROGRAM_ADDRESS",
     "TOKEN_2022_PROGRAM_ADDRESS",
     "QUALIFICATION_TAKER_ADDRESS",
+    "policy_min_threshold_atomic",
     "SolanaRpcClient",
     "JupiterV2Client",
     "SolanaMarketObservationV0",
@@ -80,9 +81,33 @@ _BASE58_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _ATOMIC_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _INTEGER_RE = re.compile(r"^(?:0|[1-9][0-9]*)$")
 _MAX_U64 = (1 << 64) - 1
+_BPS_DENOMINATOR = 10_000
 _MAX_INSTRUCTION_ACCOUNTS = 256
 _MAX_LOOKUP_ADDRESSES = 256
 _MAX_ROUTE_STEPS = 64
+
+
+def policy_min_threshold_atomic(out_amount_atomic: int, max_slippage_bps: int) -> int:
+    """Return the conservative ExactIn minimum output in atomic units.
+
+    The policy owns this bound.  It is deliberately integer-only and rounds up
+    whenever the exact percentage boundary is fractional, so the resulting
+    transaction guard can never be looser than policy.
+    """
+    if (
+        isinstance(out_amount_atomic, bool)
+        or not isinstance(out_amount_atomic, int)
+        or not 0 < out_amount_atomic <= _MAX_U64
+    ):
+        raise SolanaError("out_amount_atomic must be a positive uint64")
+    if (
+        isinstance(max_slippage_bps, bool)
+        or not isinstance(max_slippage_bps, int)
+        or not 0 <= max_slippage_bps <= _BPS_DENOMINATOR
+    ):
+        raise SolanaError("max_slippage_bps must be in [0, 10000]")
+    numerator = out_amount_atomic * (_BPS_DENOMINATOR - max_slippage_bps)
+    return (numerator + _BPS_DENOMINATOR - 1) // _BPS_DENOMINATOR
 
 
 def _base58_decode(value: Any, *, field: str, allow_zero: bool = True) -> bytes:
@@ -523,7 +548,7 @@ def _parse_build_response(
         raise SafeHaltError("Jupiter quote mint identity does not match the requested pair")
     in_amount = _atomic(raw["inAmount"], field="inAmount", positive=True)
     out_amount = _atomic(raw["outAmount"], field="outAmount", positive=True)
-    threshold = _atomic(raw["otherAmountThreshold"], field="otherAmountThreshold", positive=True)
+    threshold = _atomic(raw["otherAmountThreshold"], field="otherAmountThreshold")
     if in_amount != amount_atomic:
         raise SafeHaltError("Jupiter quote input amount does not match the exact requested size")
     if raw["swapMode"] != "ExactIn":
@@ -531,9 +556,11 @@ def _parse_build_response(
     response_slippage = _json_integer(raw["slippageBps"], field="slippageBps", maximum=10_000)
     if response_slippage != slippage_bps:
         raise SafeHaltError("Jupiter response slippage does not match the request")
-    expected_threshold = out_amount * (10_000 - slippage_bps) // 10_000
-    if threshold != expected_threshold:
-        raise SafeHaltError("Jupiter slippage threshold has unexpected rounding")
+    policy_min_threshold = policy_min_threshold_atomic(out_amount, slippage_bps)
+    if not 0 < threshold <= out_amount:
+        raise SafeHaltError("Jupiter ExactIn threshold must be in (0, outAmount]")
+    if threshold < policy_min_threshold:
+        raise SafeHaltError("Jupiter ExactIn threshold is below the QntySpot policy minimum")
     impact = parse_canonical_decimal(raw["priceImpactPct"], field="priceImpactPct")
     if impact < 0 or impact >= 1:
         raise SafeHaltError("Jupiter price impact is outside [0, 1)")
@@ -570,6 +597,12 @@ def _parse_build_response(
         "output_mint": output_mint,
         "in_amount_atomic": in_amount,
         "out_amount_atomic": out_amount,
+        "requested_slippage_bps": response_slippage,
+        "policy_min_threshold_atomic": policy_min_threshold,
+        "venue_threshold_atomic": threshold,
+        # These aliases keep the internal build result compatible with the
+        # existing adapter seam while the persisted contract uses explicit
+        # policy/venue names.
         "threshold_atomic": threshold,
         "slippage_bps": response_slippage,
         "price_impact": impact,
@@ -719,8 +752,10 @@ def _parse_lookup_mapping(raw: Any) -> tuple[list[dict[str, Any]], str]:
         if not isinstance(addresses, list) or len(addresses) > _MAX_LOOKUP_ADDRESSES:
             raise SolanaProtocolError("lookup table address list is malformed or too large")
         normalized = [_pubkey(address, field="lookup address", allow_zero=False) for address in addresses]
-        if len(set(normalized)) != len(normalized):
-            raise SafeHaltError("lookup table contains duplicate addresses")
+        # Jupiter may list an address once per instruction reference. The
+        # list is evidence of the venue's mapping, not a serialized ALT;
+        # preserve its order and multiplicity without treating repeated
+        # references as an economic or identity conflict.
         evidence.append({"addresses": normalized, "table_address": table})
     if evidence:
         return evidence, "VERSION_0_ADDRESS_LOOKUP_TABLES"
@@ -902,8 +937,9 @@ class SolanaMarketObservationV0:
     output_decimals: int
     requested_input_atomic: int
     quoted_output_atomic: int
-    jupiter_threshold_atomic: int
-    slippage_bps: int
+    requested_slippage_bps: int
+    policy_min_threshold_atomic: int
+    venue_threshold_atomic: int
     price_impact_pct: Fraction
     slot_before: int
     mint_accounts_slot: int
@@ -940,12 +976,32 @@ class SolanaMarketObservationV0:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 36:
                 raise SolanaError(f"{name} is invalid")
-        for name in ("requested_input_atomic", "quoted_output_atomic", "jupiter_threshold_atomic"):
+        for name in (
+            "requested_input_atomic",
+            "quoted_output_atomic",
+            "policy_min_threshold_atomic",
+            "venue_threshold_atomic",
+        ):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise SolanaError(f"{name} must be positive")
-        if isinstance(self.slippage_bps, bool) or not isinstance(self.slippage_bps, int) or not 0 <= self.slippage_bps <= 10_000:
-            raise SolanaError("slippage_bps is invalid")
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _MAX_U64:
+                raise SolanaError(f"{name} must be a uint64")
+        if self.requested_input_atomic <= 0 or self.quoted_output_atomic <= 0:
+            raise SolanaError("requested and quoted atomic amounts must be positive")
+        if (
+            isinstance(self.requested_slippage_bps, bool)
+            or not isinstance(self.requested_slippage_bps, int)
+            or not 0 <= self.requested_slippage_bps <= _BPS_DENOMINATOR
+        ):
+            raise SolanaError("requested_slippage_bps is invalid")
+        expected_policy_min = policy_min_threshold_atomic(
+            self.quoted_output_atomic, self.requested_slippage_bps
+        )
+        if self.policy_min_threshold_atomic != expected_policy_min:
+            raise SolanaError("policy_min_threshold_atomic is not canonical")
+        if not 0 < self.venue_threshold_atomic <= self.quoted_output_atomic:
+            raise SafeHaltError("venue threshold must be in (0, quoted output]")
+        if self.venue_threshold_atomic < self.policy_min_threshold_atomic:
+            raise SafeHaltError("venue threshold is below the QntySpot policy minimum")
         if not isinstance(self.price_impact_pct, Fraction) or not 0 <= self.price_impact_pct < 1:
             raise SolanaError("price_impact_pct is invalid")
         if self.slot_before < 0 or self.mint_accounts_slot < self.slot_before or self.slot_after < self.mint_accounts_slot:
@@ -1005,7 +1061,7 @@ class SolanaMarketObservationV0:
             "jupiter_fetched_at_epoch_s": self.jupiter_fetched_at_epoch_s,
             "jupiter_fetched_at_nanos": self.jupiter_fetched_at_nanos,
             "jupiter_last_valid_block_height": self.jupiter_last_valid_block_height,
-            "jupiter_threshold_atomic": str(self.jupiter_threshold_atomic),
+            "policy_min_threshold_atomic": str(self.policy_min_threshold_atomic),
             "lookup_table_evidence": [dict(item) for item in self.lookup_table_evidence],
             "mint_accounts_slot": self.mint_accounts_slot,
             "mint_account_evidence": [dict(item) for item in self.mint_account_evidence],
@@ -1022,9 +1078,20 @@ class SolanaMarketObservationV0:
             "side": self.side.value,
             "slot_after": self.slot_after,
             "slot_before": self.slot_before,
-            "slippage_bps": self.slippage_bps,
+            "requested_slippage_bps": self.requested_slippage_bps,
             "transaction_semantics": self.transaction_semantics,
+            "venue_threshold_atomic": str(self.venue_threshold_atomic),
         }
+
+    @property
+    def jupiter_threshold_atomic(self) -> int:
+        """Compatibility view of the venue-imposed ExactIn threshold."""
+        return self.venue_threshold_atomic
+
+    @property
+    def slippage_bps(self) -> int:
+        """Compatibility view of the requested policy slippage."""
+        return self.requested_slippage_bps
 
     def digest(self) -> str:
         return digest_object(self.canonical_object())
@@ -1037,10 +1104,11 @@ class SolanaMarketObservationV0:
             "block_height_after", "block_height_before", "cluster", "input_decimals", "input_mint",
             "input_token_program", "instruction_evidence", "jupiter_blockhash", "jupiter_endpoint",
             "jupiter_fetched_at_epoch_s", "jupiter_fetched_at_nanos", "jupiter_last_valid_block_height",
-            "jupiter_threshold_atomic", "lookup_table_evidence", "mint_accounts_slot", "mint_account_evidence",
+            "lookup_table_evidence", "mint_accounts_slot", "mint_account_evidence",
             "output_decimals", "output_mint", "output_token_program", "price_impact_pct", "program_ids",
             "quoted_output_atomic", "requested_input_atomic", "route_plan", "rpc_endpoint", "schema",
-            "side", "slot_after", "slot_before", "slippage_bps", "transaction_semantics",
+            "policy_min_threshold_atomic", "requested_slippage_bps", "side", "slot_after", "slot_before",
+            "transaction_semantics", "venue_threshold_atomic",
         }
         if set(obj) != required:
             raise SolanaError("observation fields are not exact")
@@ -1054,15 +1122,22 @@ class SolanaMarketObservationV0:
         int_fields = (
             "block_height_after", "block_height_before", "input_decimals", "jupiter_fetched_at_epoch_s",
             "jupiter_fetched_at_nanos", "jupiter_last_valid_block_height", "mint_accounts_slot", "output_decimals",
-            "slot_after", "slot_before", "slippage_bps",
+            "requested_slippage_bps", "slot_after", "slot_before",
         )
         for field in int_fields:
-            _json_integer(obj[field], field=field, maximum=_MAX_U64 if field not in {"input_decimals", "output_decimals", "slippage_bps", "jupiter_fetched_at_nanos"} else (36 if field.endswith("decimals") else (10_000 if field == "slippage_bps" else 999_999_999)))
-        for field in ("jupiter_threshold_atomic", "quoted_output_atomic", "requested_input_atomic"):
-            _atomic(obj[field], field=field, positive=True)
-        expected_threshold = int(obj["quoted_output_atomic"]) * (10_000 - obj["slippage_bps"]) // 10_000
-        if int(obj["jupiter_threshold_atomic"]) != expected_threshold:
-            raise SolanaError("persisted Jupiter threshold has unexpected rounding")
+            if field.endswith("decimals"):
+                maximum = 36
+            elif field == "requested_slippage_bps":
+                maximum = _BPS_DENOMINATOR
+            elif field == "jupiter_fetched_at_nanos":
+                maximum = 999_999_999
+            else:
+                maximum = _MAX_U64
+            _json_integer(obj[field], field=field, maximum=maximum)
+        _atomic(obj["quoted_output_atomic"], field="quoted_output_atomic", positive=True)
+        _atomic(obj["requested_input_atomic"], field="requested_input_atomic", positive=True)
+        _atomic(obj["policy_min_threshold_atomic"], field="policy_min_threshold_atomic")
+        _atomic(obj["venue_threshold_atomic"], field="venue_threshold_atomic")
         if not isinstance(obj["route_plan"], list) or not isinstance(obj["instruction_evidence"], list) or not isinstance(obj["lookup_table_evidence"], list) or not isinstance(obj["mint_account_evidence"], list) or not isinstance(obj["program_ids"], list):
             raise SolanaError("observation evidence arrays are malformed")
         if any(not isinstance(item, dict) for item in obj["route_plan"] + obj["instruction_evidence"] + obj["lookup_table_evidence"] + obj["mint_account_evidence"]):
@@ -1074,7 +1149,9 @@ class SolanaMarketObservationV0:
             input_token_program=input_program, output_token_program=output_program,
             input_decimals=obj["input_decimals"], output_decimals=obj["output_decimals"],
             requested_input_atomic=int(obj["requested_input_atomic"]), quoted_output_atomic=int(obj["quoted_output_atomic"]),
-            jupiter_threshold_atomic=int(obj["jupiter_threshold_atomic"]), slippage_bps=obj["slippage_bps"],
+            requested_slippage_bps=obj["requested_slippage_bps"],
+            policy_min_threshold_atomic=int(obj["policy_min_threshold_atomic"]),
+            venue_threshold_atomic=int(obj["venue_threshold_atomic"]),
             price_impact_pct=_parse_ratio(obj["price_impact_pct"], field="price_impact_pct"),
             slot_before=obj["slot_before"], mint_accounts_slot=obj["mint_accounts_slot"], slot_after=obj["slot_after"],
             block_height_before=obj["block_height_before"], block_height_after=obj["block_height_after"],
@@ -1202,8 +1279,9 @@ class SolanaShadowAdapter:
             output_decimals=int(account_evidence[1]["decimals"]),
             requested_input_atomic=build["in_amount_atomic"],
             quoted_output_atomic=build["out_amount_atomic"],
-            jupiter_threshold_atomic=build["threshold_atomic"],
-            slippage_bps=build["slippage_bps"],
+            requested_slippage_bps=build["requested_slippage_bps"],
+            policy_min_threshold_atomic=build["policy_min_threshold_atomic"],
+            venue_threshold_atomic=build["venue_threshold_atomic"],
             price_impact_pct=build["price_impact"],
             slot_before=before["slot"],
             mint_accounts_slot=account_slot,
@@ -1250,6 +1328,15 @@ class SolanaShadowAdapter:
             raise SafeHaltError("frozen Solana observation decimals do not match policy")
         if observation.requested_input_atomic != bounds.max_input_atomic:
             raise SafeHaltError("frozen Solana observation input size does not match the intent")
+        if observation.requested_slippage_bps != bounds.max_slippage_bps:
+            raise SafeHaltError("frozen Solana observation slippage does not match policy")
+        expected_policy_min = policy_min_threshold_atomic(
+            observation.quoted_output_atomic, bounds.max_slippage_bps
+        )
+        if observation.policy_min_threshold_atomic != expected_policy_min:
+            raise SafeHaltError("frozen Solana policy threshold does not match policy")
+        if observation.venue_threshold_atomic < expected_policy_min:
+            raise SafeHaltError("frozen Solana venue threshold is looser than policy")
 
     def quote(self, bounds: EconomicBounds, *, now_epoch_s: int) -> QuoteV0:
         observation = self._require_observation(None)
@@ -1263,6 +1350,15 @@ class SolanaShadowAdapter:
             raise SafeHaltError("quote side does not match the frozen Solana observation")
         if observation.requested_input_atomic != bounds.max_input_atomic:
             raise SafeHaltError("quote input size does not match the frozen Solana observation")
+        if observation.requested_slippage_bps != bounds.max_slippage_bps:
+            raise SafeHaltError("quote slippage does not match the frozen Solana policy")
+        expected_policy_min = policy_min_threshold_atomic(
+            observation.quoted_output_atomic, bounds.max_slippage_bps
+        )
+        if observation.policy_min_threshold_atomic != expected_policy_min:
+            raise SafeHaltError("quote policy threshold does not match policy")
+        if observation.venue_threshold_atomic < expected_policy_min:
+            raise SafeHaltError("quote venue threshold is looser than policy")
         if now_epoch_s < observation.jupiter_fetched_at_epoch_s:
             raise SafeHaltError("Jupiter quote is from the future relative to the supplied time")
         if now_epoch_s - observation.jupiter_fetched_at_epoch_s > self.max_quote_age_s:

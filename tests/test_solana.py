@@ -29,6 +29,7 @@ from qntyspot.solana import (
     SolanaShadowAdapter,
     load_decision,
     load_observation,
+    policy_min_threshold_atomic,
     persist_decision,
     persist_observation,
     replay_shadow_decision,
@@ -263,6 +264,9 @@ def test_live_shape_reaches_would_execute_and_records_exact_identity() -> None:
     assert observation.input_token_program.value == "SPL_TOKEN"
     assert observation.transaction_semantics == "VERSION_0_ADDRESS_LOOKUP_TABLES"
     assert observation.program_ids == (SPL_TOKEN_PROGRAM_ADDRESS,)
+    assert observation.requested_slippage_bps == 50
+    assert observation.policy_min_threshold_atomic == 149_250_000
+    assert observation.venue_threshold_atomic == 149_250_000
     assert decision.economic_action_id
 
 
@@ -435,11 +439,158 @@ def test_replay_and_persistence_are_byte_deterministic(tmp_path: Path) -> None:
     assert replayed.canonical_object() == decision.canonical_object()
 
 
-def test_jupiter_threshold_rounding_is_floor_and_policy_bound_is_separate() -> None:
+@pytest.mark.parametrize(
+    ("out_amount", "slippage_bps", "expected"),
+    [
+        (10_000, 0, 10_000),
+        (94_834_630, 50, 94_360_457),
+        (1, 1, 1),
+        (1, 10_000, 0),
+        ((1 << 64) - 1, 0, (1 << 64) - 1),
+        ((1 << 64) - 1, 10_000, 0),
+    ],
+)
+def test_exact_in_policy_threshold_is_integer_ceiling(
+    out_amount: int, slippage_bps: int, expected: int
+) -> None:
+    assert policy_min_threshold_atomic(out_amount, slippage_bps) == expected
+
+
+def _parse_threshold_response(*, out_amount: int, threshold: int, slippage_bps: int) -> dict[str, object]:
+    response = build_response()
+    response["outAmount"] = str(out_amount)
+    response["otherAmountThreshold"] = str(threshold)
+    response["slippageBps"] = slippage_bps
+    response["routePlan"][0]["swapInfo"]["outAmount"] = str(out_amount)  # type: ignore[index]
+    client = JupiterV2Client(
+        JUPITER_SWAP_V2_BUILD_ENDPOINT,
+        transport=FakeJupiter(response),
+    )
+    return client.build(
+        input_mint=WSOL,
+        output_mint=USDC,
+        amount_atomic=1_000_000_000,
+        taker=QUALIFICATION_TAKER_ADDRESS,
+        slippage_bps=slippage_bps,
+    )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "accepted"),
+    [
+        (94_360_456, False),
+        (94_360_457, True),
+        (94_360_458, True),
+        (94_834_630, True),
+        (94_834_631, False),
+        (0, False),
+    ],
+)
+def test_exact_in_threshold_is_policy_ceiling_boundary_and_not_venue_equality(
+    threshold: int, accepted: bool
+) -> None:
+    if accepted:
+        parsed = _parse_threshold_response(
+            out_amount=94_834_630, threshold=threshold, slippage_bps=50
+        )
+        assert parsed["requested_slippage_bps"] == 50
+        assert parsed["policy_min_threshold_atomic"] == 94_360_457
+        assert parsed["venue_threshold_atomic"] == threshold
+    else:
+        with pytest.raises(SafeHaltError):
+            _parse_threshold_response(
+                out_amount=94_834_630, threshold=threshold, slippage_bps=50
+            )
+
+
+def test_exact_in_threshold_boundary_values_and_large_uint64_output() -> None:
+    assert _parse_threshold_response(out_amount=7, threshold=7, slippage_bps=0)[
+        "policy_min_threshold_atomic"
+    ] == 7
+    assert _parse_threshold_response(out_amount=7, threshold=1, slippage_bps=10_000)[
+        "policy_min_threshold_atomic"
+    ] == 0
+    assert _parse_threshold_response(
+        out_amount=(1 << 64) - 1, threshold=(1 << 64) - 1, slippage_bps=0
+    )["venue_threshold_atomic"] == (1 << 64) - 1
+
+
+def test_frozen_r1_jupiter_response_replays_through_repaired_parser() -> None:
+    evidence_root = ROOT / "qualifications/solana_v0c/RAW_EVIDENCE_V0"
+    store = RawEvidenceStore(evidence_root)
+    records = RawEvidenceStore.load_index(ROOT / "qualifications/solana_v0c/RAW_EVIDENCE_INDEX_V0.json")
+    record = next(item for item in records if item.request["method"] == "GET")
+    raw = store.read(record)
+    client = JupiterV2Client(
+        JUPITER_SWAP_V2_BUILD_ENDPOINT,
+        transport=lambda _url, _query: raw,
+    )
+    parsed = client.build(
+        input_mint=WSOL,
+        output_mint=USDC,
+        amount_atomic=1_000_000_000,
+        taker=QUALIFICATION_TAKER_ADDRESS,
+        slippage_bps=50,
+    )
+    assert parsed["out_amount_atomic"] == 94_834_630
+    assert parsed["requested_slippage_bps"] == 50
+    assert parsed["policy_min_threshold_atomic"] == 94_360_457
+    assert parsed["venue_threshold_atomic"] == 94_360_457
+
+
+def test_frozen_r1_response_produces_observation_decision_and_deterministic_replay() -> None:
+    evidence_root = ROOT / "qualifications/solana_v0c/RAW_EVIDENCE_V0"
+    store = RawEvidenceStore(evidence_root)
+    records = RawEvidenceStore.load_index(ROOT / "qualifications/solana_v0c/RAW_EVIDENCE_INDEX_V0.json")
+    record = next(item for item in records if item.request["method"] == "GET")
+    raw = store.read(record)
+    rpc = SolanaRpcClient(SOLANA_MAINNET_RPC_ENDPOINT, transport=FakeSolana())
+    jupiter = JupiterV2Client(
+        JUPITER_SWAP_V2_BUILD_ENDPOINT,
+        transport=lambda _url, _query: raw,
+    )
+    adapter = SolanaShadowAdapter(rpc, jupiter)
+    policy = load_policy_file(POLICY_PATH)
+    observation = adapter.observe(
+        policy,
+        "r1-frozen-replay",
+        "SOL-USDC-1",
+        now_epoch_s=1_787_555_056,
+        taker=QUALIFICATION_TAKER_ADDRESS,
+    )
+    decision = adapter.shadow_decision(
+        policy,
+        "r1-frozen-replay",
+        "SOL-USDC-1",
+        now_epoch_s=1_787_555_056,
+        observation=observation,
+    )
+    replayed = replay_shadow_decision(
+        policy,
+        observation,
+        "r1-frozen-replay",
+        "SOL-USDC-1",
+        now_epoch_s=1_787_555_056,
+    )
+    assert observation.schema == "SOLANA_MARKET_OBSERVATION_V0"
+    assert decision.schema == "SHADOW_DECISION_V0"
+    assert decision.decision == "ABSTAIN"
+    assert decision.reason_code == "MIN_OUTPUT_BOUND+MAX_EXECUTABLE_PRICE"
+    assert replayed.canonical_object() == decision.canonical_object()
+
+
+def test_jupiter_stricter_threshold_is_accepted_and_looser_threshold_halts() -> None:
     response = build_response()
     response["otherAmountThreshold"] = "149250001"
     policy = load_policy_file(POLICY_PATH)
-    with pytest.raises(SafeHaltError, match="rounding"):
+    observation = make_adapter(jupiter_response=response).observe(
+        policy, "cycle", "SOL-USDC-1", now_epoch_s=1_700_000_100, taker=QUALIFICATION_TAKER_ADDRESS
+    )
+    assert observation.policy_min_threshold_atomic == 149_250_000
+    assert observation.venue_threshold_atomic == 149_250_001
+
+    response["otherAmountThreshold"] = "149249999"
+    with pytest.raises(SafeHaltError, match="policy minimum"):
         make_adapter(jupiter_response=response).observe(
             policy, "cycle", "SOL-USDC-1", now_epoch_s=1_700_000_100, taker=QUALIFICATION_TAKER_ADDRESS
         )
