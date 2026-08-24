@@ -5,14 +5,14 @@ Read this before modifying anything in this repository.
 ## Phase
 
 ```
-ACTIVE_PHASE = QNTY_SPOT_V0A_OFFLINE_CORE_BOOTSTRAP
-AUTHORITY    = OFFLINE_CORE_ONLY
+ACTIVE_PHASE = QNTY_SPOT_V0B_INK_SHADOW
+AUTHORITY    = INK_SHADOW_READ_ONLY
 ```
 
 See [docs/AUTHORITY.md](docs/AUTHORITY.md) for the full, binding statement.
-The short version: this repository has no network client, no signer, no key
-handling, and no live-capital authority — from itself or from any other repo
-in this workspace.
+The short version: this repository has one bounded public-read Ink client, no
+signer, no key handling, and no live-capital authority — from itself or from
+any other repo in this workspace.
 
 ## Authority boundary with sibling repositories
 
@@ -35,8 +35,9 @@ capital, signing, or trading authority, stop and treat it as a
 
 ## Rules for this phase
 
-- No RPC library, HTTP client, or database server dependency. Standard
-  library plus `pytest`. SQLite is the persistence substrate.
+- No third-party RPC library, HTTP client, or database server dependency. The
+  bounded Ink adapter uses the standard library plus `pytest`; SQLite remains
+  the V0A persistence substrate.
 - No private-key or wallet-file access, anywhere, including in tests.
 - No binary floating point for any economic quantity. Amounts are integer
   atomic units; prices and ratios are exact `Fraction`s; JSON floats are
@@ -53,10 +54,11 @@ capital, signing, or trading authority, stop and treat it as a
   never to a retry or a speculative reconstruction — see
   `qntyspot/ledger/recovery.py`.
 - `tests/test_no_network.py` statically scans every module in `qntyspot/` for
-  forbidden imports (network, signing, EVM/Solana client libraries,
-  non-determinism) and for ambient-secret access. `tests/conftest.py`
-  additionally disables the `socket` module for the whole test session. Keep
-  both green; do not weaken either to make a change land.
+  forbidden signing/key/venue-client imports, non-determinism, and
+  ambient-secret access. Public standard-library transport is allowed only for
+  the bounded Ink read path. `tests/conftest.py` additionally disables the
+  `socket` module for the whole offline unit-test session. Keep both green; do
+  not weaken either to make a change land.
 
 ## Before extending the domain model or the ladder
 

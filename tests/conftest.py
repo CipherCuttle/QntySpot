@@ -1,4 +1,4 @@
-"""Shared fixtures, plus the session-wide proof that V0A needs no network.
+"""Shared fixtures, plus the session-wide proof that offline tests stay offline.
 
 The socket guard is installed for the entire test session. It is not a mock of
 anything the code under test uses -- nothing in ``qntyspot`` imports ``socket``
@@ -33,9 +33,7 @@ class _NetworkAccessDenied(RuntimeError):
 
 
 def _denied(*_args: Any, **_kwargs: Any) -> Any:
-    raise _NetworkAccessDenied(
-        "V0A is OFFLINE_CORE_ONLY: the test suite must not require network access"
-    )
+    raise _NetworkAccessDenied("offline unit tests must not require network access")
 
 
 @pytest.fixture(scope="session", autouse=True)

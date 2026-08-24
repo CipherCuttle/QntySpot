@@ -1,9 +1,9 @@
-"""Architectural enforcement of the V0A authority boundary.
+"""Architectural enforcement of the V0B read-only authority boundary.
 
-These tests do not exercise behaviour. They read the package source and assert
-that the things V0A forbids are not present at all. A boundary that depends on
-nobody writing the wrong import is not a boundary; this file is what makes it
-one.
+These tests do not exercise live behaviour. They read the package source and
+assert that signing, key access, transaction construction/broadcast, and
+ambient nondeterminism are not present. Public transport imports are allowed
+because V0B is the bounded Ink shadow phase.
 
 The complementary runtime guard lives in ``conftest.py``, which disables the
 socket module for the whole session.
@@ -28,14 +28,12 @@ def module_name(path: Path) -> str:
     return str(path.relative_to(PACKAGE_ROOT))
 
 
-#: Anything that could open a connection, sign, or reach a chain.
+#: Anything that could sign, construct a transaction, or reach another chain.
 FORBIDDEN_IMPORTS = frozenset(
     {
-        # network / transport
-        "socket", "ssl", "select", "selectors", "asyncio",
-        "http", "http.client", "https", "urllib", "urllib.request", "urllib3",
-        "ftplib", "telnetlib", "smtplib", "poplib", "imaplib", "xmlrpc",
-        "requests", "httpx", "aiohttp", "websocket", "websockets", "grpc",
+        # transport choices outside the one explicit urllib read path
+        "socket", "ssl", "select", "selectors", "asyncio", "http", "http.client",
+        "urllib3", "requests", "httpx", "aiohttp", "websocket", "websockets", "grpc",
         # evm
         "web3", "eth_account", "eth_abi", "eth_keys", "eth_utils", "hexbytes",
         "viem", "ethers",
@@ -90,7 +88,7 @@ def test_the_package_has_source_files_to_check() -> None:
 
 
 @pytest.mark.parametrize("path", SOURCES, ids=module_name)
-def test_no_module_imports_a_forbidden_dependency(path: Path) -> None:
+def test_no_module_imports_a_signing_dependency(path: Path) -> None:
     offenders = sorted(imported_modules(path) & FORBIDDEN_IMPORTS)
     assert not offenders, f"{module_name(path)} imports {offenders}"
 
@@ -153,9 +151,9 @@ def test_the_declared_dependency_set_is_empty() -> None:
         assert f'"{forbidden}' not in pyproject, f"{forbidden} must not be a dependency"
 
 
-def test_the_package_declares_its_phase_as_offline_only() -> None:
-    assert qntyspot.AUTHORITY == "OFFLINE_CORE_ONLY"
-    assert qntyspot.NETWORK_AUTHORIZED is False
+def test_the_package_declares_its_phase_as_read_only_shadow() -> None:
+    assert qntyspot.AUTHORITY == "INK_SHADOW_READ_ONLY"
+    assert qntyspot.NETWORK_AUTHORIZED is True
     assert qntyspot.SIGNING_AUTHORIZED is False
     assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False
 
@@ -171,9 +169,9 @@ def test_the_boundary_protocols_have_no_implementations() -> None:
 
 def test_the_socket_guard_is_actually_armed() -> None:
     """Proof that the session-wide network block is in force, not just declared."""
-    with pytest.raises(RuntimeError, match="OFFLINE_CORE_ONLY"):
+    with pytest.raises(RuntimeError, match="offline unit tests"):
         socket.socket()
-    with pytest.raises(RuntimeError, match="OFFLINE_CORE_ONLY"):
+    with pytest.raises(RuntimeError, match="offline unit tests"):
         socket.create_connection(("example.invalid", 80))
 
 

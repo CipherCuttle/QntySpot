@@ -1,11 +1,10 @@
-"""QntySpot -- offline deterministic core for a future policy-bound spot
-execution runtime.
+"""QntySpot -- deterministic policy-bound spot shadow runtime.
 
-PHASE: V0A -- OFFLINE_CORE_ONLY
---------------------------------
-This package contains no RPC client, no HTTP client, no signer, no key
-handling, no transaction encoder and no venue integration. It cannot place an
-order, and it holds no live-capital authority from any other repository.
+PHASE: V0B -- INK_SHADOW_READ_ONLY
+----------------------------------
+This package contains one bounded public-read Ink adapter. It has no signer,
+no key handling, no transaction encoder, no transaction broadcast surface,
+and no live-capital authority from any other repository.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger
@@ -23,8 +22,8 @@ __version__ = "0.0.1a0"
 
 #: Machine-readable phase marker. Anything that reads this and proceeds to a
 #: network or signing operation is violating the phase contract.
-AUTHORITY = "OFFLINE_CORE_ONLY"
-NETWORK_AUTHORIZED = False
+AUTHORITY = "INK_SHADOW_READ_ONLY"
+NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False
 
@@ -38,6 +37,12 @@ from .errors import (  # noqa: E402
     PolicyMissingError,
     QntySpotError,
     ReplayDivergenceError,
+    InkError,
+    RpcError,
+    RpcProtocolError,
+    RpcResponseTooLargeError,
+    RpcTimeoutError,
+    RpcTransportError,
     SafeHaltError,
     StateTransitionError,
 )
@@ -85,6 +90,12 @@ __all__ = [
     "BudgetExceededError",
     "ReplayDivergenceError",
     "SafeHaltError",
+    "InkError",
+    "RpcError",
+    "RpcProtocolError",
+    "RpcResponseTooLargeError",
+    "RpcTimeoutError",
+    "RpcTransportError",
     "Side",
     "LadderKind",
     "LadderLevelV0",

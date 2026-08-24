@@ -1,9 +1,9 @@
 """The chain / venue truth boundary.
 
-NOTHING IN THIS MODULE IS IMPLEMENTED. These are typing protocols that
-describe where a future adapter attaches. There is no default implementation,
-no registry, no discovery, and no import of any network library. Importing
-this module cannot cause a request, a signature, or a key read.
+These are typing protocols that describe where adapters attach. There is no
+default implementation, no registry, and no discovery. Importing this module
+cannot cause a request, a signature, or a key read. V0B implements only the
+read-only Ink ``QuoteSource`` in ``qntyspot.ink``.
 
 THE RULE THESE PROTOCOLS EXIST TO ENCODE
 ----------------------------------------
@@ -49,7 +49,7 @@ __all__ = [
 
 @runtime_checkable
 class QuoteSource(Protocol):
-    """Supplies a pinned quote for an intent. NOT IMPLEMENTED IN V0A."""
+    """Supplies a pinned quote for an intent."""
 
     def quote(self, bounds: EconomicBounds, *, now_epoch_s: int) -> QuoteV0:
         ...

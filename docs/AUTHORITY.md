@@ -1,4 +1,4 @@
-# Authority — V0A
+# Authority — V0B Ink shadow
 
 This document is the binding statement of what the current phase of QntySpot
 authorizes and forbids. If any other document in this repository (or any
@@ -6,20 +6,20 @@ sibling repository) appears to contradict it, this document wins for the
 scope of `qntyspot/`.
 
 ```
-PROJECT               = QntySpot
-ACTIVE_PHASE           = QNTY_SPOT_V0A_OFFLINE_CORE_BOOTSTRAP
-AUTHORITY              = OFFLINE_CORE_ONLY
-NETWORK_AUTHORIZED     = NO
-SIGNING_AUTHORIZED     = NO
+PROJECT                 = QntySpot
+ACTIVE_PHASE            = QNTY_SPOT_V0B_INK_SHADOW
+AUTHORITY               = INK_SHADOW_READ_ONLY
+NETWORK_AUTHORIZED      = YES (Ink public JSON-RPC reads only)
+SIGNING_AUTHORIZED      = NO
 LIVE_CAPITAL_AUTHORIZED = NO
-CAPITAL_AUTHORITY      = NONE
+CAPITAL_AUTHORITY       = NONE
 ```
 
 These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 `qntyspot.NETWORK_AUTHORIZED`, `qntyspot.SIGNING_AUTHORIZED`, and
 `qntyspot.LIVE_CAPITAL_AUTHORIZED`.
 
-## V0A authorizes
+## V0B authorizes
 
 - Deterministic, immutable domain models (`qntyspot/domain.py`,
   `qntyspot/identity.py`)
@@ -31,28 +31,34 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 - Accounting primitives: atomic budget reservation, commit, release, and
   quarantine (`qntyspot/ledger/store.py`)
 - Tests, including tests that simulate crash/restart and concurrent workers
+- Bounded public reads from exactly two caller-supplied Ink JSON-RPC endpoints
+- Exact KRAKMASK/WETH9 InkySwap V2 pool observation at a common historical block
+- Deterministic constant-product market quotation and policy shadow decisions
+- Write-once canonical observation and decision evidence, plus offline replay
 
-## V0A forbids
+## V0B forbids
 
-- RPC access
-- API access
 - private-key access
 - wallet signing
 - transaction construction
 - transaction broadcast
 - live trading
-- shadow network calls
 - venue discovery
 - automatic token selection
 - bridging
 - OpenSea execution
+- Solana and Robinhood adapters
+
+The public-read implementation is limited to `qntyspot/ink.py`. It does not
+construct calldata, create a transaction object, read a key, or expose a
+submission method. Offline unit tests disable sockets for the entire session;
+the live qualification is a separate, explicitly bounded read-only command.
 
 Enforcement is not aspirational. `tests/test_no_network.py` statically scans
-every module under `qntyspot/` for forbidden imports (socket/HTTP libraries,
-`web3`, `solana`/`solders`, subprocess, non-determinism sources) and for
-ambient-secret or signing-related tokens in source code, and
-`tests/conftest.py` disables the `socket` module for the entire test session.
-Both checks are part of the required test suite.
+every module under `qntyspot/` for forbidden signing/key/venue-client imports,
+subprocess and non-determinism sources, and ambient-secret or signing-related
+tokens in source code. `tests/conftest.py` disables the `socket` module for the
+entire offline unit-test session. Both checks are part of the required suite.
 
 ## Asset selection
 
@@ -64,9 +70,8 @@ lookup, and never with judging whether a project is good, bad, legitimate, or
 likely to rug. `display_symbol` is an optional human label that explicitly
 does not participate in identity or in any digest.
 
-KRAKMASK is named in this repository only as a future user-selected Ink
-fixture, once a V0B Ink shadow adapter exists. Its presence is not an
-endorsement, a safety claim, or an assertion of legitimacy.
+KRAKMASK is present as the user-selected V0B Ink fixture. Its presence is not
+an endorsement, a safety claim, or an assertion of legitimacy.
 
 ## Authority does not flow in from sibling repositories
 
@@ -83,12 +88,10 @@ A future rule, not yet implemented:
 - reconciliation converts external truth into a canonical `FillReceiptV0`
 - ambiguity causes `SAFE_HALT`, never speculative reconstruction
 
-`qntyspot/boundary.py` defines the typing `Protocol`s a future adapter would
-implement (`QuoteSource`, `ExecutionVenueAdapter`, `ChainTruthSource`,
-`Reconciler`). None of them has an implementation in this phase, and importing
-the module cannot cause a request, a signature, or a key read —
-`tests/test_no_network.py::test_the_boundary_protocols_have_no_implementations`
-asserts this.
+`qntyspot/boundary.py` defines the typing `Protocol`s for the chain/venue
+boundary. V0B implements only `QuoteSource` through the read-only Ink shadow
+adapter. `ExecutionVenueAdapter`, `ChainTruthSource`, and `Reconciler` remain
+unimplemented.
 
 ## Changing this document
 
