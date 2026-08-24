@@ -1,12 +1,12 @@
 {
   "schema": "qntyspot.policy.v0",
-  "policy_name": "krakmask-ink-buy-v0a-fixture",
+  "policy_name": "krakmask-ink-buy-v0b-fixture",
   "side": "BUY",
   "base": {
     "ref": {
       "namespace": "evm",
       "chain_id": 57073,
-      "contract_address": "0xc0ffee0000000000000000000000000000000001"
+      "contract_address": "0x32bcb803f696c99eb263d60a05cafd8689026575"
     },
     "decimals": 18,
     "display_symbol": "KRAKMASK"
@@ -15,37 +15,37 @@
     "ref": {
       "namespace": "evm",
       "chain_id": 57073,
-      "contract_address": "0xc0ffee0000000000000000000000000000000002"
+      "contract_address": "0x4200000000000000000000000000000000000006"
     },
-    "decimals": 6,
-    "display_symbol": "USDC"
+    "decimals": 18,
+    "display_symbol": "WETH"
   },
   "entry_ladder": {
     "levels": [
-      { "level_id": "E1", "trigger_price": "0.95", "input_amount": "100" },
-      { "level_id": "E2", "trigger_price": "0.85", "input_amount": "100" },
-      { "level_id": "E3", "trigger_price": "0.75", "input_amount": "100" }
+      { "level_id": "E1", "trigger_price": "0.00000009", "input_amount": "0.0001" },
+      { "level_id": "E2", "trigger_price": "0.000000089", "input_amount": "0.0001" },
+      { "level_id": "E3", "trigger_price": "0.000000088", "input_amount": "0.0001" }
     ]
   },
   "exit_ladder": {
     "levels": [
-      { "level_id": "X1", "trigger_price": "1.2", "input_ratio": "0.5" },
-      { "level_id": "X2", "trigger_price": "1.5", "input_ratio": "0.5" }
+      { "level_id": "X1", "trigger_price": "0.00000008", "input_ratio": "0.5" },
+      { "level_id": "X2", "trigger_price": "0.000000081", "input_ratio": "0.5" }
     ]
   },
   "capital": {
-    "allocation_quote": "300",
-    "per_order_cap_quote": "150",
-    "per_instrument_cap_quote": "500",
-    "per_network_cap_quote": "800",
-    "global_portfolio_cap_quote": "1000",
-    "reserved_cash_quote": "100"
+    "allocation_quote": "0.0003",
+    "per_order_cap_quote": "0.00015",
+    "per_instrument_cap_quote": "0.0005",
+    "per_network_cap_quote": "0.0008",
+    "global_portfolio_cap_quote": "0.001",
+    "reserved_cash_quote": "0.0001"
   },
   "limits": {
-    "max_executable_price": "1.1",
-    "min_executable_price": "1",
+    "max_executable_price": "0.00000009",
+    "min_executable_price": "0.00000007",
     "max_price_impact_bps": 150,
-    "max_slippage_bps": 50
+    "max_slippage_bps": 0
   },
   "timing": {
     "valid_from_epoch_s": 1700000000,

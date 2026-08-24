@@ -1,8 +1,8 @@
 # Roadmap
 
 ```
-V0A  OFFLINE CORE                     <- this repository, current phase
-V0B  INK SHADOW
+V0A  OFFLINE CORE                     <- merged prerequisite
+V0B  INK SHADOW                        <- this repository, current phase
 V0C  SOLANA SHADOW
 V0D  ROBINHOOD SHADOW
 V0E  HOSTILE FAILURE SUITE
@@ -17,14 +17,14 @@ DEFERRED_LATER:
 OpenSea / NFT execution adapter
 ```
 
-## V0A — Offline core (this repository)
+## V0A — Offline core (merged prerequisite)
 
 Deterministic domain model, strict policy admission, SQLite ledger with
 database-enforced exactly-once economic identity and atomic budget
 reservation, deterministic replay, and restart recovery. No network, no
 signer, no live-capital authority. See `docs/AUTHORITY.md`.
 
-## V0B — Ink shadow
+## V0B — Ink shadow (current)
 
 The first adapter behind `qntyspot.boundary.ExecutionVenueAdapter`/
 `QuoteSource`/`ChainTruthSource` for the Ink chain (EVM). "Shadow" means it
@@ -33,6 +33,12 @@ transactions — it is the first phase in which `NETWORK_AUTHORIZED` becomes
 relevant, but not yet `SIGNING_AUTHORIZED` or `LIVE_CAPITAL_AUTHORIZED`.
 KRAKMASK, as a user-selected instrument, becomes reachable once this adapter
 exists — see `docs/AUTHORITY.md`.
+
+The bounded implementation is the KRAKMASK/WETH9 InkySwap V2 fixture in
+`qntyspot/ink.py`. It requires two agreeing public RPC observations at one
+common block, pins the verified pool bytecode hash and factory identity, and
+persists only canonical market observations and shadow decisions. It does not
+discover assets or venues and does not simulate transaction construction.
 
 ## V0C — Solana shadow
 

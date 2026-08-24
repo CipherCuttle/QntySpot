@@ -8,19 +8,20 @@ spot execution runtime**. It will eventually support:
 3. Solana SPL / Token-2022 spot, initially via a Jupiter adapter
 4. much later: OpenSea NFT execution/scalping as a separate venue adapter
 
-## V0A status: `OFFLINE_CORE_ONLY`
+## V0B status: `INK_SHADOW_READ_ONLY`
 
-This repository currently implements **V0A**, the offline deterministic core.
+This repository currently implements the merged **V0A** offline deterministic
+core plus the bounded **V0B** Ink shadow adapter.
 See [docs/AUTHORITY.md](docs/AUTHORITY.md) for the binding statement of what
 this phase authorizes and forbids. In short:
 
-**V0A authorizes:** deterministic domain models, strict policy parsing, SQLite
-state transitions, replay, accounting primitives, tests.
+**V0B authorizes:** everything in V0A plus two-provider public Ink JSON-RPC
+reads, exact KRAKMASK/WETH9 V2 market observations, deterministic market
+quotes, shadow policy decisions, immutable evidence, and offline replay.
 
-**V0A forbids:** RPC access, API access, private-key access, wallet signing,
-transaction construction, transaction broadcast, live trading, shadow network
-calls, venue discovery, automatic token selection, bridging, OpenSea
-execution.
+**V0B forbids:** private-key access, wallet signing, transaction construction,
+transaction broadcast, live trading, venue discovery, automatic token
+selection, bridging, Solana, Robinhood, and OpenSea execution.
 
 Asset selection belongs to the user. Runtime asset admission is concerned with
 **exact identity and execution constraints**, not with judging whether a
@@ -35,8 +36,8 @@ project is good, bad, legitimate, or likely to rug.
   identity and atomic budget reservation (`qntyspot/ledger/`)
 - Deterministic replay and restart recovery that never retries an action whose
   outcome is unknown (`qntyspot/ledger/replay.py`, `qntyspot/ledger/recovery.py`)
-- Typed interfaces for the future chain/venue truth boundary, with **no
-  implementation** (`qntyspot/boundary.py`)
+- Typed interfaces for the chain/venue truth boundary (`qntyspot/boundary.py`)
+- The bounded Ink adapter (`qntyspot/ink.py`) with canonical evidence and replay
 
 ## Quickstart
 
@@ -46,11 +47,10 @@ pip install -e '.[dev]'
 pytest
 ```
 
-No network access, no secrets, and no signing capability are required to run
-the test suite; this is enforced both at runtime (`tests/conftest.py` disables
-the `socket` module for the whole session) and statically
-(`tests/test_no_network.py` scans every module for forbidden imports and
-tokens).
+The offline test suite never requires network access; `tests/conftest.py`
+disables the `socket` module for the whole session. The source scan retains
+the no-secret/no-signing boundary while allowing the one standard-library
+public-read transport used by V0B.
 
 ```python
 from qntyspot.policy import load_policy_file
@@ -69,11 +69,11 @@ with open_ledger("spot.sqlite3") as ledger:
 - [docs/AUTHORITY.md](docs/AUTHORITY.md) — what this phase authorizes and forbids
 - [docs/STATE_MACHINE.md](docs/STATE_MACHINE.md) — the intent lifecycle
 - [docs/POLICY_V0.md](docs/POLICY_V0.md) — the PolicyV0 schema
-- [docs/ROADMAP.md](docs/ROADMAP.md) — phases beyond V0A
+- [docs/ROADMAP.md](docs/ROADMAP.md) — phases beyond V0B
+- [docs/INK_V0B.md](docs/INK_V0B.md) — frozen Ink fixture and semantics
 
 ## KRAKMASK
 
-KRAKMASK appears in this repository only as a **future user-selected Ink
-fixture**, once a V0B Ink shadow adapter exists. Its presence here is not an
-endorsement, a safety claim, or an assertion of legitimacy. See
+KRAKMASK is present only as the user-selected V0B Ink fixture. Its presence is
+not an endorsement, a safety claim, or an assertion of legitimacy. See
 `tests/fixtures/README.md`.

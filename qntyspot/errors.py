@@ -63,6 +63,30 @@ class SafeHaltError(QntySpotError):
     """External truth is ambiguous. Operation must stop rather than speculate."""
 
 
+class InkError(QntySpotError):
+    """The bounded Ink shadow substrate rejected an operation."""
+
+
+class RpcError(InkError):
+    """The JSON-RPC exchange did not produce an admissible result."""
+
+
+class RpcTransportError(RpcError):
+    """A bounded transport attempt failed."""
+
+
+class RpcTimeoutError(RpcTransportError):
+    """A bounded RPC attempt exceeded its explicit timeout."""
+
+
+class RpcResponseTooLargeError(RpcError):
+    """An RPC response exceeded the configured byte bound."""
+
+
+class RpcProtocolError(RpcError):
+    """An RPC response violated the strict JSON-RPC contract."""
+
+
 class LevelNotExecutableError(QntySpotError):
     """A ladder level cannot produce a well-formed economic action right now."""
 

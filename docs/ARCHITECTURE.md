@@ -17,8 +17,9 @@ qntyspot/
                  every depth; there is no extension point in V0A.
   economics.py   turns a policy rung into an EconomicBounds / IntentV0: the
                  absolute limit contract. No clock reads, no I/O.
-  boundary.py    typing Protocols for a future chain/venue truth boundary.
-                 No implementation. See docs/AUTHORITY.md.
+  boundary.py    typing Protocols for the chain/venue truth boundary.
+  ink.py         bounded dual-RPC Ink observation, exact V2 quote arithmetic,
+                 canonical shadow decisions, immutable evidence, and replay.
   ledger/
     schema.py    the SQL schema and its integrity rules (append-only triggers,
                  uniqueness constraints, foreign keys).
@@ -77,6 +78,27 @@ Every step above that changes state does so inside one SQLite write
 transaction that also appends the `state_events` row explaining it. That is
 what makes the append-only log — `state_events` plus the admitted
 `policies` — a sufficient input for `qntyspot.ledger.replay.reconstruct`.
+
+## Ink shadow data flow
+
+```
+RPC A/B heads
+   │  chain-id check + bounded head-lag check
+   ▼
+common historical block
+   │  code, factory, getPair, token0, token1, getReserves at that block
+   ▼
+agreeing INK_MARKET_OBSERVATION_V0 ──SHA-256──▶ immutable evidence
+   │
+   │  integer V2 quote (997/1000) + exact Fraction metrics
+   ▼
+SHADOW_DECISION_V0 ──references observation digest──▶ offline replay
+```
+
+The V0B market identity is fixed to KRAKMASK/WETH9 and the verified InkySwap
+V2 factory/pool. A provider disagreement, identity mismatch, absent bytecode,
+zero reserves, or stale observation fails closed. The quote is a market-state
+simulation only; it is not a transaction simulation.
 
 ## Why SQLite carries big integers as TEXT
 
