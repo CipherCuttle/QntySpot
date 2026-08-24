@@ -117,3 +117,23 @@ class SolanaProtocolError(SolanaError):
 
 class JupiterApiError(SolanaError):
     """The current official Jupiter read endpoint returned an API error."""
+
+
+class RobinhoodError(QntySpotError):
+    """The bounded Robinhood Chain shadow substrate rejected an operation."""
+
+
+class RobinhoodTransportError(RobinhoodError):
+    """A bounded public Robinhood read failed at the transport layer."""
+
+
+class RobinhoodProtocolError(RobinhoodError):
+    """A Robinhood, Chainlink, or EVM response violated the read contract."""
+
+
+class ZeroXApiError(RobinhoodError):
+    """The bounded 0x Swap API read returned an API error."""
+
+
+class ZeroXApiKeyRequired(RobinhoodError):
+    """A firm 0x quote cannot be requested without the local read credential."""
