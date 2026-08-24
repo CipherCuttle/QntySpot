@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -60,8 +61,7 @@ def _policy_for_asset(token_address: str, token_decimals: int) -> Any:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--now-epoch-s", type=int, required=True)
-    parser.add_argument("--output", type=Path, default=Path("qualifications/robinhood_v0d"))
+    parser.add_argument("--output", type=Path, default=Path("qualifications/robinhood_v0d_r1"))
     args = parser.parse_args()
     api_key = os.environ.get("ZEROX_API_KEY")
     if not api_key:
@@ -69,6 +69,8 @@ def main() -> int:
         return 2
 
     output = args.output
+    if output.exists() and any(output.iterdir()):
+        raise RuntimeError(f"refusing a second live qualification in non-empty output: {output}")
     evidence_root = output / "RAW_EVIDENCE_V0"
     store = RawEvidenceStore(evidence_root, max_response_bytes=2_000_000, max_total_bytes=12_000_000, max_records=32)
     rest = RobinhoodRestClient(evidence_store=store)
@@ -82,8 +84,9 @@ def main() -> int:
     policy = _policy_for_asset(asset["token_address"], asset["token_decimals"])
     _write_once(output / "POLICY_V0.json", canonical_json_bytes(policy.canonical))
     adapter = RobinhoodShadowAdapter(rest, rpc, directory, zero_x, symbol=SPY_SYMBOL)
-    observation = adapter.observe(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=args.now_epoch_s, taker=QUALIFICATION_TAKER_ADDRESS)
-    decision = adapter.shadow_decision(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=args.now_epoch_s, observation=observation)
+    observation_time_epoch_s = time.time_ns() // 1_000_000_000
+    observation = adapter.observe(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=observation_time_epoch_s, taker=QUALIFICATION_TAKER_ADDRESS)
+    decision = adapter.shadow_decision(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=observation_time_epoch_s, observation=observation)
     assert adapter.identity is not None
     persist_identity(output / "ROBINHOOD_ASSET_IDENTITY_V0.json", adapter.identity)
     persist_observation(output / "ROBINHOOD_MARKET_OBSERVATION_V0.json", observation)
@@ -97,7 +100,11 @@ def main() -> int:
         "identity_digest": adapter.identity.digest(),
         "live_eligibility_confirmed": "NOT_EVALUATED",
         "observation_digest": observation.digest(),
+        "observation_time_epoch_s": observation.observation_time_epoch_s,
         "policy_id": policy.policy_id,
+        "rpc_block_timestamp_epoch_s": observation.rpc_block_timestamp_epoch_s,
+        "rpc_future_skew_s": observation.rpc_future_skew_s,
+        "max_rpc_future_skew_s": observation.max_rpc_future_skew_s,
         "schema": "ROBINHOOD_V0D_QUALIFICATION_MANIFEST_V0",
         "zero_x_read_count": zero_x.http.read_count,
     }

@@ -53,6 +53,7 @@ __all__ = [
     "USDG_ADDRESS",
     "QUALIFICATION_TAKER_ADDRESS",
     "SEQUENCER_GRACE_PERIOD_S",
+    "MAX_RPC_FUTURE_SKEW_S",
     "ZEROX_MAX_BLOCK_LAG",
     "RobinhoodAssetIdentityV0",
     "RobinhoodMarketObservationV0",
@@ -85,6 +86,7 @@ SPY_SYMBOL = "SPY"
 USDG_ADDRESS = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
 QUALIFICATION_TAKER_ADDRESS = "0x0000000000000000000000000000000000000001"
 SEQUENCER_GRACE_PERIOD_S = 3_600
+MAX_RPC_FUTURE_SKEW_S = 30
 MULTIPLIER_SCALE = 10**18
 REFERENCE_TOLERANCE_BPS = 500
 ZEROX_MAX_BLOCK_LAG = 64
@@ -351,6 +353,15 @@ class _HttpsJson:
                 self._capture(target=target, body=body, request_body=None)
                 return body
             except HTTPError as exc:
+                try:
+                    error_body = exc.read(self.max_response_bytes + 1)
+                except OSError:
+                    error_body = b""
+                if not isinstance(error_body, bytes):
+                    error_body = b""
+                if any(secret and secret in error_body for secret in forbidden_response_substrings):
+                    raise SafeHaltError("forbidden request secret appeared in an external error response")
+                self._capture(target=target, body=error_body, request_body=None)
                 last = exc
                 if exc.code not in (408, 429) and not 500 <= exc.code <= 599:
                     break
@@ -905,7 +916,9 @@ class RobinhoodMarketObservationV0:
     observation_time_epoch_s: int
     chain_id: int
     chain_block_number: int
-    chain_block_timestamp_epoch_s: int
+    rpc_block_timestamp_epoch_s: int
+    rpc_future_skew_s: int
+    max_rpc_future_skew_s: int
     identity_digest: str
     asset_uid: str
     stock_token_address: str
@@ -960,6 +973,21 @@ class RobinhoodMarketObservationV0:
     def __post_init__(self) -> None:
         if self.schema != "ROBINHOOD_MARKET_OBSERVATION_V0" or self.chain_id != ROBINHOOD_CHAIN_ID:
             raise RobinhoodError("market observation schema or chain mismatch")
+        integer_fields = (
+            self.observation_time_epoch_s,
+            self.chain_block_number,
+            self.rpc_block_timestamp_epoch_s,
+            self.rpc_future_skew_s,
+            self.max_rpc_future_skew_s,
+        )
+        if any(not isinstance(value, int) or isinstance(value, bool) for value in integer_fields):
+            raise RobinhoodError("observation timestamps or skew are malformed")
+        if self.rpc_future_skew_s != self.rpc_block_timestamp_epoch_s - self.observation_time_epoch_s:
+            raise SafeHaltError("RPC future skew does not match the captured timestamps")
+        if self.max_rpc_future_skew_s != MAX_RPC_FUTURE_SKEW_S:
+            raise SafeHaltError("RPC future-skew bound is not the V0D shadow bound")
+        if self.rpc_future_skew_s > self.max_rpc_future_skew_s:
+            raise SafeHaltError("RPC block timestamp exceeds the bounded future skew")
         _address(self.stock_token_address, field="stock_token_address")
         _address(self.usdg_address, field="usdg_address")
         _address(self.chainlink_feed_proxy, field="chainlink_feed_proxy")
@@ -981,12 +1009,13 @@ class RobinhoodMarketObservationV0:
     def canonical_object(self) -> dict[str, Any]:
         return {
             "asset_uid": self.asset_uid, "chain_block_number": self.chain_block_number,
-            "chain_block_timestamp_epoch_s": self.chain_block_timestamp_epoch_s, "chain_id": self.chain_id,
+            "chain_id": self.chain_id,
             "chainlink_feed_answer": str(self.chainlink_feed_answer), "chainlink_feed_answered_in_round": str(self.chainlink_feed_answered_in_round),
             "chainlink_feed_decimals": self.chainlink_feed_decimals, "chainlink_feed_heartbeat_s": self.chainlink_feed_heartbeat_s,
             "chainlink_feed_proxy": self.chainlink_feed_proxy, "chainlink_feed_round_id": str(self.chainlink_feed_round_id),
             "chainlink_feed_updated_at_epoch_s": self.chainlink_feed_updated_at_epoch_s, "identity_digest": self.identity_digest,
-            "observation_time_epoch_s": self.observation_time_epoch_s, "oracle_paused": self.oracle_paused,
+            "max_rpc_future_skew_s": self.max_rpc_future_skew_s, "observation_time_epoch_s": self.observation_time_epoch_s,
+            "oracle_paused": self.oracle_paused,
             "pending_multiplier": None if self.pending_multiplier is None else _decimal(self.pending_multiplier, field="pending_multiplier"),
             "pending_multiplier_effective_at_epoch_s": self.pending_multiplier_effective_at_epoch_s,
             "raw_evidence": [dict(item) for item in self.raw_evidence], "raw_token_amount": str(self.raw_token_amount),
@@ -995,6 +1024,7 @@ class RobinhoodMarketObservationV0:
             "reference_tolerance_bps": self.reference_tolerance_bps, "rest_generated_at": self.rest_generated_at,
             "rest_generated_at_epoch_s": self.rest_generated_at_epoch_s, "rest_is_trading_halt": self.rest_is_trading_halt,
             "rest_raw_ask": _decimal(self.rest_raw_ask, field="rest_raw_ask"), "rest_raw_bid": _decimal(self.rest_raw_bid, field="rest_raw_bid"),
+            "rpc_block_timestamp_epoch_s": self.rpc_block_timestamp_epoch_s, "rpc_future_skew_s": self.rpc_future_skew_s,
             "schema": self.schema, "sequencer_answer": self.sequencer_answer, "sequencer_feed_proxy": self.sequencer_feed_proxy,
             "sequencer_grace_period_s": self.sequencer_grace_period_s, "sequencer_started_at_epoch_s": self.sequencer_started_at_epoch_s,
             "sequencer_status": self.sequencer_status, "share_equivalent_amount": str(self.share_equivalent_amount),
@@ -1033,15 +1063,15 @@ class RobinhoodMarketObservationV0:
     @classmethod
     def from_canonical(cls, obj: Any) -> "RobinhoodMarketObservationV0":
         required = {
-            "asset_uid", "chain_block_number", "chain_block_timestamp_epoch_s", "chain_id", "chainlink_feed_answer",
+            "asset_uid", "chain_block_number", "chain_id", "chainlink_feed_answer",
             "chainlink_feed_answered_in_round", "chainlink_feed_decimals", "chainlink_feed_heartbeat_s", "chainlink_feed_proxy",
-            "chainlink_feed_round_id", "chainlink_feed_updated_at_epoch_s", "identity_digest", "observation_time_epoch_s", "oracle_paused",
+            "chainlink_feed_round_id", "chainlink_feed_updated_at_epoch_s", "identity_digest", "max_rpc_future_skew_s", "observation_time_epoch_s", "oracle_paused",
             "pending_multiplier", "pending_multiplier_effective_at_epoch_s", "raw_evidence", "raw_token_amount",
             "reference_deviation_rest_chainlink_bps", "reference_deviation_zero_x_chainlink_bps", "reference_tolerance_bps",
             "rest_generated_at", "rest_generated_at_epoch_s", "rest_is_trading_halt", "rest_raw_ask", "rest_raw_bid", "schema",
             "sequencer_answer", "sequencer_feed_proxy", "sequencer_grace_period_s", "sequencer_started_at_epoch_s", "sequencer_status",
             "share_equivalent_amount", "status", "stock_token_address", "token_decimals", "trading_capabilities", "token_reference_ask", "token_reference_bid",
-            "ui_multiplier", "usdg_address", "usdg_decimals", "zero_x_allowance_spender", "zero_x_allowance_target", "zero_x_block_number",
+            "rpc_block_timestamp_epoch_s", "rpc_future_skew_s", "ui_multiplier", "usdg_address", "usdg_decimals", "zero_x_allowance_spender", "zero_x_allowance_target", "zero_x_block_number",
             "zero_x_buy_amount", "zero_x_buy_token", "zero_x_min_buy_amount", "zero_x_route_digest", "zero_x_route_sources",
             "zero_x_sell_amount", "zero_x_sell_token", "zero_x_transaction_data_sha256", "zero_x_transaction_to", "zero_x_transaction_value_atomic",
         }
@@ -1052,7 +1082,7 @@ class RobinhoodMarketObservationV0:
         pending = None if obj["pending_multiplier"] is None else _external_fraction(obj["pending_multiplier"], field="pending_multiplier", positive=True)
         return cls(
             schema=obj["schema"], observation_time_epoch_s=obj["observation_time_epoch_s"], chain_id=obj["chain_id"], chain_block_number=obj["chain_block_number"],
-            chain_block_timestamp_epoch_s=obj["chain_block_timestamp_epoch_s"], identity_digest=obj["identity_digest"], asset_uid=obj["asset_uid"],
+            rpc_block_timestamp_epoch_s=obj["rpc_block_timestamp_epoch_s"], rpc_future_skew_s=obj["rpc_future_skew_s"], max_rpc_future_skew_s=obj["max_rpc_future_skew_s"], identity_digest=obj["identity_digest"], asset_uid=obj["asset_uid"],
             stock_token_address=obj["stock_token_address"], token_decimals=obj["token_decimals"], usdg_address=obj["usdg_address"], usdg_decimals=obj["usdg_decimals"], raw_token_amount=int(obj["raw_token_amount"]),
             ui_multiplier=_external_fraction(obj["ui_multiplier"], field="ui_multiplier", positive=True), share_equivalent_amount=int(obj["share_equivalent_amount"]),
             pending_multiplier=pending, pending_multiplier_effective_at_epoch_s=obj["pending_multiplier_effective_at_epoch_s"], oracle_paused=obj["oracle_paused"],
@@ -1242,8 +1272,9 @@ class RobinhoodShadowAdapter(QuoteSource):
         identity = self._resolve_identity(asset, now_epoch_s)
         identity_evidence_records = tuple(self.rest.evidence_records + self.rpc.evidence_records)
         block_number, block_timestamp = self.rpc.latest_block()
-        if block_timestamp > now_epoch_s:
-            raise SafeHaltError("latest RPC block is from the future")
+        rpc_future_skew_s = block_timestamp - now_epoch_s
+        if rpc_future_skew_s > MAX_RPC_FUTURE_SKEW_S:
+            raise SafeHaltError("latest RPC block exceeds the bounded future skew")
         price = self.rest.price(self.symbol, asset["token_address"])
         feed = self.directory.resolve(self.symbol)
         feed_code = self.rpc.code(feed["feed_proxy"])
@@ -1282,7 +1313,7 @@ class RobinhoodShadowAdapter(QuoteSource):
         share_equivalent = _share_equivalent_amount(raw_token_amount, identity.onchain_ui_multiplier)
         evidence_records = tuple(self.rest.evidence_records + self.rpc.evidence_records + self.directory.evidence_records + self.zero_x.evidence_records)
         observation = RobinhoodMarketObservationV0(
-            schema="ROBINHOOD_MARKET_OBSERVATION_V0", observation_time_epoch_s=now_epoch_s, chain_id=ROBINHOOD_CHAIN_ID, chain_block_number=block_number, chain_block_timestamp_epoch_s=block_timestamp, identity_digest=identity.digest(), asset_uid=identity.asset_uid, stock_token_address=identity.stock_token_address, token_decimals=identity.token_decimals, usdg_address=identity.usdg_address, usdg_decimals=identity.usdg_decimals, raw_token_amount=raw_token_amount, ui_multiplier=identity.onchain_ui_multiplier, share_equivalent_amount=share_equivalent, pending_multiplier=identity.pending_multiplier, pending_multiplier_effective_at_epoch_s=identity.pending_multiplier_effective_at_epoch_s, oracle_paused=identity.oracle_paused, status=identity.status, trading_capabilities=identity.trading_capabilities, rest_generated_at=price["generated_at"], rest_generated_at_epoch_s=price["generated_at_epoch_s"], rest_raw_bid=price["raw_bid"], rest_raw_ask=price["raw_ask"], token_reference_bid=token_reference_bid, token_reference_ask=token_reference_ask, rest_is_trading_halt=price["is_trading_halt"], chainlink_feed_proxy=feed["feed_proxy"], chainlink_feed_decimals=feed_decimals, chainlink_feed_heartbeat_s=feed["feed_heartbeat_s"], chainlink_feed_answer=answer, chainlink_feed_updated_at_epoch_s=updated_at, chainlink_feed_round_id=round_id, chainlink_feed_answered_in_round=answered_in_round, sequencer_feed_proxy=self.sequencer_feed_proxy, sequencer_answer=sequence_answer, sequencer_started_at_epoch_s=sequence_started, sequencer_status=sequence_status, sequencer_grace_period_s=self.sequencer_grace_period_s, zero_x_sell_token=zero["sell_token"], zero_x_buy_token=zero["buy_token"], zero_x_sell_amount=zero["sell_amount_atomic"], zero_x_buy_amount=zero["buy_amount_atomic"], zero_x_min_buy_amount=zero["venue_min_output_atomic"], zero_x_allowance_target=zero["allowance_target"], zero_x_allowance_spender=zero["allowance_spender"], zero_x_block_number=zero["block_number"], zero_x_route_sources=zero["route_sources"], zero_x_route_digest=zero["route_digest"], zero_x_transaction_to=zero["transaction_to"], zero_x_transaction_value_atomic=zero["transaction_value_atomic"], zero_x_transaction_data_sha256=zero["transaction_data_sha256"], reference_deviation_rest_chainlink_bps=deviation_rest, reference_deviation_zero_x_chainlink_bps=deviation_zero, reference_tolerance_bps=self.reference_tolerance_bps, raw_evidence=(),
+            schema="ROBINHOOD_MARKET_OBSERVATION_V0", observation_time_epoch_s=now_epoch_s, chain_id=ROBINHOOD_CHAIN_ID, chain_block_number=block_number, rpc_block_timestamp_epoch_s=block_timestamp, rpc_future_skew_s=rpc_future_skew_s, max_rpc_future_skew_s=MAX_RPC_FUTURE_SKEW_S, identity_digest=identity.digest(), asset_uid=identity.asset_uid, stock_token_address=identity.stock_token_address, token_decimals=identity.token_decimals, usdg_address=identity.usdg_address, usdg_decimals=identity.usdg_decimals, raw_token_amount=raw_token_amount, ui_multiplier=identity.onchain_ui_multiplier, share_equivalent_amount=share_equivalent, pending_multiplier=identity.pending_multiplier, pending_multiplier_effective_at_epoch_s=identity.pending_multiplier_effective_at_epoch_s, oracle_paused=identity.oracle_paused, status=identity.status, trading_capabilities=identity.trading_capabilities, rest_generated_at=price["generated_at"], rest_generated_at_epoch_s=price["generated_at_epoch_s"], rest_raw_bid=price["raw_bid"], rest_raw_ask=price["raw_ask"], token_reference_bid=token_reference_bid, token_reference_ask=token_reference_ask, rest_is_trading_halt=price["is_trading_halt"], chainlink_feed_proxy=feed["feed_proxy"], chainlink_feed_decimals=feed_decimals, chainlink_feed_heartbeat_s=feed["feed_heartbeat_s"], chainlink_feed_answer=answer, chainlink_feed_updated_at_epoch_s=updated_at, chainlink_feed_round_id=round_id, chainlink_feed_answered_in_round=answered_in_round, sequencer_feed_proxy=self.sequencer_feed_proxy, sequencer_answer=sequence_answer, sequencer_started_at_epoch_s=sequence_started, sequencer_status=sequence_status, sequencer_grace_period_s=self.sequencer_grace_period_s, zero_x_sell_token=zero["sell_token"], zero_x_buy_token=zero["buy_token"], zero_x_sell_amount=zero["sell_amount_atomic"], zero_x_buy_amount=zero["buy_amount_atomic"], zero_x_min_buy_amount=zero["venue_min_output_atomic"], zero_x_allowance_target=zero["allowance_target"], zero_x_allowance_spender=zero["allowance_spender"], zero_x_block_number=zero["block_number"], zero_x_route_sources=zero["route_sources"], zero_x_route_digest=zero["route_digest"], zero_x_transaction_to=zero["transaction_to"], zero_x_transaction_value_atomic=zero["transaction_value_atomic"], zero_x_transaction_data_sha256=zero["transaction_data_sha256"], reference_deviation_rest_chainlink_bps=deviation_rest, reference_deviation_zero_x_chainlink_bps=deviation_zero, reference_tolerance_bps=self.reference_tolerance_bps, raw_evidence=(),
         )
         identity = replace(identity, raw_evidence=_record_refs(identity_evidence_records))
         observation = replace(observation, identity_digest=identity.digest(), raw_evidence=_record_refs(evidence_records))
@@ -1351,12 +1382,15 @@ class RobinhoodShadowAdapter(QuoteSource):
         return QuoteV0(quote_id=digest_object({"bounds": bounds.canonical_object(), "observation_digest": observation.digest(), "pinned_at_epoch_s": now_epoch_s}), economic_action_id="shadow-quote", input_atomic=observation.zero_x_sell_amount, output_atomic=observation.zero_x_buy_amount, pinned_at_epoch_s=now_epoch_s, expires_at_epoch_s=now_epoch_s + 1, source=self.venue_id)
 
 
-def replay_shadow_decision(policy: PolicyV0, observation: RobinhoodMarketObservationV0, cycle_id: str, level_id: str, *, now_epoch_s: int, reference_tolerance_bps: int = REFERENCE_TOLERANCE_BPS, rest_max_age_s: int = 120) -> RobinhoodShadowDecisionV0:
+def replay_shadow_decision(policy: PolicyV0, observation: RobinhoodMarketObservationV0, cycle_id: str, level_id: str, *, now_epoch_s: int | None = None, reference_tolerance_bps: int = REFERENCE_TOLERANCE_BPS, rest_max_age_s: int = 120) -> RobinhoodShadowDecisionV0:
+    frozen_now_epoch_s = observation.observation_time_epoch_s
+    if now_epoch_s is not None and now_epoch_s != frozen_now_epoch_s:
+        raise SafeHaltError("replay timestamp must match the frozen observation timestamp")
     adapter = object.__new__(RobinhoodShadowAdapter)
     adapter.observation = observation
     adapter.reference_tolerance_bps = reference_tolerance_bps
     adapter.rest_max_age_s = rest_max_age_s
-    return adapter._decision(policy, cycle_id, level_id, now_epoch_s=now_epoch_s, observation=observation)
+    return adapter._decision(policy, cycle_id, level_id, now_epoch_s=frozen_now_epoch_s, observation=observation)
 
 
 def _persist(path: str | Path, record: Any) -> str:

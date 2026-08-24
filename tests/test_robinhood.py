@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import io
 import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 import pytest
 
 from qntyspot.canon import canonical_json_bytes
-from qntyspot.errors import RobinhoodProtocolError, SafeHaltError
+from qntyspot.errors import RobinhoodProtocolError, RobinhoodTransportError, SafeHaltError
 from qntyspot.policy import parse_policy
 from qntyspot.raw_evidence import RawEvidenceStore
 from qntyspot.robinhood import (
     CHAINLINK_ROBINHOOD_FEED_DIRECTORY_ENDPOINT,
     QUALIFICATION_TAKER_ADDRESS,
+    MAX_RPC_FUTURE_SKEW_S,
     ROBINHOOD_ASSETS_ENDPOINT,
     ROBINHOOD_PRICES_ENDPOINT,
     ROBINHOOD_RPC_ENDPOINT,
@@ -144,11 +147,12 @@ def zero_body(*, sell_token: str = USDG_ADDRESS, buy_token: str = TOKEN, sell_am
 
 
 class RpcFixture:
-    def __init__(self, *, wrong_chain: bool = False, paused: bool = False, feed_answer: int = 15_000_000_000) -> None:
+    def __init__(self, *, wrong_chain: bool = False, paused: bool = False, feed_answer: int = 15_000_000_000, block_timestamp: int | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
         self.wrong_chain = wrong_chain
         self.paused = paused
         self.feed_answer = feed_answer
+        self.block_timestamp = NOW - 1 if block_timestamp is None else block_timestamp
 
     def __call__(self, payload: bytes) -> bytes:
         request = json.loads(payload)
@@ -159,7 +163,7 @@ class RpcFixture:
         elif method == "eth_getCode":
             result = "0x6001"
         elif method == "eth_getBlockByNumber":
-            result = {"number": "0x100", "timestamp": hex(NOW - 1)}
+            result = {"number": "0x100", "timestamp": hex(self.block_timestamp)}
         else:
             selector = request["params"][0]["data"]
             if selector == "0x313ce567":
@@ -219,14 +223,54 @@ def test_offline_full_observation_and_two_replays_are_identical(tmp_path: Path) 
     assert observation.token_reference_bid == 150
     assert observation.chainlink_price == 150
     assert observation.ui_multiplier == 1.5
+    assert observation.rpc_block_timestamp_epoch_s == NOW - 1
+    assert observation.rpc_future_skew_s == -1
+    assert observation.max_rpc_future_skew_s == MAX_RPC_FUTURE_SKEW_S
     assert observation.share_equivalent_amount == observation.raw_token_amount * 3 // 2
     assert decision.decision == "WOULD_EXECUTE"
     assert decision.side is Side.BUY
-    first = replay_shadow_decision(policy, observation, "cycle-0", "E1", now_epoch_s=NOW)
+    first = replay_shadow_decision(policy, observation, "cycle-0", "E1")
     second = replay_shadow_decision(policy, observation, "cycle-0", "E1", now_epoch_s=NOW)
     assert first.canonical_object() == second.canonical_object() == decision.canonical_object()
     assert first.digest() == second.digest() == decision.digest()
     assert len(adapter.rest.evidence_records) >= 1
+
+
+@pytest.mark.parametrize("skew", [-1, 0, 1, 29, 30])
+def test_rpc_future_skew_boundary_is_accepted(tmp_path: Path, skew: int) -> None:
+    adapter, policy, _rpc, _store = make_adapter(tmp_path, rpc={"block_timestamp": NOW + skew})
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    assert observation.rpc_future_skew_s == skew
+    assert observation.rpc_block_timestamp_epoch_s == NOW + skew
+
+
+def test_rpc_future_skew_over_bound_safe_halts_before_0x(tmp_path: Path) -> None:
+    adapter, policy, rpc, _store = make_adapter(tmp_path, rpc={"block_timestamp": NOW + MAX_RPC_FUTURE_SKEW_S + 1})
+    with pytest.raises(SafeHaltError, match="bounded future skew"):
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    assert not any(request["method"] == "eth_call" and request["params"][0].get("data") == "0xfeaf968c" for request in rpc.calls)
+
+
+def test_skew_fields_are_canonical_and_replay_uses_frozen_timestamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter, policy, _rpc, _store = make_adapter(tmp_path, rpc={"block_timestamp": NOW + 30})
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    canonical = observation.canonical_object()
+    assert canonical["observation_time_epoch_s"] == NOW
+    assert canonical["rpc_block_timestamp_epoch_s"] == NOW + 30
+    assert canonical["rpc_future_skew_s"] == 30
+    assert canonical["max_rpc_future_skew_s"] == MAX_RPC_FUTURE_SKEW_S
+    observation_path = tmp_path / "ROBINHOOD_MARKET_OBSERVATION_V0.json"
+    persist_observation(observation_path, observation)
+    assert canonical_json_bytes(canonical) == canonical_json_bytes(load_observation(observation_path).canonical_object())
+
+    import time
+
+    monkeypatch.setattr(time, "time", lambda: pytest.fail("replay read the wall clock"))
+    monkeypatch.setattr(time, "time_ns", lambda: pytest.fail("replay read the wall clock"))
+    replayed = replay_shadow_decision(policy, observation, "cycle-0", "E1")
+    assert replayed.decision == "WOULD_EXECUTE"
+    with pytest.raises(SafeHaltError, match="frozen observation timestamp"):
+        replay_shadow_decision(policy, observation, "cycle-0", "E1", now_epoch_s=NOW + 1)
 
 
 def test_persistence_is_immutable_and_reloads_byte_identically(tmp_path: Path) -> None:
@@ -346,6 +390,35 @@ def test_api_key_is_never_captured_or_persisted(tmp_path: Path) -> None:
     with pytest.raises(SafeHaltError):
         client.quote(sell_token=USDG_ADDRESS, buy_token=TOKEN, sell_amount_atomic=1, taker=QUALIFICATION_TAKER_ADDRESS, slippage_bps=0, policy_min_output_atomic=1)
     assert not list((tmp_path / "raw").rglob("*"))
+
+
+def test_http_error_body_is_captured_without_the_api_key(tmp_path: Path) -> None:
+    store = RawEvidenceStore(tmp_path / "raw")
+    client = ZeroXV2Client(api_key="fixture-key", evidence_store=store)
+
+    class ErrorOpener:
+        def open(self, _request: Any, timeout: int) -> Any:
+            del timeout
+            raise HTTPError(
+                ZEROX_SWAP_V2_QUOTE_ENDPOINT,
+                400,
+                "fixture validation error",
+                {},
+                io.BytesIO(b'{"validationErrors":[{"reason":"unsupported pair"}]}'),
+            )
+
+    client.http.opener = ErrorOpener()
+    with pytest.raises(RobinhoodTransportError):
+        client.quote(
+            sell_token=USDG_ADDRESS,
+            buy_token=TOKEN,
+            sell_amount_atomic=1,
+            taker=QUALIFICATION_TAKER_ADDRESS,
+            slippage_bps=0,
+            policy_min_output_atomic=1,
+        )
+    assert len(client.evidence_records) == 1
+    assert b"fixture-key" not in store.read(client.evidence_records[0])
 
 
 def test_venue_looser_bound_is_rejected_but_stricter_bound_is_acceptable(tmp_path: Path) -> None:

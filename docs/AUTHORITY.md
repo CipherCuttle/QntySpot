@@ -88,6 +88,12 @@ Feed is recorded as `UNAVAILABLE_NOT_PUBLISHED`, not as `SEQUENCER_DOWN`.
 The only venue read is one 0x Swap API v2 AllowanceHolder quote on chain 4663.
 Returned calldata is evidence only and is never submitted.
 
+For V0D shadow qualification, an observation records its explicit local
+observation timestamp, the RPC block timestamp, their signed difference, and
+`MAX_RPC_FUTURE_SKEW_S = 30`. A negative difference is accepted; a difference
+greater than 30 seconds fails closed. This is a technical shadow bound only,
+not a V0H live-capital clock or sequencer-safety guarantee.
+
 ## Asset selection
 
 Asset selection belongs to the user. Runtime asset admission
