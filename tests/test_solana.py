@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,8 +14,9 @@ import pytest
 from qntyspot.canon import canonical_json_bytes
 from qntyspot.economics import build_intent
 from qntyspot.domain import Side
-from qntyspot.errors import SafeHaltError, SolanaProtocolError
+from qntyspot.errors import SafeHaltError, SolanaError, SolanaProtocolError
 from qntyspot.policy import load_policy_file
+from qntyspot.raw_evidence import RawEvidenceStore
 from qntyspot.solana import (
     JUPITER_SWAP_V2_BUILD_ENDPOINT,
     QUALIFICATION_TAKER_ADDRESS,
@@ -179,6 +181,61 @@ def test_jupiter_usd_metadata_float_is_text_only_and_not_economic() -> None:
         slippage_bps=50,
     )
     assert parsed["route_plan"][0]["usdValue"] == "5.84"
+
+
+def test_raw_jupiter_evidence_is_persisted_before_semantic_rejection(tmp_path: Path) -> None:
+    response = build_response()
+    response["unexpected"] = True
+    wire = json.dumps(response, separators=(",", ":")).encode("utf-8")
+    store = RawEvidenceStore(tmp_path / "raw", max_response_bytes=2_000_000, max_total_bytes=2_000_000, max_records=4)
+    client = JupiterV2Client(
+        JUPITER_SWAP_V2_BUILD_ENDPOINT,
+        transport=lambda _url, _query: wire,
+        evidence_store=store,
+    )
+    with pytest.raises(SolanaProtocolError, match="fields are not exact"):
+        client.build(
+            input_mint=WSOL,
+            output_mint=USDC,
+            amount_atomic=1_000_000_000,
+            taker=QUALIFICATION_TAKER_ADDRESS,
+            slippage_bps=50,
+        )
+    assert len(client.evidence_records) == 1
+    record = client.evidence_records[0]
+    assert store.read(record) == wire
+    assert record.response_sha256 == hashlib.sha256(wire).hexdigest()
+    assert "headers" not in record.request
+    index_path = tmp_path / "raw-index.json"
+    assert store.persist_index(index_path, [record])
+    loaded = RawEvidenceStore.load_index(index_path)
+    assert len(loaded) == 1
+    assert loaded[0].response_sha256 == record.response_sha256
+
+
+def test_raw_evidence_is_bounded_and_immutable(tmp_path: Path) -> None:
+    store = RawEvidenceStore(tmp_path / "raw", max_response_bytes=256, max_total_bytes=256, max_records=1)
+    request_body = b'{"jsonrpc":"2.0"}'
+    record = store.capture(
+        endpoint=SOLANA_MAINNET_RPC_ENDPOINT,
+        method="POST",
+        request_target=SOLANA_MAINNET_RPC_ENDPOINT,
+        request_body=request_body,
+        response_body=b"{}",
+    )
+    assert store.read(record) == b"{}"
+    with pytest.raises(SolanaError, match="exceeds"):
+        store.capture(
+            endpoint=SOLANA_MAINNET_RPC_ENDPOINT,
+            method="POST",
+            request_target=SOLANA_MAINNET_RPC_ENDPOINT,
+            request_body=request_body,
+            response_body=b"x" * 257,
+        )
+    response_path = tmp_path / "raw" / record.response_path
+    response_path.write_bytes(b"changed")
+    with pytest.raises(SafeHaltError, match="digest mismatch"):
+        store.read(record)
 
 
 def test_live_shape_reaches_would_execute_and_records_exact_identity() -> None:

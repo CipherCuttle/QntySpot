@@ -48,6 +48,7 @@ from .errors import (
 )
 from .identity import SolanaCluster, SolanaInstrumentRef, TokenProgram
 from .ink import ShadowDecisionV0
+from .raw_evidence import RawEvidenceRecord, RawEvidenceStore
 
 __all__ = [
     "SOLANA_MAINNET_RPC_ENDPOINT",
@@ -64,6 +65,8 @@ __all__ = [
     "persist_decision",
     "load_observation",
     "load_decision",
+    "RawEvidenceRecord",
+    "RawEvidenceStore",
 ]
 
 SOLANA_MAINNET_RPC_ENDPOINT = "https://api.mainnet.solana.com"
@@ -233,6 +236,7 @@ class _HttpsGet:
         max_retries: int = 1,
         max_response_bytes: int = 2_000_000,
         transport: Callable[[str, bytes], bytes] | None = None,
+        evidence_store: RawEvidenceStore | None = None,
     ) -> None:
         parts = urlsplit(endpoint)
         if parts.scheme != "https" or not parts.netloc or parts.username or parts.password:
@@ -248,8 +252,16 @@ class _HttpsGet:
         self.max_retries = max_retries
         self.max_response_bytes = max_response_bytes
         self._transport = transport
+        if evidence_store is not None and not isinstance(evidence_store, RawEvidenceStore):
+            raise SolanaError("evidence_store must be a RawEvidenceStore")
+        self._evidence_store = evidence_store
+        self._evidence_records: list[RawEvidenceRecord] = []
         self._opener = build_opener(ProxyHandler({}))
         self.read_count = 0
+
+    @property
+    def evidence_records(self) -> tuple[RawEvidenceRecord, ...]:
+        return tuple(self._evidence_records)
 
     def get(self, params: Mapping[str, str]) -> Any:
         if any(not isinstance(key, str) or not isinstance(value, str) for key, value in params.items()):
@@ -276,6 +288,16 @@ class _HttpsGet:
                 if len(body) > self.max_response_bytes:
                     raise SolanaResponseTooLargeError(
                         f"response from {self.endpoint} exceeds {self.max_response_bytes} bytes"
+                    )
+                if self._evidence_store is not None:
+                    self._evidence_records.append(
+                        self._evidence_store.capture(
+                            endpoint=self.endpoint,
+                            method="GET",
+                            request_target=url,
+                            request_body=None,
+                            response_body=body,
+                        )
                     )
                 return _strict_http_json(body, field=self.endpoint)
             except HTTPError as exc:
@@ -304,6 +326,7 @@ class _JsonRpc:
         max_retries: int = 1,
         max_response_bytes: int = 2_000_000,
         transport: Callable[[bytes], bytes] | None = None,
+        evidence_store: RawEvidenceStore | None = None,
     ) -> None:
         parts = urlsplit(endpoint)
         if parts.scheme != "https" or not parts.netloc or parts.username or parts.password:
@@ -313,8 +336,16 @@ class _JsonRpc:
         self.max_retries = max_retries
         self.max_response_bytes = max_response_bytes
         self._transport = transport
+        if evidence_store is not None and not isinstance(evidence_store, RawEvidenceStore):
+            raise SolanaError("evidence_store must be a RawEvidenceStore")
+        self._evidence_store = evidence_store
+        self._evidence_records: list[RawEvidenceRecord] = []
         self._opener = build_opener(ProxyHandler({}))
         self.read_count = 0
+
+    @property
+    def evidence_records(self) -> tuple[RawEvidenceRecord, ...]:
+        return tuple(self._evidence_records)
 
     def request(self, method: str, params: list[Any]) -> Any:
         if not isinstance(method, str) or method not in self._READ_METHODS or not isinstance(params, list):
@@ -342,6 +373,16 @@ class _JsonRpc:
                 if len(body) > self.max_response_bytes:
                     raise SolanaResponseTooLargeError(
                         f"response from {self.endpoint} exceeds {self.max_response_bytes} bytes"
+                    )
+                if self._evidence_store is not None:
+                    self._evidence_records.append(
+                        self._evidence_store.capture(
+                            endpoint=self.endpoint,
+                            method="POST",
+                            request_target=self.endpoint,
+                            request_body=payload,
+                            response_body=body,
+                        )
                     )
                 raw = _strict_http_json(body, field=self.endpoint)
                 if not isinstance(raw, dict) or raw.get("jsonrpc") != "2.0" or raw.get("id") != 1:
@@ -383,6 +424,10 @@ class SolanaRpcClient:
     def read_count(self) -> int:
         return self._rpc.read_count
 
+    @property
+    def evidence_records(self) -> tuple[RawEvidenceRecord, ...]:
+        return self._rpc.evidence_records
+
     def get_multiple_accounts(self, addresses: list[str]) -> Any:
         if not 1 <= len(addresses) <= 100:
             raise SolanaError("getMultipleAccounts address count must be in [1, 100]")
@@ -413,6 +458,10 @@ class JupiterV2Client:
     @property
     def read_count(self) -> int:
         return self._http.read_count
+
+    @property
+    def evidence_records(self) -> tuple[RawEvidenceRecord, ...]:
+        return self._http.evidence_records
 
     def build(
         self,

@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from qntyspot.canon import canonical_json_str
 from qntyspot.policy import load_policy_file
+from qntyspot.raw_evidence import RawEvidenceStore
 from qntyspot.solana import (
     JUPITER_SWAP_V2_BUILD_ENDPOINT,
     QUALIFICATION_TAKER_ADDRESS,
@@ -26,8 +27,14 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     policy = load_policy_file(root / "qualifications/solana_v0c/sol_usdc_buy.policy.json")
     now_epoch_s = int(time.time())
-    rpc = SolanaRpcClient(SOLANA_MAINNET_RPC_ENDPOINT, max_retries=1)
-    jupiter = JupiterV2Client(JUPITER_SWAP_V2_BUILD_ENDPOINT, max_retries=1)
+    evidence_store = RawEvidenceStore(
+        root / "qualifications/solana_v0c/RAW_EVIDENCE_V0",
+        max_response_bytes=2_000_000,
+        max_total_bytes=12_000_000,
+        max_records=16,
+    )
+    rpc = SolanaRpcClient(SOLANA_MAINNET_RPC_ENDPOINT, max_retries=1, evidence_store=evidence_store)
+    jupiter = JupiterV2Client(JUPITER_SWAP_V2_BUILD_ENDPOINT, max_retries=1, evidence_store=evidence_store)
     adapter = SolanaShadowAdapter(rpc, jupiter)
     observation = adapter.observe(
         policy,
@@ -47,6 +54,10 @@ def main() -> None:
     )
     persist_observation(root / "qualifications/solana_v0c/SOLANA_MARKET_OBSERVATION_V0.json", observation)
     persist_decision(root / "qualifications/solana_v0c/SHADOW_DECISION_V0.json", decision)
+    raw_evidence = list(rpc.evidence_records) + list(jupiter.evidence_records)
+    raw_evidence_index_digest = evidence_store.persist_index(
+        root / "qualifications/solana_v0c/RAW_EVIDENCE_INDEX_V0.json", raw_evidence
+    )
     print(
         canonical_json_str(
             {
@@ -55,6 +66,8 @@ def main() -> None:
                 "jupiter_endpoint": jupiter.endpoint,
                 "network_reads": rpc.read_count + jupiter.read_count,
                 "observation_digest": observation.digest(),
+                "raw_evidence": [record.canonical_object() for record in raw_evidence],
+                "raw_evidence_index_digest": raw_evidence_index_digest,
                 "proof": {
                     "broadcasts": 0,
                     "live_capital_operations": 0,
