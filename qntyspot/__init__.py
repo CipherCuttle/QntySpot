@@ -1,0 +1,112 @@
+"""QntySpot -- offline deterministic core for a future policy-bound spot
+execution runtime.
+
+PHASE: V0A -- OFFLINE_CORE_ONLY
+--------------------------------
+This package contains no RPC client, no HTTP client, no signer, no key
+handling, no transaction encoder and no venue integration. It cannot place an
+order, and it holds no live-capital authority from any other repository.
+
+What it does contain: an immutable domain model, a strict fail-closed policy
+reader, a deterministic economic-limit contract, an append-only SQLite ledger
+with database-enforced exactly-once economic identity and atomic budget
+reservation, deterministic replay, and restart recovery that never retries an
+action whose outcome is unknown.
+
+See ``docs/AUTHORITY.md`` for the binding statement of what this phase
+authorizes and forbids.
+"""
+
+from __future__ import annotations
+
+__version__ = "0.0.1a0"
+
+#: Machine-readable phase marker. Anything that reads this and proceeds to a
+#: network or signing operation is violating the phase contract.
+AUTHORITY = "OFFLINE_CORE_ONLY"
+NETWORK_AUTHORIZED = False
+SIGNING_AUTHORIZED = False
+LIVE_CAPITAL_AUTHORIZED = False
+
+from .errors import (  # noqa: E402
+    BudgetExceededError,
+    CanonicalFormError,
+    DuplicateEconomicActionError,
+    IdentityError,
+    LedgerError,
+    PolicyError,
+    PolicyMissingError,
+    QntySpotError,
+    ReplayDivergenceError,
+    SafeHaltError,
+    StateTransitionError,
+)
+from .domain import (  # noqa: E402
+    CycleV0,
+    EconomicBounds,
+    ExecutionPlanV0,
+    FillReceiptV0,
+    IntentV0,
+    LadderKind,
+    LadderLevelV0,
+    LadderV0,
+    PolicyV0,
+    PortfolioBudgetV0,
+    QuoteV0,
+    RuntimeStateV0,
+    Side,
+    economic_action_id,
+)
+from .identity import (  # noqa: E402
+    AssetClass,
+    EvmInstrumentRef,
+    InstrumentV0,
+    SolanaCluster,
+    SolanaInstrumentRef,
+    TokenProgram,
+)
+from .policy import load_policy_file, load_policy_text, parse_policy  # noqa: E402
+from .states import IntentState  # noqa: E402
+
+__all__ = [
+    "__version__",
+    "AUTHORITY",
+    "NETWORK_AUTHORIZED",
+    "SIGNING_AUTHORIZED",
+    "LIVE_CAPITAL_AUTHORIZED",
+    "QntySpotError",
+    "CanonicalFormError",
+    "PolicyError",
+    "PolicyMissingError",
+    "IdentityError",
+    "StateTransitionError",
+    "LedgerError",
+    "DuplicateEconomicActionError",
+    "BudgetExceededError",
+    "ReplayDivergenceError",
+    "SafeHaltError",
+    "Side",
+    "LadderKind",
+    "LadderLevelV0",
+    "LadderV0",
+    "PolicyV0",
+    "PortfolioBudgetV0",
+    "CycleV0",
+    "EconomicBounds",
+    "IntentV0",
+    "QuoteV0",
+    "ExecutionPlanV0",
+    "FillReceiptV0",
+    "RuntimeStateV0",
+    "economic_action_id",
+    "AssetClass",
+    "InstrumentV0",
+    "EvmInstrumentRef",
+    "SolanaInstrumentRef",
+    "SolanaCluster",
+    "TokenProgram",
+    "IntentState",
+    "parse_policy",
+    "load_policy_text",
+    "load_policy_file",
+]

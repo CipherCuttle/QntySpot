@@ -1,0 +1,111 @@
+# Architecture
+
+## Module map
+
+```
+qntyspot/
+  canon.py       exact decimal <-> Fraction, strict JSON admission, canonical
+                 digests. The one place numbers cross the text/machine boundary.
+  identity.py    InstrumentV0 and its EVM / Solana identity references. Exact
+                 canonical identifiers only; symbols never establish identity.
+  states.py      IntentState and the enumerated legal-transition table.
+  errors.py      the error taxonomy. Every error here means fail closed.
+  domain.py      the immutable dataclasses: PolicyV0, LadderV0/LadderLevelV0,
+                 CycleV0, IntentV0, QuoteV0, ExecutionPlanV0, FillReceiptV0,
+                 PortfolioBudgetV0, RuntimeStateV0, EconomicBounds.
+  policy.py      the strict PolicyV0 reader. Unknown fields fail closed at
+                 every depth; there is no extension point in V0A.
+  economics.py   turns a policy rung into an EconomicBounds / IntentV0: the
+                 absolute limit contract. No clock reads, no I/O.
+  boundary.py    typing Protocols for a future chain/venue truth boundary.
+                 No implementation. See docs/AUTHORITY.md.
+  ledger/
+    schema.py    the SQL schema and its integrity rules (append-only triggers,
+                 uniqueness constraints, foreign keys).
+    atomics.py   big-integer atomic amounts stored as SQLite TEXT, with SQL
+                 user functions for exact arithmetic inside the budget guard.
+    store.py     SpotLedger: admission, cycles, intents, transitions, budget
+                 reservation, fill receipts, snapshots, integrity checks.
+    replay.py    deterministic reconstruction from policies + event log.
+    recovery.py  restart recovery: sorts every non-terminal intent into
+                 ABANDON / RECONCILIATION_REQUIRED / COMPLETE_FROM_RECEIPT.
+```
+
+## Data flow
+
+```
+PolicyV0 (text)
+   │  qntyspot.policy.parse_policy   (fail closed)
+   ▼
+PolicyV0 (object) ──digest──▶ policy_id
+   │
+   │  SpotLedger.admit_policy
+   ▼
+policies / instruments / ladder_levels tables
+   │
+   │  SpotLedger.open_cycle
+   ▼
+cycles table (OPEN)
+   │
+   │  qntyspot.economics.build_intent(policy, cycle_id, level, now_epoch_s)
+   ▼
+IntentV0 (ARMED) ──economic_action_id = f(policy_id, instrument_id,
+   │                                       cycle_id, level_id, side)
+   │  SpotLedger.create_intent        (DB enforces uniqueness)
+   ▼
+intents table (ARMED)
+   │
+   │  SpotLedger.transition(..., RESERVED, ...)   (atomic cap guard)
+   ▼
+budget_reservations table (ACTIVE) ── caps checked in one SQL statement
+   │
+   │  SpotLedger.transition(..., SIGNED/SUBMITTED/... , ...)
+   │  (domain labels only — no signer, no network, in V0A)
+   ▼
+   ...
+   │
+   │  SpotLedger.append_fill_receipt(FillReceiptV0, ...)
+   ▼
+fill_receipts table, bounds checked ──▶ CONFIRMED/RECONCILED or SAFE_HALT
+   │
+   │  SpotLedger.transition(..., FILLED, ...)
+   ▼
+intents table (FILLED), budget_reservations (COMMITTED)
+```
+
+Every step above that changes state does so inside one SQLite write
+transaction that also appends the `state_events` row explaining it. That is
+what makes the append-only log — `state_events` plus the admitted
+`policies` — a sufficient input for `qntyspot.ledger.replay.reconstruct`.
+
+## Why SQLite carries big integers as TEXT
+
+SQLite's native `INTEGER` is signed 64-bit. An 18-decimal token exceeds that
+range at roughly 9.22 whole units, so storing atomic amounts as `INTEGER`
+would silently cap or overflow on an ordinary-sized ladder. `qntyspot/ledger/
+atomics.py` stores every atomic amount as canonical decimal-digit `TEXT` and
+registers SQLite user functions (`atomic_add`, `atomic_sub`, `atomic_le`,
+`atomic_sum`, `atomic_min`) backed by Python's arbitrary-precision `int`, so
+the budget guard stays a single SQL statement — preserving its atomicity —
+while remaining exact at any magnitude. `tests/test_budget.py::
+test_caps_are_exact_far_beyond_64_bit_range` exercises this directly.
+
+## Why replay does not re-run the budget guard
+
+Replay reconstructs projections from the log; it does not re-decide whether an
+action should have been admitted. Re-running the cap guard during replay would
+let a change in cap arithmetic silently rewrite recorded history. What replay
+does check is that the log is internally self-consistent: sequence numbers
+strictly increase, every transition it replays is legal under the current
+state machine, and no event references an action not yet created. See the
+module docstring in `qntyspot/ledger/replay.py`.
+
+## FUTURE_DEFERRED: NFT execution
+
+The core does not assume every `Instrument` is fungible: `AssetClass` is a
+stated fact (`qntyspot/identity.py`), and V0A admits exactly one member,
+`FUNGIBLE`. A future OpenSea/Seaport adapter would introduce its own
+Instrument and Intent semantics behind the `ExecutionVenueAdapter` seam in
+`qntyspot/boundary.py`, without changing the fungible V0 execution contracts.
+No collection, trait, floor-price, or bidding model exists in this phase, and
+none is added speculatively.
