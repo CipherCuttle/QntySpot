@@ -1,0 +1,69 @@
+{
+  "schema": "qntyspot.policy.v0",
+  "policy_name": "solana-v0c-technical-sol-usdc-buy",
+  "side": "BUY",
+  "base": {
+    "ref": {
+      "namespace": "solana",
+      "cluster": "mainnet-beta",
+      "mint_address": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "token_program": "SPL_TOKEN"
+    },
+    "decimals": 6,
+    "asset_class": "FUNGIBLE",
+    "display_symbol": "USDC"
+  },
+  "quote": {
+    "ref": {
+      "namespace": "solana",
+      "cluster": "mainnet-beta",
+      "mint_address": "So11111111111111111111111111111111111111112",
+      "token_program": "SPL_TOKEN"
+    },
+    "decimals": 9,
+    "asset_class": "FUNGIBLE",
+    "display_symbol": "SOL"
+  },
+  "entry_ladder": {
+    "levels": [
+      {
+        "level_id": "SOL-USDC-1",
+        "trigger_price": "0.01",
+        "input_amount": "1"
+      }
+    ]
+  },
+  "exit_ladder": {
+    "levels": [
+      {
+        "level_id": "USDC-SOL-1",
+        "trigger_price": "0.01",
+        "input_ratio": "1"
+      }
+    ]
+  },
+  "capital": {
+    "allocation_quote": "2",
+    "per_order_cap_quote": "1",
+    "per_instrument_cap_quote": "2",
+    "per_network_cap_quote": "2",
+    "global_portfolio_cap_quote": "2",
+    "reserved_cash_quote": "0"
+  },
+  "limits": {
+    "max_executable_price": "0.01",
+    "min_executable_price": "0.0001",
+    "max_price_impact_bps": 10000,
+    "max_slippage_bps": 50
+  },
+  "timing": {
+    "valid_from_epoch_s": 1700000000,
+    "expiry_epoch_s": 1800000000,
+    "quote_ttl_s": 30
+  },
+  "reentry": {
+    "max_cycles": 1,
+    "rearm_hysteresis_bps": 0,
+    "rearm_cooldown_s": 1
+  }
+}

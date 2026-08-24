@@ -93,3 +93,27 @@ class LevelNotExecutableError(QntySpotError):
 
 class CycleLimitError(QntySpotError):
     """The policy's re-entry cycle limit has been reached."""
+
+
+class SolanaError(QntySpotError):
+    """The bounded Solana shadow substrate rejected an operation."""
+
+
+class SolanaTransportError(SolanaError):
+    """A bounded public-read transport attempt failed."""
+
+
+class SolanaTimeoutError(SolanaTransportError):
+    """A bounded public-read attempt exceeded its explicit timeout."""
+
+
+class SolanaResponseTooLargeError(SolanaError):
+    """A public-read response exceeded the configured byte bound."""
+
+
+class SolanaProtocolError(SolanaError):
+    """A Solana or Jupiter response violated the strict wire contract."""
+
+
+class JupiterApiError(SolanaError):
+    """The current official Jupiter read endpoint returned an API error."""

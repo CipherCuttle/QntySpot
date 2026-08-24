@@ -2,8 +2,9 @@
 
 These are typing protocols that describe where adapters attach. There is no
 default implementation, no registry, and no discovery. Importing this module
-cannot cause a request, a signature, or a key read. V0B implements only the
-read-only Ink ``QuoteSource`` in ``qntyspot.ink``.
+cannot cause a request, a signature, or a key read. The merged V0B Ink and
+current V0C Solana implementations attach only read-only ``QuoteSource``
+adapters.
 
 THE RULE THESE PROTOCOLS EXIST TO ENCODE
 ----------------------------------------

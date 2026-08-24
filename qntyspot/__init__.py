@@ -1,10 +1,11 @@
 """QntySpot -- deterministic policy-bound spot shadow runtime.
 
-PHASE: V0B -- INK_SHADOW_READ_ONLY
+PHASE: V0C -- SOLANA_SHADOW_READ_ONLY
 ----------------------------------
-This package contains one bounded public-read Ink adapter. It has no signer,
-no key handling, no transaction encoder, no transaction broadcast surface,
-and no live-capital authority from any other repository.
+This package contains the merged bounded Ink adapter and the one bounded
+public-read Solana/Jupiter adapter. It has no signer, no key handling, no
+transaction encoder, no transaction broadcast surface, and no live-capital
+authority from any other repository.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger
@@ -22,7 +23,7 @@ __version__ = "0.0.1a0"
 
 #: Machine-readable phase marker. Anything that reads this and proceeds to a
 #: network or signing operation is violating the phase contract.
-AUTHORITY = "INK_SHADOW_READ_ONLY"
+AUTHORITY = "SOLANA_SHADOW_READ_ONLY"
 NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False
@@ -45,6 +46,12 @@ from .errors import (  # noqa: E402
     RpcTransportError,
     SafeHaltError,
     StateTransitionError,
+    SolanaError,
+    SolanaTransportError,
+    SolanaTimeoutError,
+    SolanaResponseTooLargeError,
+    SolanaProtocolError,
+    JupiterApiError,
 )
 from .domain import (  # noqa: E402
     CycleV0,
@@ -72,6 +79,12 @@ from .identity import (  # noqa: E402
 )
 from .policy import load_policy_file, load_policy_text, parse_policy  # noqa: E402
 from .states import IntentState  # noqa: E402
+from .solana import (  # noqa: E402
+    JupiterV2Client,
+    SolanaMarketObservationV0,
+    SolanaRpcClient,
+    SolanaShadowAdapter,
+)
 
 __all__ = [
     "__version__",
@@ -96,6 +109,12 @@ __all__ = [
     "RpcResponseTooLargeError",
     "RpcTimeoutError",
     "RpcTransportError",
+    "SolanaError",
+    "SolanaTransportError",
+    "SolanaTimeoutError",
+    "SolanaResponseTooLargeError",
+    "SolanaProtocolError",
+    "JupiterApiError",
     "Side",
     "LadderKind",
     "LadderLevelV0",
@@ -117,6 +136,10 @@ __all__ = [
     "SolanaCluster",
     "TokenProgram",
     "IntentState",
+    "SolanaRpcClient",
+    "JupiterV2Client",
+    "SolanaMarketObservationV0",
+    "SolanaShadowAdapter",
     "parse_policy",
     "load_policy_text",
     "load_policy_file",

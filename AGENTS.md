@@ -5,14 +5,15 @@ Read this before modifying anything in this repository.
 ## Phase
 
 ```
-ACTIVE_PHASE = QNTY_SPOT_V0B_INK_SHADOW
-AUTHORITY    = INK_SHADOW_READ_ONLY
+ACTIVE_PHASE = QNTY_SPOT_V0C_SOLANA_SHADOW
+AUTHORITY    = SOLANA_SHADOW_READ_ONLY
 ```
 
 See [docs/AUTHORITY.md](docs/AUTHORITY.md) for the full, binding statement.
-The short version: this repository has one bounded public-read Ink client, no
-signer, no key handling, and no live-capital authority — from itself or from
-any other repo in this workspace.
+The short version: this repository preserves the bounded public-read Ink
+client and adds one bounded public-read Solana/Jupiter client, with no signer,
+no key handling, and no live-capital authority — from itself or from any
+other repo in this workspace.
 
 ## Authority boundary with sibling repositories
 
@@ -36,7 +37,7 @@ capital, signing, or trading authority, stop and treat it as a
 ## Rules for this phase
 
 - No third-party RPC library, HTTP client, or database server dependency. The
-  bounded Ink adapter uses the standard library plus `pytest`; SQLite remains
+  bounded Ink and Solana adapters use the standard library plus `pytest`; SQLite remains
   the V0A persistence substrate.
 - No private-key or wallet-file access, anywhere, including in tests.
 - No binary floating point for any economic quantity. Amounts are integer
@@ -56,7 +57,7 @@ capital, signing, or trading authority, stop and treat it as a
 - `tests/test_no_network.py` statically scans every module in `qntyspot/` for
   forbidden signing/key/venue-client imports, non-determinism, and
   ambient-secret access. Public standard-library transport is allowed only for
-  the bounded Ink read path. `tests/conftest.py` additionally disables the
+  the bounded Ink and Solana read paths. `tests/conftest.py` additionally disables the
   `socket` module for the whole offline unit-test session. Keep both green; do
   not weaken either to make a change land.
 
@@ -66,7 +67,7 @@ Read `docs/STATE_MACHINE.md` and `docs/POLICY_V0.md` first. The lifecycle
 states already anticipate `SIGNED`/`SUBMITTED`/`INCLUDED`/`CONFIRMED` as
 future venue steps — they are domain labels only in this phase, with no signer
 and no network behind them. Do not add adapter code, venue discovery, or
-automatic asset selection to reach those states; that begins in V0B and later
+automatic asset selection to reach those states; that begins in V0C and later
 (`docs/ROADMAP.md`).
 
 ## Completion discipline

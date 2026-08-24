@@ -20,6 +20,9 @@ qntyspot/
   boundary.py    typing Protocols for the chain/venue truth boundary.
   ink.py         bounded dual-RPC Ink observation, exact V2 quote arithmetic,
                  canonical shadow decisions, immutable evidence, and replay.
+  solana.py      bounded finalized Solana mint reads and current Jupiter Swap
+                 V2 exact-input observations, route/program evidence,
+                 version-0/ALT semantics, canonical decisions, and replay.
   ledger/
     schema.py    the SQL schema and its integrity rules (append-only triggers,
                  uniqueness constraints, foreign keys).
@@ -99,6 +102,29 @@ The V0B market identity is fixed to KRAKMASK/WETH9 and the verified InkySwap
 V2 factory/pool. A provider disagreement, identity mismatch, absent bytecode,
 zero reserves, or stale observation fails closed. The quote is a market-state
 simulation only; it is not a transaction simulation.
+
+## Solana V0C shadow data flow
+
+```
+PolicyV0 exact mint pair + exact atomic input
+   │
+   ├─ finalized getLatestBlockhash / getBlockHeight
+   ├─ finalized getMultipleAccounts (mint owner + decimals)
+   └─ Jupiter Swap V2 GET /build
+         │ exact input/output + bps + instructions + ALT map + blockhash
+         ▼
+SOLANA_MARKET_OBSERVATION_V0 ──SHA-256──▶ immutable evidence
+   │
+   │ exact human-unit Fraction price, strict stale slot/height checks
+   ▼
+SHADOW_DECISION_V0 ──policy/economic-action identity──▶ offline replay
+```
+
+The Jupiter response is evidence, not authority. The adapter never accepts a
+serialized third-party payload, never interprets raw instruction bytes as a
+trusted execution plan, and never silently labels an empty lookup map as a
+legacy message. A non-empty lookup map is explicitly recorded as version 0;
+an omitted map fails closed.
 
 ## Why SQLite carries big integers as TEXT
 
