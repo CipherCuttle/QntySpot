@@ -59,6 +59,66 @@ class SchemaVersionError(LedgerError):
     """Database schema version is not the version this code understands."""
 
 
+class OperationsError(QntySpotError):
+    """An operational reliability check failed closed."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class LockError(OperationsError):
+    """The single-instance lock could not be inspected or acquired."""
+
+
+class LockHeldError(LockError):
+    """Another owner, including this process, already holds the lock."""
+
+
+class LockPathError(LockError):
+    """The lock path cannot be opened safely."""
+
+
+class DatabaseOperationError(OperationsError):
+    """A database could not be opened or verified read-only."""
+
+
+class DatabaseMissingError(DatabaseOperationError):
+    """The requested database file is absent."""
+
+
+class DatabaseMalformedError(DatabaseOperationError):
+    """The input is not an admissible SQLite database."""
+
+
+class DatabaseIntegrityError(DatabaseOperationError):
+    """SQLite integrity or foreign-key verification failed."""
+
+
+class DatabaseSchemaError(DatabaseOperationError):
+    """The SQLite file does not contain the supported ledger schema."""
+
+
+class BackupError(OperationsError):
+    """A native SQLite backup did not complete successfully."""
+
+
+class BackupAliasError(BackupError):
+    """The backup destination aliases the active database or its sidecars."""
+
+
+class BackupDestinationError(BackupError):
+    """The backup destination is not a safe new file."""
+
+
+class BackupInterruptedError(BackupError):
+    """A backup was interrupted and its partial output is not trusted."""
+
+
+class BackupVerificationError(BackupError):
+    """A backup completed but failed independent verification."""
+
+
 class SafeHaltError(QntySpotError):
     """External truth is ambiguous. Operation must stop rather than speculate."""
 
