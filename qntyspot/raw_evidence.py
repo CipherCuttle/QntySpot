@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,17 @@ from .errors import SafeHaltError, SolanaError
 __all__ = ["RawEvidenceRecord", "RawEvidenceStore"]
 
 _HASH_RE = r"^[0-9a-f]{64}$"
+
+
+def _safe_evidence_relative_path(value: object, *, directory: str, suffix: str) -> Path:
+    if not isinstance(value, str):
+        raise SafeHaltError("raw evidence path is malformed")
+    path = Path(value)
+    if path.is_absolute() or path.parts[:1] != (directory,) or len(path.parts) != 2:
+        raise SafeHaltError("raw evidence path escapes its content-addressed directory")
+    if ".." in path.parts or not path.name.endswith(suffix):
+        raise SafeHaltError("raw evidence path is not content-addressed")
+    return path
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -167,13 +179,39 @@ class RawEvidenceStore:
     def read(self, record: RawEvidenceRecord) -> bytes:
         if not isinstance(record, RawEvidenceRecord):
             raise SolanaError("raw evidence record is malformed")
-        path = self.root / record.response_path
+        if (
+            not isinstance(record.response_sha256, str)
+            or re.fullmatch(_HASH_RE, record.response_sha256) is None
+            or not isinstance(record.request_sha256, str)
+            or re.fullmatch(_HASH_RE, record.request_sha256) is None
+            or isinstance(record.response_bytes, bool)
+            or not isinstance(record.response_bytes, int)
+            or record.response_bytes < 0
+            or not isinstance(record.request, dict)
+        ):
+            raise SafeHaltError("raw evidence record fields are malformed")
+        response_path = _safe_evidence_relative_path(
+            record.response_path, directory="responses", suffix=".bin"
+        )
+        manifest_path = _safe_evidence_relative_path(
+            record.manifest_path, directory="manifests", suffix=".json"
+        )
+        path = self.root / response_path
+        manifest = self.root / manifest_path
         try:
             body = path.read_bytes()
         except OSError as exc:
             raise SafeHaltError(f"raw response evidence is unavailable: {path}") from exc
         if len(body) != record.response_bytes or _sha256_hex(body) != record.response_sha256:
             raise SafeHaltError(f"raw response evidence digest mismatch: {path}")
+        try:
+            manifest_object = strict_json_loads(manifest.read_bytes())
+        except OSError as exc:
+            raise SafeHaltError(f"raw evidence manifest is unavailable: {manifest}") from exc
+        except Exception as exc:
+            raise SafeHaltError(f"raw evidence manifest is malformed: {manifest}") from exc
+        if manifest_object != record.canonical_object():
+            raise SafeHaltError(f"raw evidence manifest does not match the response record: {manifest}")
         return body
 
     def persist_index(self, path: str | Path, records: list[RawEvidenceRecord]) -> str:
@@ -184,6 +222,8 @@ class RawEvidenceStore:
             if not isinstance(record, RawEvidenceRecord):
                 raise SolanaError("raw evidence index contains a malformed record")
             self.read(record)
+            if record.digest() in unique:
+                raise SolanaError("raw evidence index contains a duplicate record")
             unique[record.digest()] = record
         payload_object = {
             "records": [record.canonical_object() for _, record in sorted(unique.items())],
