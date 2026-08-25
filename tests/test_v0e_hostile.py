@@ -68,14 +68,20 @@ from test_solana import (
     make_adapter as make_sol_adapter,
 )
 from v0e_support import (
+    AmbientSecretTripwire,
+    AuthorityTripwire,
     DeterministicClock,
     FaultStep,
+    NetworkTripwire,
     Scenario,
+    ScenarioOutcome,
+    SideEffectTripwire,
     ScriptedRpcTransport,
     preregistered_scenarios,
     receipt_bytes,
     receipt_digest,
     receipt_for,
+    wall_clock_tripwire,
 )
 
 
@@ -104,18 +110,26 @@ def _transport_case(scenario: Scenario) -> None:
         transport = ScriptedRpcTransport((FaultStep("oversized", b"x" * 257),))
     else:
         raise AssertionError(f"not an RPC transport case: {fault}")
-    JsonRpcClient(
+    client = JsonRpcClient(
         "https://fixture.invalid",
         max_retries=0,
         max_response_bytes=256,
         transport=transport,
-    ).request("eth_chainId", [])
+    )
+    try:
+        client.request("eth_chainId", [])
+    finally:
+        assert transport.calls == 1
 
 
 def _http_error_case(code: int) -> None:
     class ErrorOpener:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def open(self, _request: object, timeout: int) -> object:
             del timeout
+            self.calls += 1
             raise HTTPError(
                 "https://fixture.invalid",
                 code,
@@ -127,8 +141,12 @@ def _http_error_case(code: int) -> None:
     from qntyspot.robinhood import RobinhoodRestClient
 
     client = RobinhoodRestClient()
-    client.assets_http.opener = ErrorOpener()
-    client.asset(SPY_SYMBOL)
+    opener = ErrorOpener()
+    client.assets_http.opener = opener
+    try:
+        client.asset(SPY_SYMBOL)
+    finally:
+        assert opener.calls == (2 if code == 429 or 500 <= code <= 599 else 1)
 
 
 def _ink_case(scenario: Scenario) -> object:
@@ -138,6 +156,12 @@ def _ink_case(scenario: Scenario) -> object:
         return adapter.shadow_decision(
             policy_for_fixture(), "cycle", "E1", now_epoch_s=NOW,
             observation=observation, current_common_block=observation.common_block + 13,
+        )
+    if sid == "V0E-T12":
+        adapter, observation = observed_adapter()
+        return adapter.shadow_decision(
+            policy_for_fixture(), "cycle", "E1", now_epoch_s=NOW,
+            observation=observation, current_common_block=observation.common_block - 1,
         )
     if sid == "V0E-T13":
         return adapter_pair(first=FakeRpc(chain_id=1), second=FakeRpc(chain_id=1)).observe()
@@ -191,8 +215,8 @@ def _ink_case(scenario: Scenario) -> object:
 def _rh_case(scenario: Scenario, tmp_path: Path) -> object:
     sid = scenario.scenario_id
     kwargs: dict[str, object] = {}
-    if sid in {"V0E-I01", "V0E-T12"}:
-        kwargs["rpc"] = {"wrong_chain": sid == "V0E-I01", "block_timestamp": RH_NOW + 31}
+    if sid == "V0E-I01":
+        kwargs["rpc"] = {"wrong_chain": True, "block_timestamp": RH_NOW}
     if sid in {"V0E-I02", "V0E-I08"}:
         doc = json.loads(asset_body())
         doc["assets"][0]["deployments"][0]["contractAddress"] = "0x" + "99" * 20
@@ -374,19 +398,74 @@ def _evidence_case(scenario: Scenario, tmp_path: Path) -> object:
         forged = replace(record, response_path="../secret.bin")
         return store.read(forged)
     if sid == "V0E-E07":
-        raise RuntimeError("replay must not reach transport")
+        from qntyspot.robinhood import replay_shadow_decision
+
+        adapter, policy, _rpc, _store = make_rh_adapter(tmp_path / "replay")
+        observation = adapter.observe(
+            policy, "cycle-0", "E1", now_epoch_s=RH_NOW,
+            taker=QUALIFICATION_TAKER_ADDRESS,
+        )
+        decision = replay_shadow_decision(
+            policy, observation, "cycle-0", "E1",
+            now_epoch_s=observation.observation_time_epoch_s,
+        )
+        return ScenarioOutcome(
+            "REJECTED", f"REPLAY_COMPLETED:{decision.decision}",
+        )
     if sid == "V0E-E08":
-        DeterministicClock(1_700_000_100).now_epoch_s()
-        return "REJECTED"
+        from qntyspot.robinhood import replay_shadow_decision
+
+        adapter, policy, _rpc, _store = make_rh_adapter(tmp_path / "replay")
+        observation = adapter.observe(
+            policy, "cycle-0", "E1", now_epoch_s=RH_NOW,
+            taker=QUALIFICATION_TAKER_ADDRESS,
+        )
+        with wall_clock_tripwire():
+            decision = replay_shadow_decision(
+                policy, observation, "cycle-0", "E1",
+                now_epoch_s=observation.observation_time_epoch_s,
+            )
+        return ScenarioOutcome(
+            "REJECTED", f"REPLAY_COMPLETED_WITHOUT_CLOCK:{decision.decision}",
+        )
     if sid == "V0E-E09":
         from qntyspot.robinhood import replay_shadow_decision
-        raise SafeHaltError("replay timestamp altered")
+
+        adapter, policy, _rpc, _store = make_rh_adapter(tmp_path / "replay")
+        observation = adapter.observe(
+            policy, "cycle-0", "E1", now_epoch_s=RH_NOW,
+            taker=QUALIFICATION_TAKER_ADDRESS,
+        )
+        return replay_shadow_decision(
+            policy, observation, "cycle-0", "E1",
+            now_epoch_s=observation.observation_time_epoch_s + 1,
+        )
     if sid == "V0E-E10":
-        first = receipt_digest([])
-        second = receipt_digest([receipt_for(scenario, lambda: "REJECTED")])
-        if first != second:
-            raise SafeHaltError("replay result digest changed")
-        return "REJECTED"
+        from qntyspot.robinhood import replay_shadow_decision
+
+        adapter, policy, _rpc, _store = make_rh_adapter(tmp_path / "replay")
+        observation = adapter.observe(
+            policy, "cycle-0", "E1", now_epoch_s=RH_NOW,
+            taker=QUALIFICATION_TAKER_ADDRESS,
+        )
+        first = replay_shadow_decision(
+            policy, observation, "cycle-0", "E1",
+            now_epoch_s=observation.observation_time_epoch_s,
+        )
+        second = replay_shadow_decision(
+            policy, observation, "cycle-0", "E1",
+            now_epoch_s=observation.observation_time_epoch_s,
+        )
+        assert canonical_json_bytes(first.canonical_object()) == canonical_json_bytes(second.canonical_object())
+        assert first.digest() == second.digest()
+        mutated = replace(
+            observation,
+            observation_time_epoch_s=observation.observation_time_epoch_s + 1,
+        )
+        return replay_shadow_decision(
+            policy, mutated, "cycle-0", "E1",
+            now_epoch_s=observation.observation_time_epoch_s,
+        )
     if sid == "V0E-E11":
         secret = b"fixture-secret"
         from qntyspot.robinhood import ZeroXV2Client
@@ -401,7 +480,7 @@ def _ledger_case(scenario: Scenario, tmp_path: Path) -> tuple[object, str | None
     from qntyspot.policy import parse_policy
 
     policy_doc = base_policy_doc()
-    if scenario.scenario_id == "V0E-C02":
+    if scenario.scenario_id in {"V0E-C02", "V0E-C08", "V0E-C09"}:
         policy_doc["capital"].update(
             allocation_quote="100",
             per_instrument_cap_quote="100",
@@ -424,25 +503,65 @@ def _ledger_case(scenario: Scenario, tmp_path: Path) -> tuple[object, str | None
             return "REJECTED", intent.economic_action_id, None
     if sid == "V0E-C02":
         with open_ledger(db) as led:
-            drive(led, intent.economic_action_id, S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED, S.RESERVED)
+            drive(led, intent.economic_action_id, S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED)
             second = build_intent(policy, cycle, policy.level("E2"), now_epoch_s=NOW)
             led.create_intent(second, now_epoch_s=NOW)
             drive(led, second.economic_action_id, S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED)
-            with pytest.raises(BudgetExceededError):
-                led.transition(second.economic_action_id, S.RESERVED, now_epoch_s=NOW)
-            # The reservation remains active; a second worker cannot spend it.
-            return "REJECTED", intent.economic_action_id, "ACTIVE"
+        barrier = threading.Barrier(2)
+        outcomes: list[str] = []
+
+        def reserve_worker(action_id: str) -> None:
+            with open_ledger(db) as worker:
+                barrier.wait(timeout=5)
+                try:
+                    worker.transition(action_id, S.RESERVED, now_epoch_s=NOW)
+                except BudgetExceededError:
+                    outcomes.append("budget-exceeded")
+                else:
+                    outcomes.append("reserved")
+
+        threads = [
+            threading.Thread(target=reserve_worker, args=(intent.economic_action_id,)),
+            threading.Thread(target=reserve_worker, args=(second.economic_action_id,)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
+        assert sorted(outcomes) == ["budget-exceeded", "reserved"]
+        with open_ledger(db) as led:
+            active = led.connection.execute(
+                "SELECT COUNT(*) FROM budget_reservations WHERE status = 'ACTIVE'"
+            ).fetchone()[0]
+            assert active == 1
+        return "REJECTED", intent.economic_action_id, "ACTIVE"
     if sid in {"V0E-C04", "V0E-C05", "V0E-C06", "V0E-C07", "V0E-C08", "V0E-C09", "V0E-C10"}:
         with open_ledger(db) as led:
             states = () if sid == "V0E-C04" else (
                 S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED, S.RESERVED,
             )
-            if sid in {"V0E-C06", "V0E-C07", "V0E-C08", "V0E-C09", "V0E-C10"}:
+            if sid in {"V0E-C07", "V0E-C08", "V0E-C09", "V0E-C10"}:
                 states += (S.SIGNED, S.SUBMITTED)
             drive(led, intent.economic_action_id, *states)
         with open_ledger(db) as restarted:
             actions = recover(restarted, now_epoch_s=NOW + 60)
             disposition = restarted.connection.execute("SELECT status FROM budget_reservations").fetchone()
+            assert len(actions) == 1
+            if sid in {"V0E-C04", "V0E-C05", "V0E-C06"}:
+                assert actions[0].disposition.value == "ABANDON"
+                assert actions[0].to_state is S.CANCELLED
+            if sid in {"V0E-C07", "V0E-C10"}:
+                assert actions[0].disposition.value == "RECONCILIATION_REQUIRED"
+                assert actions[0].to_state is S.SAFE_HALT
+                assert restarted.intent_state(intent.economic_action_id) is S.SAFE_HALT
+            if sid in {"V0E-C08", "V0E-C09"}:
+                assert disposition is not None and disposition[0] == "QUARANTINED"
+                second = build_intent(policy, cycle, policy.level("E2"), now_epoch_s=NOW)
+                restarted.create_intent(second, now_epoch_s=NOW)
+                drive(restarted, second.economic_action_id, S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED)
+                with pytest.raises(BudgetExceededError):
+                    restarted.transition(second.economic_action_id, S.RESERVED, now_epoch_s=NOW)
             if sid == "V0E-C10":
                 assert actions[0].disposition.value == "RECONCILIATION_REQUIRED"
             return (
@@ -461,6 +580,7 @@ def _state_case(scenario: Scenario, tmp_path: Path) -> object:
     from qntyspot.policy import parse_policy
 
     policy = parse_policy(base_policy_doc())
+    tmp_path.mkdir(parents=True, exist_ok=True)
     with open_ledger(str(tmp_path / "states.sqlite3")) as led:
         led.admit_policy(policy)
         cycle = led.open_cycle(policy, 0, now_epoch_s=NOW)
@@ -476,8 +596,14 @@ def _state_case(scenario: Scenario, tmp_path: Path) -> object:
         }[scenario.scenario_id]
         if scenario.scenario_id == "V0E-M05":
             led.transition(intent.economic_action_id, S.SAFE_HALT, now_epoch_s=NOW)
+        elif scenario.scenario_id == "V0E-M02":
+            led.transition(intent.economic_action_id, S.TRIGGERED, now_epoch_s=NOW)
+        elif scenario.scenario_id == "V0E-M03":
+            drive(led, intent.economic_action_id, S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED, S.RESERVED)
+        elif scenario.scenario_id == "V0E-M04":
+            drive(led, intent.economic_action_id, S.TRIGGERED, S.QUOTE_PINNED, S.SIMULATED, S.RESERVED, S.SIGNED, S.SUBMITTED)
         else:
-            led.transition(intent.economic_action_id, S.ARMED, now_epoch_s=NOW) if False else None
+            assert led.intent_state(intent.economic_action_id) is S.ARMED
         return led.transition(intent.economic_action_id, target, now_epoch_s=NOW)
 
 
@@ -487,47 +613,97 @@ def _authority_case(scenario: Scenario) -> object:
     tree = [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in sources]
     assert all(not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"eval", "exec"} for node in ast.walk(module)) for module in tree)
     assert "subprocess" not in text and "private_key" not in text and "seed_phrase" not in text
+
+    if scenario.scenario_id == "V0E-A08":
+        retry_transport = ScriptedRpcTransport(
+            tuple(FaultStep(f"timeout-{index}", TimeoutError("bounded retry fixture")) for index in range(3))
+        )
+        with pytest.raises(Exception):
+            JsonRpcClient("https://fixture.invalid", max_retries=2, transport=retry_transport).request(
+                "eth_chainId", []
+            )
+        assert retry_transport.calls == 3
+
+    from qntyspot.robinhood import ZeroXV2Client
+    from qntyspot.errors import ZeroXApiKeyRequired
+
+    calls = 0
+
+    def transport(*_args: object) -> bytes:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("authority test reached a 0x transport")
+
+    guard = AuthorityTripwire()
+    with guard.installed():
+        client = ZeroXV2Client(api_key=None, transport=transport)
+        with pytest.raises(ZeroXApiKeyRequired):
+            client.quote(
+                sell_token=USDG_ADDRESS, buy_token=TOKEN, sell_amount_atomic=1,
+                taker=QUALIFICATION_TAKER_ADDRESS, slippage_bps=0,
+                policy_min_output_atomic=1,
+            )
+    assert guard.attempts == 0, guard.surfaces
+    assert calls == 0
     assert not hasattr(socket, "_qntyspot_network_escape")
-    return "REJECTED"
+    return ScenarioOutcome("REJECTED", "AUTHORITY_BOUNDARY_REJECTED_WITHOUT_TRANSPORT")
 
 
 def _run_case(scenario: Scenario, tmp_path: Path):
     if scenario.scenario_id in {f"V0E-T{index:02d}" for index in range(1, 11)}:
         if scenario.scenario_id in {"V0E-T07", "V0E-T08", "V0E-T09", "V0E-T10"}:
-            return receipt_for(scenario, lambda: _http_error_case({"V0E-T07": 400, "V0E-T08": 401, "V0E-T09": 429, "V0E-T10": 503}[scenario.scenario_id]))
-        return receipt_for(scenario, lambda: _transport_case(scenario))
-    if scenario.scenario_id == "V0E-T11" or scenario.scenario_id in {"V0E-T13", "V0E-T14", "V0E-T15", "V0E-T16"}:
-        return receipt_for(scenario, lambda: _ink_case(scenario))
-    if scenario.scenario_id == "V0E-T12":
-        return receipt_for(scenario, lambda: _rh_case(scenario, tmp_path))
-    if scenario.scenario_id.startswith(("V0E-I", "V0E-Q", "V0E-R")):
-        if scenario.scenario_id.startswith("V0E-R") or scenario.scenario_id.startswith("V0E-I") and scenario.adapter == "Robinhood":
-            return receipt_for(scenario, lambda: _rh_case(scenario, tmp_path))
-        if scenario.scenario_id.startswith("V0E-I") or scenario.scenario_id.startswith("V0E-Q"):
-            try:
-                if scenario.adapter in {"Ink", "core"}:
-                    result = _ink_case(scenario)
-                elif scenario.adapter.startswith("Robinhood") or scenario.adapter == "0x fixture":
-                    result = _rh_case(scenario, tmp_path)
-                else:
-                    result = _sol_case(scenario)
-            except BaseException as exc:
-                return receipt_for(scenario, lambda: (_ for _ in ()).throw(exc))
-            return receipt_for(scenario, lambda result=result: result)
-    if scenario.scenario_id.startswith("V0E-S"):
-        return receipt_for(scenario, lambda: _sol_case(scenario))
-    if scenario.scenario_id.startswith("V0E-K"):
-        return receipt_for(scenario, lambda: _ink_case(scenario))
-    if scenario.scenario_id.startswith("V0E-E"):
-        return receipt_for(scenario, lambda: _evidence_case(scenario, tmp_path))
-    if scenario.scenario_id.startswith("V0E-C"):
-        result, action_id, disposition = _ledger_case(scenario, tmp_path)
-        return receipt_for(scenario, lambda result=result: result, economic_action_id=action_id, reservation_disposition=disposition)
-    if scenario.scenario_id.startswith("V0E-M"):
-        return receipt_for(scenario, lambda: _state_case(scenario, tmp_path))
-    if scenario.scenario_id.startswith("V0E-A"):
-        return receipt_for(scenario, _authority_case)
-    raise AssertionError(f"no V0E handler for {scenario.scenario_id}")
+            operation = lambda: _http_error_case(
+                {"V0E-T07": 400, "V0E-T08": 401, "V0E-T09": 429, "V0E-T10": 503}[scenario.scenario_id]
+            )
+        else:
+            operation = lambda: _transport_case(scenario)
+    elif scenario.scenario_id in {"V0E-T11", "V0E-T12", "V0E-T13", "V0E-T14", "V0E-T15", "V0E-T16"}:
+        operation = lambda: _ink_case(scenario)
+    elif scenario.scenario_id.startswith(("V0E-I", "V0E-Q", "V0E-R")):
+        if scenario.scenario_id.startswith("V0E-R") or (scenario.scenario_id.startswith("V0E-I") and scenario.adapter == "Robinhood"):
+            operation = lambda: _rh_case(scenario, tmp_path)
+        elif scenario.adapter in {"Ink", "core"}:
+            operation = lambda: _ink_case(scenario)
+        elif scenario.adapter.startswith("Robinhood") or scenario.adapter == "0x fixture":
+            operation = lambda: _rh_case(scenario, tmp_path)
+        else:
+            operation = lambda: _sol_case(scenario)
+    elif scenario.scenario_id.startswith("V0E-S"):
+        operation = lambda: _sol_case(scenario)
+    elif scenario.scenario_id.startswith("V0E-K"):
+        operation = lambda: _ink_case(scenario)
+    elif scenario.scenario_id.startswith("V0E-E"):
+        operation = lambda: _evidence_case(scenario, tmp_path)
+    elif scenario.scenario_id.startswith("V0E-C"):
+        def operation() -> object:
+            result, action_id, disposition = _ledger_case(scenario, tmp_path)
+            return ScenarioOutcome(result, result, action_id, disposition)
+    elif scenario.scenario_id.startswith("V0E-M"):
+        operation = lambda: _state_case(scenario, tmp_path)
+    elif scenario.scenario_id.startswith("V0E-A"):
+        operation = lambda: _authority_case(scenario)
+    else:
+        raise AssertionError(f"no V0E handler for {scenario.scenario_id}")
+
+    tripwire = NetworkTripwire()
+    secret_tripwire = AmbientSecretTripwire()
+    side_effect_tripwire = SideEffectTripwire()
+    with tripwire.installed(), secret_tripwire.installed(), side_effect_tripwire.installed():
+        receipt = receipt_for(
+            scenario,
+            operation,
+            network_read_count=lambda: tripwire.attempts,
+            secret_read_count=lambda: secret_tripwire.attempts,
+            signing_count=lambda: side_effect_tripwire.signing_attempts,
+            approval_count=lambda: side_effect_tripwire.approval_attempts,
+            broadcast_count=lambda: side_effect_tripwire.broadcast_attempts,
+        )
+    assert tripwire.attempts == 0, tripwire.surfaces
+    assert secret_tripwire.attempts == 0, secret_tripwire.surfaces
+    assert side_effect_tripwire.signing_attempts == 0
+    assert side_effect_tripwire.approval_attempts == 0
+    assert side_effect_tripwire.broadcast_attempts == 0
+    return receipt
 
 
 def test_v0e_registry_is_frozen_and_complete() -> None:
