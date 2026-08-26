@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -17,7 +18,6 @@ from qntyspot.policy import parse_policy
 from qntyspot.raw_evidence import RawEvidenceStore
 from qntyspot.robinhood import (
     CHAINLINK_ROBINHOOD_FEED_DIRECTORY_ENDPOINT,
-    QUALIFICATION_TAKER_ADDRESS,
     MAX_RPC_FUTURE_SKEW_S,
     ROBINHOOD_ASSETS_ENDPOINT,
     ROBINHOOD_PRICES_ENDPOINT,
@@ -41,6 +41,8 @@ from qntyspot.domain import Side
 
 NOW = 1_800_000_000
 TOKEN = "0x117cc2133c37b721f49de2a7a74833232b3b4c0c"
+VALID_TAKER = "0x1324d87e24E1657F6fe6805dE814Bb6873052106"
+HISTORICAL_SYNTHETIC_TAKER = "0x0000000000000000000000000000000000000001"
 UID = "0x" + "12" * 32
 FEED = "0x" + "34" * 20
 ALLOWANCE = "0x0000000000001ff3684f28c67538d4d072c22734"
@@ -132,6 +134,7 @@ def zero_body(*, sell_token: str = USDG_ADDRESS, buy_token: str = TOKEN, sell_am
         "issues": {"allowance": {"actual": "0", "spender": ALLOWANCE}, "balance": None, "simulationIncomplete": False, "invalidSourcesPassed": []},
         "liquidityAvailable": True,
         "minBuyAmount": str(min_buy),
+        "mode": "exact-in",
         "route": {
             "fills": [{"from": sell_token, "to": buy_token, "source": "Robinhood_RFQ", "proportionBps": "10000"}],
             "tokens": [{"address": sell_token, "symbol": "USDG"}, {"address": buy_token, "symbol": "SPY"}],
@@ -214,9 +217,57 @@ def make_adapter(tmp_path: Path, **kwargs: Any) -> tuple[RobinhoodShadowAdapter,
     return adapter, robinhood_policy(), rpc_transport, store
 
 
+@pytest.mark.parametrize(
+    "taker",
+    [None, "", "not-an-address", "0x" + "0" * 40, HISTORICAL_SYNTHETIC_TAKER],
+    ids=["absent", "blank", "malformed", "zero", "historical-sentinel"],
+)
+def test_invalid_qualification_taker_fails_before_any_network(tmp_path: Path, taker: str | None) -> None:
+    adapter, policy, rpc, _store = make_adapter(tmp_path)
+
+    with pytest.raises(RobinhoodProtocolError):
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=taker)
+
+    assert not adapter.rest.evidence_records
+    assert not rpc.calls
+    assert adapter.zero_x.http.read_count == 0
+
+
+def test_configured_qualification_taker_is_preserved_in_zero_x_request(tmp_path: Path) -> None:
+    captured: list[tuple[str, dict[str, str]]] = []
+
+    def transport(target: str, _query: bytes, headers: dict[str, str]) -> bytes:
+        captured.append((target, headers))
+        return zero_body()
+
+    store = RawEvidenceStore(tmp_path / "raw")
+    client = ZeroXV2Client(
+        api_key="fixture-secret-key",
+        evidence_store=store,
+        transport=transport,
+    )
+    client.quote(
+        sell_token=USDG_ADDRESS,
+        buy_token=TOKEN,
+        sell_amount_atomic=100_000_000,
+        taker=VALID_TAKER,
+        slippage_bps=100,
+        policy_min_output_atomic=1,
+    )
+
+    assert len(captured) == 1
+    target, headers = captured[0]
+    assert parse_qs(urlsplit(target).query)["taker"] == [VALID_TAKER]
+    assert headers == {"0x-api-key": "fixture-secret-key", "0x-version": "v2"}
+    assert len(client.evidence_records) == 1
+    record = client.evidence_records[0]
+    assert "headers" not in record.request
+    assert b"fixture-secret-key" not in (tmp_path / "raw" / record.manifest_path).read_bytes()
+
+
 def test_offline_full_observation_and_two_replays_are_identical(tmp_path: Path) -> None:
     adapter, policy, _rpc, store = make_adapter(tmp_path)
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     decision = adapter.shadow_decision(policy, "cycle-0", "E1", now_epoch_s=NOW)
     assert observation.sequencer_status == "UNAVAILABLE_NOT_PUBLISHED"
     assert observation.rest_raw_bid == 100
@@ -239,7 +290,7 @@ def test_offline_full_observation_and_two_replays_are_identical(tmp_path: Path) 
 @pytest.mark.parametrize("skew", [-1, 0, 1, 29, 30])
 def test_rpc_future_skew_boundary_is_accepted(tmp_path: Path, skew: int) -> None:
     adapter, policy, _rpc, _store = make_adapter(tmp_path, rpc={"block_timestamp": NOW + skew})
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     assert observation.rpc_future_skew_s == skew
     assert observation.rpc_block_timestamp_epoch_s == NOW + skew
 
@@ -247,13 +298,13 @@ def test_rpc_future_skew_boundary_is_accepted(tmp_path: Path, skew: int) -> None
 def test_rpc_future_skew_over_bound_safe_halts_before_0x(tmp_path: Path) -> None:
     adapter, policy, rpc, _store = make_adapter(tmp_path, rpc={"block_timestamp": NOW + MAX_RPC_FUTURE_SKEW_S + 1})
     with pytest.raises(SafeHaltError, match="bounded future skew"):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     assert not any(request["method"] == "eth_call" and request["params"][0].get("data") == "0xfeaf968c" for request in rpc.calls)
 
 
 def test_skew_fields_are_canonical_and_replay_uses_frozen_timestamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     adapter, policy, _rpc, _store = make_adapter(tmp_path, rpc={"block_timestamp": NOW + 30})
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     canonical = observation.canonical_object()
     assert canonical["observation_time_epoch_s"] == NOW
     assert canonical["rpc_block_timestamp_epoch_s"] == NOW + 30
@@ -275,7 +326,7 @@ def test_skew_fields_are_canonical_and_replay_uses_frozen_timestamp(tmp_path: Pa
 
 def test_persistence_is_immutable_and_reloads_byte_identically(tmp_path: Path) -> None:
     adapter, policy, _rpc, _store = make_adapter(tmp_path)
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     decision = adapter.shadow_decision(policy, "cycle-0", "E1", now_epoch_s=NOW)
     identity_path = tmp_path / "ROBINHOOD_ASSET_IDENTITY_V0.json"
     observation_path = tmp_path / "ROBINHOOD_MARKET_OBSERVATION_V0.json"
@@ -312,21 +363,21 @@ def test_authoritative_identity_mismatches_fail_closed(tmp_path: Path, kind: str
             symbol=SPY_SYMBOL,
         )
         with pytest.raises(SafeHaltError):
-            adapter.observe(robinhood_policy(), "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+            adapter.observe(robinhood_policy(), "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
 
 
 def test_wrong_rpc_chain_and_oracle_pause_fail_closed(tmp_path: Path) -> None:
     adapter, policy, _rpc, _store = make_adapter(tmp_path, rpc={"wrong_chain": True})
     with pytest.raises(SafeHaltError):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     adapter, policy, _rpc, _store = make_adapter(tmp_path / "paused", rpc={"paused": True})
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     assert adapter.shadow_decision(policy, "cycle-0", "E1", now_epoch_s=NOW, observation=observation).decision == "ABSTAIN"
 
 
 def test_multiplier_is_applied_once_and_not_to_chainlink(tmp_path: Path) -> None:
     adapter, policy, _rpc, _store = make_adapter(tmp_path)
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     assert observation.token_reference_bid == observation.rest_raw_bid * observation.ui_multiplier
     assert observation.chainlink_price == 150
     assert observation.chainlink_price != observation.chainlink_price * observation.ui_multiplier
@@ -337,7 +388,7 @@ def test_pending_multiplier_transition_is_ambiguous(tmp_path: Path) -> None:
     body = asset_body(pendingMultiplier="2", pendingMultiplierEffectiveTime=pending_time)
     adapter, policy, _rpc, _store = make_adapter(tmp_path, http={"asset": body})
     with pytest.raises(SafeHaltError):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
 
 
 @pytest.mark.parametrize("price_changes, answer, expected", [
@@ -349,9 +400,9 @@ def test_stale_halt_and_bad_oracle_are_not_eligible(tmp_path: Path, price_change
     adapter, policy, _rpc, _store = make_adapter(tmp_path, rpc={"feed_answer": answer}, http={"price": price_body(**price_changes)})
     if answer == 0:
         with pytest.raises(SafeHaltError, match=expected):
-            adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+            adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     else:
-        observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
         decision = adapter.shadow_decision(policy, "cycle-0", "E1", now_epoch_s=NOW, observation=observation)
         assert expected in decision.reason_code
 
@@ -367,7 +418,7 @@ def test_zero_x_pair_and_amount_are_exact(tmp_path: Path, field: str) -> None:
         values["sell_amount"] = 100_000_001
     adapter, policy, _rpc, _store = make_adapter(tmp_path, http={"zero_quote": zero_body(**values)})
     with pytest.raises(SafeHaltError):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
 
 
 def test_zero_x_unknown_wire_field_and_malformed_calldata_fail_closed(tmp_path: Path) -> None:
@@ -375,12 +426,20 @@ def test_zero_x_unknown_wire_field_and_malformed_calldata_fail_closed(tmp_path: 
     raw["unexpected"] = True
     adapter, policy, _rpc, _store = make_adapter(tmp_path, http={"zero_quote": canonical_json_bytes(raw)})
     with pytest.raises(RobinhoodProtocolError):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
+
+
+def test_zero_x_non_exact_in_mode_fails_closed(tmp_path: Path) -> None:
+    raw = json.loads(zero_body())
+    raw["mode"] = "exact-out"
+    adapter, policy, _rpc, _store = make_adapter(tmp_path, http={"zero_quote": canonical_json_bytes(raw)})
+    with pytest.raises(SafeHaltError, match="exact-in"):
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     raw = json.loads(zero_body())
     raw["transaction"]["data"] = "0x0"
     adapter, policy, _rpc, _store = make_adapter(tmp_path / "calldata", http={"zero_quote": canonical_json_bytes(raw)})
     with pytest.raises(RobinhoodProtocolError):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
 
 
 def test_api_key_is_never_captured_or_persisted(tmp_path: Path) -> None:
@@ -388,7 +447,7 @@ def test_api_key_is_never_captured_or_persisted(tmp_path: Path) -> None:
     store = RawEvidenceStore(tmp_path / "raw")
     client = ZeroXV2Client(api_key=key, evidence_store=store, transport=http_transport_factory(zero_quote=key.encode()))
     with pytest.raises(SafeHaltError):
-        client.quote(sell_token=USDG_ADDRESS, buy_token=TOKEN, sell_amount_atomic=1, taker=QUALIFICATION_TAKER_ADDRESS, slippage_bps=0, policy_min_output_atomic=1)
+        client.quote(sell_token=USDG_ADDRESS, buy_token=TOKEN, sell_amount_atomic=1, taker=VALID_TAKER, slippage_bps=0, policy_min_output_atomic=1)
     assert not list((tmp_path / "raw").rglob("*"))
 
 
@@ -413,7 +472,7 @@ def test_http_error_body_is_captured_without_the_api_key(tmp_path: Path) -> None
             sell_token=USDG_ADDRESS,
             buy_token=TOKEN,
             sell_amount_atomic=1,
-            taker=QUALIFICATION_TAKER_ADDRESS,
+            taker=VALID_TAKER,
             slippage_bps=0,
             policy_min_output_atomic=1,
         )
@@ -425,9 +484,9 @@ def test_venue_looser_bound_is_rejected_but_stricter_bound_is_acceptable(tmp_pat
     raw = zero_body(min_buy=499_999_999)
     adapter, policy, _rpc, _store = make_adapter(tmp_path, http={"zero_quote": raw})
     with pytest.raises(SafeHaltError):
-        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     adapter, policy, _rpc, _store = make_adapter(tmp_path / "strict", http={"zero_quote": zero_body(min_buy=600_000_000_000_000_000)})
-    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
     assert observation.zero_x_min_buy_amount == 600_000_000_000_000_000
 
 

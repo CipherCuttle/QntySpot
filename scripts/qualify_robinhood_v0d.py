@@ -16,8 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from qntyspot.canon import canonical_json_bytes
 from qntyspot.policy import parse_policy
 from qntyspot.raw_evidence import RawEvidenceStore
+from qntyspot.errors import RobinhoodProtocolError
 from qntyspot.robinhood import (
-    QUALIFICATION_TAKER_ADDRESS,
     SPY_SYMBOL,
     USDG_ADDRESS,
     ChainlinkRobinhoodDirectoryClient,
@@ -28,6 +28,7 @@ from qntyspot.robinhood import (
     persist_decision,
     persist_identity,
     persist_observation,
+    validate_qualification_taker,
 )
 
 
@@ -67,6 +68,12 @@ def main() -> int:
     if not api_key:
         print("QNTY_SPOT_V0D_ROBINHOOD_SHADOW_BLOCKED_0X_API_KEY_REQUIRED")
         return 2
+    taker_raw = os.environ.get("QNTYSPOT_QUALIFICATION_TAKER")
+    try:
+        taker = validate_qualification_taker(taker_raw)
+    except RobinhoodProtocolError:
+        print("QNTY_SPOT_V0D_ROBINHOOD_SHADOW_BLOCKED_QUALIFICATION_TAKER_REQUIRED_OR_INVALID")
+        return 2
 
     output = args.output
     if output.exists() and any(output.iterdir()):
@@ -85,7 +92,7 @@ def main() -> int:
     _write_once(output / "POLICY_V0.json", canonical_json_bytes(policy.canonical))
     adapter = RobinhoodShadowAdapter(rest, rpc, directory, zero_x, symbol=SPY_SYMBOL)
     observation_time_epoch_s = time.time_ns() // 1_000_000_000
-    observation = adapter.observe(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=observation_time_epoch_s, taker=QUALIFICATION_TAKER_ADDRESS)
+    observation = adapter.observe(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=observation_time_epoch_s, taker=taker)
     decision = adapter.shadow_decision(policy, "robinhood-v0d-cycle-0", "E1", now_epoch_s=observation_time_epoch_s, observation=observation)
     assert adapter.identity is not None
     persist_identity(output / "ROBINHOOD_ASSET_IDENTITY_V0.json", adapter.identity)

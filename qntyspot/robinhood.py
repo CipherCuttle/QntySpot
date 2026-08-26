@@ -51,7 +51,7 @@ __all__ = [
     "ZEROX_SWAP_V2_QUOTE_ENDPOINT",
     "SPY_SYMBOL",
     "USDG_ADDRESS",
-    "QUALIFICATION_TAKER_ADDRESS",
+    "validate_qualification_taker",
     "SEQUENCER_GRACE_PERIOD_S",
     "MAX_RPC_FUTURE_SKEW_S",
     "ZEROX_MAX_BLOCK_LAG",
@@ -84,7 +84,7 @@ CHAINLINK_ROBINHOOD_FEED_DIRECTORY_ENDPOINT = (
 ZEROX_SWAP_V2_QUOTE_ENDPOINT = "https://api.0x.org/swap/allowance-holder/quote"
 SPY_SYMBOL = "SPY"
 USDG_ADDRESS = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
-QUALIFICATION_TAKER_ADDRESS = "0x0000000000000000000000000000000000000001"
+_HISTORICAL_SYNTHETIC_TAKER = "0x0000000000000000000000000000000000000001"
 SEQUENCER_GRACE_PERIOD_S = 3_600
 MAX_RPC_FUTURE_SKEW_S = 30
 MULTIPLIER_SCALE = 10**18
@@ -131,6 +131,20 @@ def _address(value: Any, *, field: str) -> str:
     if int(normalized, 16) == 0:
         raise RobinhoodProtocolError(f"{field}: zero address is not admissible")
     return normalized
+
+
+def validate_qualification_taker(value: Any) -> str:
+    """Validate and preserve the operator-configured public EVM taker."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise RobinhoodProtocolError("qualification taker is required")
+    if not isinstance(value, str) or not _ADDRESS_RE.fullmatch(value):
+        raise RobinhoodProtocolError("qualification taker is a malformed EVM address")
+    normalized = value.lower()
+    if int(normalized, 16) == 0:
+        raise RobinhoodProtocolError("qualification taker cannot be the zero address")
+    if normalized == _HISTORICAL_SYNTHETIC_TAKER:
+        raise RobinhoodProtocolError("qualification taker cannot be the historical synthetic sentinel")
+    return value
 
 
 def _address_or_zero(value: Any, *, field: str) -> str:
@@ -666,15 +680,15 @@ class ZeroXV2Client:
         sell_token: str,
         buy_token: str,
         sell_amount_atomic: int,
-        taker: str,
+        taker: str | None,
         slippage_bps: int,
         policy_min_output_atomic: int,
     ) -> dict[str, Any]:
+        taker = validate_qualification_taker(taker)
         if self.api_key is None:
             raise ZeroXApiKeyRequired("0x read credential is required for a firm quote")
         sell_token = _address(sell_token, field="0x sellToken")
         buy_token = _address(buy_token, field="0x buyToken")
-        taker = _address(taker, field="0x taker")
         if not isinstance(sell_amount_atomic, int) or isinstance(sell_amount_atomic, bool) or sell_amount_atomic <= 0:
             raise RobinhoodError("0x sell amount must be positive")
         if not isinstance(slippage_bps, int) or isinstance(slippage_bps, bool) or not 0 <= slippage_bps <= _BPS:
@@ -697,10 +711,12 @@ class ZeroXV2Client:
         raw = _parse_json(body, field="0x Swap API v2 quote")
         allowed = {
             "allowanceTarget", "blockNumber", "buyAmount", "buyToken", "fees", "issues",
-            "liquidityAvailable", "minBuyAmount", "route", "sellAmount", "sellToken",
+            "liquidityAvailable", "minBuyAmount", "mode", "route", "sellAmount", "sellToken",
             "tokenMetadata", "totalNetworkFee", "zid", "transaction",
         }
         _validate_exact_keys(raw, allowed, allowed, field="0x quote")
+        if raw["mode"] != "exact-in":
+            raise SafeHaltError("0x quote is not an exact-in quote")
         if raw["liquidityAvailable"] is not True:
             raise SafeHaltError("0x quote is not an executable exact-in quote")
         if _address(raw["sellToken"], field="0x response sellToken") != sell_token:
@@ -1259,7 +1275,8 @@ class RobinhoodShadowAdapter(QuoteSource):
             raise RobinhoodProtocolError("sequencer uptime response is malformed")
         return ("UP" if answer == 0 else "DOWN"), answer, started
 
-    def observe(self, policy: PolicyV0, cycle_id: str, level_id: str, *, now_epoch_s: int, taker: str) -> RobinhoodMarketObservationV0:
+    def observe(self, policy: PolicyV0, cycle_id: str, level_id: str, *, now_epoch_s: int, taker: str | None) -> RobinhoodMarketObservationV0:
+        taker = validate_qualification_taker(taker)
         if not isinstance(now_epoch_s, int) or isinstance(now_epoch_s, bool):
             raise RobinhoodError("now_epoch_s must be an explicit integer")
         asset = self.rest.asset(self.symbol)
