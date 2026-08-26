@@ -1,0 +1,33 @@
+# Documentation template only. Do not install, enable, or start this file.
+# ExecStart remains intentionally deferred until a canonical daemon entrypoint
+# exists and receives its own authority review.
+
+[Unit]
+Description=QntySpot single-host daemon (template only)
+After=local-fs.target
+ConditionPathIsDirectory=/var/lib/qntyspot
+
+[Service]
+Type=exec
+User=qntyspot
+Group=qntyspot
+WorkingDirectory=/opt/qntyspot
+ExecStart=DEFERRED
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/var/lib/qntyspot
+StateDirectory=qntyspot
+
+# No public listen socket and no activation section are defined here.
+# A future unit must not add credentials or an execution-enabling flag.
