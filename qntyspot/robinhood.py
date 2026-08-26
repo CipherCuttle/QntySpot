@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .boundary import QuoteSource
 from .canon import canonical_json_bytes, digest_object, format_canonical_decimal
@@ -82,6 +82,8 @@ CHAINLINK_ROBINHOOD_FEED_DIRECTORY_ENDPOINT = (
     "https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json"
 )
 ZEROX_SWAP_V2_QUOTE_ENDPOINT = "https://api.0x.org/swap/allowance-holder/quote"
+_ZEROX_API_HOST = "api.0x.org"
+_ZEROX_API_PATH = "/swap/allowance-holder/quote"
 SPY_SYMBOL = "SPY"
 USDG_ADDRESS = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
 _HISTORICAL_SYNTHETIC_TAKER = "0x0000000000000000000000000000000000000001"
@@ -284,6 +286,13 @@ def _validate_exact_keys(obj: Any, required: set[str], allowed: set[str], *, fie
         raise RobinhoodProtocolError(f"{field}: unknown fields {sorted(unknown)}")
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    """Keep API credentials from following a response redirect to another host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
 class _HttpsJson:
     def __init__(
         self,
@@ -314,7 +323,7 @@ class _HttpsJson:
         self.transport = transport
         self.records: list[RawEvidenceRecord] = []
         self.read_count = 0
-        self.opener = build_opener(ProxyHandler({}))
+        self.opener = build_opener(_NoRedirect(), ProxyHandler({}))
 
     def _capture(self, *, target: str, body: bytes, request_body: bytes | None) -> None:
         if len(body) > self.max_response_bytes:
@@ -663,8 +672,21 @@ class ZeroXV2Client:
 
     def __init__(self, *, api_key: str | None, endpoint: str = ZEROX_SWAP_V2_QUOTE_ENDPOINT, evidence_store: RawEvidenceStore | None = None, transport: Callable[..., bytes] | None = None) -> None:
         parts = urlsplit(endpoint)
-        if parts.scheme != "https" or not parts.netloc:
-            raise RobinhoodError("0x endpoint must be HTTPS")
+        try:
+            port = parts.port
+        except ValueError as exc:
+            raise RobinhoodError("0x endpoint has an invalid port") from exc
+        if (
+            parts.scheme != "https"
+            or parts.hostname != _ZEROX_API_HOST
+            or port not in (None, 443)
+            or parts.path != _ZEROX_API_PATH
+            or parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+        ):
+            raise RobinhoodError("0x endpoint must be the pinned api.0x.org quote endpoint")
         if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()):
             raise ZeroXApiKeyRequired("0x read credential is empty")
         self.api_key = api_key
@@ -739,6 +761,7 @@ class ZeroXV2Client:
         allowance = issues.get("allowance")
         if allowance is not None:
             _validate_exact_keys(allowance, {"actual", "spender"}, {"actual", "spender"}, field="0x issues.allowance")
+            _integer(allowance["actual"], field="0x issues.allowance.actual")
             spender = _address(allowance["spender"], field="0x issues.allowance.spender")
             if spender != allowance_target:
                 raise SafeHaltError("0x allowance spender disagrees with allowanceTarget")
@@ -788,6 +811,8 @@ class ZeroXV2Client:
             raise RobinhoodProtocolError("0x transaction must be an object")
         _validate_exact_keys(transaction, {"to", "data", "gas", "gasPrice", "value"}, {"to", "data", "gas", "gasPrice", "value"}, field="0x transaction")
         tx_to = _address(transaction["to"], field="0x transaction.to")
+        if tx_to != allowance_target:
+            raise SafeHaltError("0x transaction target disagrees with allowanceTarget")
         tx_data = _bytes(transaction["data"], field="0x transaction.data")
         if not tx_data or len(tx_data) > 1_000_000:
             raise RobinhoodProtocolError("0x transaction calldata is empty or oversized")

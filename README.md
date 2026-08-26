@@ -82,6 +82,7 @@ with open_ledger("spot.sqlite3") as ledger:
 - [AGENTS.md](AGENTS.md) — entrypoint and constraints for agents working in this repo
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map and data flow
 - [docs/AUTHORITY.md](docs/AUTHORITY.md) — what this phase authorizes and forbids
+- [docs/PROGRAM_A_CONTROL_PLANE_CLOSURE_V0.md](docs/PROGRAM_A_CONTROL_PLANE_CLOSURE_V0.md) — canonical V0D/V0E/operations closure
 - [docs/STATE_MACHINE.md](docs/STATE_MACHINE.md) — the intent lifecycle
 - [docs/POLICY_V0.md](docs/POLICY_V0.md) — the PolicyV0 schema
 - [docs/ROADMAP.md](docs/ROADMAP.md) — phases beyond V0C

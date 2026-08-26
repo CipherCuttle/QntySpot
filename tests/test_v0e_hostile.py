@@ -46,7 +46,7 @@ from test_robinhood import (
     UID,
     USDG_ADDRESS,
     SPY_SYMBOL,
-    QUALIFICATION_TAKER_ADDRESS,
+    VALID_TAKER as QUALIFICATION_TAKER_ADDRESS,
     asset_body,
     make_adapter as make_rh_adapter,
     price_body,

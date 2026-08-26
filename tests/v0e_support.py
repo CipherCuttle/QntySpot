@@ -59,6 +59,8 @@ from qntyspot.errors import (
     ZeroXApiKeyRequired,
 )
 
+FROZEN_V0E_REGISTRY_SHA256 = "b3ac34d263ee124524d6e90d09a1462b814b93a1109f80d2c85d634b3048076b"
+
 
 @dataclass(frozen=True, slots=True)
 class FaultStep:
@@ -376,7 +378,10 @@ class ScenarioReceipt:
 
 
 def preregistered_scenarios(text: str) -> tuple[Scenario, ...]:
-    """Read the frozen registry rather than maintaining a second ID list."""
+    """Read the frozen registry after checking its immutable content anchor."""
+
+    if hashlib.sha256(text.encode("utf-8")).hexdigest() != FROZEN_V0E_REGISTRY_SHA256:
+        raise AssertionError("frozen V0E preregistration content hash changed")
 
     pattern = re.compile(
         r"\| `(V0E-[A-Z0-9]+)` \| ([^|]+) \| ([^|]+) \| `([^`]+)` \|"

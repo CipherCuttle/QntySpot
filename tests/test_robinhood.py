@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,9 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from qntyspot.canon import canonical_json_bytes
-from qntyspot.errors import RobinhoodProtocolError, RobinhoodTransportError, SafeHaltError
+import qntyspot
+from qntyspot.canon import canonical_json_bytes, digest_object
+from qntyspot.errors import RobinhoodError, RobinhoodProtocolError, RobinhoodTransportError, SafeHaltError
 from qntyspot.policy import parse_policy
 from qntyspot.raw_evidence import RawEvidenceStore
 from qntyspot.robinhood import (
@@ -46,7 +49,6 @@ HISTORICAL_SYNTHETIC_TAKER = "0x0000000000000000000000000000000000000001"
 UID = "0x" + "12" * 32
 FEED = "0x" + "34" * 20
 ALLOWANCE = "0x0000000000001ff3684f28c67538d4d072c22734"
-SETTLER = "0x" + "56" * 20
 
 
 def word(value: int) -> str:
@@ -143,7 +145,7 @@ def zero_body(*, sell_token: str = USDG_ADDRESS, buy_token: str = TOKEN, sell_am
         "sellToken": sell_token,
         "tokenMetadata": {"buyToken": {"buyTaxBps": "0", "sellTaxBps": "0"}, "sellToken": {"buyTaxBps": "0", "sellTaxBps": "0"}},
         "totalNetworkFee": "0",
-        "transaction": {"to": SETTLER, "data": "0x1234", "gas": "100000", "gasPrice": "1", "value": "0"},
+        "transaction": {"to": ALLOWANCE, "data": "0x1234", "gas": "100000", "gasPrice": "1", "value": "0"},
         "zid": "0x" + "ab" * 12,
     }
     return canonical_json_bytes(body)
@@ -263,6 +265,19 @@ def test_configured_qualification_taker_is_preserved_in_zero_x_request(tmp_path:
     record = client.evidence_records[0]
     assert "headers" not in record.request
     assert b"fixture-secret-key" not in (tmp_path / "raw" / record.manifest_path).read_bytes()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://attacker.invalid/swap/allowance-holder/quote",
+        "https://user:pass@api.0x.org/swap/allowance-holder/quote",
+        "https://api.0x.org/redirect",
+    ],
+)
+def test_zero_x_endpoint_is_pinned_before_credentials_can_be_sent(endpoint: str) -> None:
+    with pytest.raises(RobinhoodError, match="pinned api.0x.org"):
+        ZeroXV2Client(api_key="fixture-secret-key", endpoint=endpoint)
 
 
 def test_offline_full_observation_and_two_replays_are_identical(tmp_path: Path) -> None:
@@ -442,6 +457,53 @@ def test_zero_x_non_exact_in_mode_fails_closed(tmp_path: Path) -> None:
         adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
 
 
+def test_zero_x_allowance_spender_mismatch_fails_closed(tmp_path: Path) -> None:
+    raw = json.loads(zero_body())
+    raw["issues"]["allowance"]["spender"] = "0x" + "56" * 20
+    adapter, policy, _rpc, _store = make_adapter(
+        tmp_path, http={"zero_quote": canonical_json_bytes(raw)}
+    )
+    with pytest.raises(SafeHaltError, match="allowance spender"):
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
+
+
+def test_zero_x_transaction_target_mismatch_fails_closed(tmp_path: Path) -> None:
+    raw = json.loads(zero_body())
+    raw["transaction"]["to"] = "0x" + "56" * 20
+    adapter, policy, _rpc, _store = make_adapter(
+        tmp_path, http={"zero_quote": canonical_json_bytes(raw)}
+    )
+    with pytest.raises(SafeHaltError, match="transaction target"):
+        adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
+
+
+@pytest.mark.parametrize("issue", ["balance", "allowance"])
+def test_http_200_issues_are_structural_and_never_live_authority(
+    tmp_path: Path, issue: str
+) -> None:
+    raw = json.loads(zero_body())
+    if issue == "balance":
+        raw["issues"]["balance"] = {
+            "token": USDG_ADDRESS,
+            "actual": "0",
+            "expected": "100000000",
+        }
+    adapter, policy, _rpc, _store = make_adapter(
+        tmp_path, http={"zero_quote": canonical_json_bytes(raw)}
+    )
+
+    observation = adapter.observe(policy, "cycle-0", "E1", now_epoch_s=NOW, taker=VALID_TAKER)
+    decision = adapter.shadow_decision(
+        policy, "cycle-0", "E1", now_epoch_s=NOW, observation=observation
+    )
+
+    assert decision.decision == "WOULD_EXECUTE"
+    assert qntyspot.SIGNING_AUTHORIZED is False
+    assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False
+    assert not callable(getattr(adapter, "sign", None))
+    assert not callable(getattr(adapter, "submit", None))
+
+
 def test_api_key_is_never_captured_or_persisted(tmp_path: Path) -> None:
     key = "fixture-secret-key"
     store = RawEvidenceStore(tmp_path / "raw")
@@ -496,3 +558,50 @@ def test_raw_evidence_integrity_is_fail_closed(tmp_path: Path) -> None:
     (tmp_path / "raw" / record.response_path).write_bytes(b"tampered")
     with pytest.raises(SafeHaltError):
         store.read(record)
+
+
+def test_r2_failed_evidence_remains_content_addressed_and_not_requalified() -> None:
+    result_path = Path("qualifications/robinhood_v0d_r2/R2_RESULT.md")
+    result = result_path.read_text(encoding="utf-8")
+    assert "V0D_R2_NOT_QUALIFIED" in result
+    response_path = next(
+        path
+        for path in Path("qualifications/robinhood_v0d_r2/RAW_EVIDENCE_V0/responses").glob("*.bin")
+        if path.read_bytes().startswith(b'{"name":"INPUT_INVALID"')
+    )
+    response_digest = hashlib.sha256(response_path.read_bytes()).hexdigest()
+    assert response_path.stem == response_digest
+    assert re.search(rf"{response_digest}\.bin", result)
+
+
+def test_r2r1_valid_quote_fixture_replays_deterministically(tmp_path: Path) -> None:
+    response_path = next(
+        path
+        for path in Path("qualifications/robinhood_v0d_r2r1/RAW_EVIDENCE_V0/responses").glob("*.bin")
+        if b'"mode":"exact-in"' in path.read_bytes()
+        and b'"liquidityAvailable":true' in path.read_bytes()
+        and b'"balance"' in path.read_bytes()
+    )
+    body = response_path.read_bytes()
+    raw = json.loads(body)
+    store = RawEvidenceStore(tmp_path / "raw")
+    client = ZeroXV2Client(
+        api_key="fixture-key",
+        evidence_store=store,
+        transport=lambda *_args: body,
+    )
+
+    kwargs = {
+        "sell_token": USDG_ADDRESS,
+        "buy_token": TOKEN,
+        "sell_amount_atomic": int(raw["sellAmount"]),
+        "taker": VALID_TAKER,
+        "slippage_bps": 100,
+        "policy_min_output_atomic": int(raw["minBuyAmount"]),
+    }
+    first = client.quote(**kwargs)
+    second = client.quote(**kwargs)
+
+    assert canonical_json_bytes(first) == canonical_json_bytes(second)
+    assert digest_object(first) == digest_object(second)
+    assert b"fixture-key" not in body
