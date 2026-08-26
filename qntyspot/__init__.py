@@ -1,9 +1,9 @@
 """QntySpot -- deterministic policy-bound spot shadow runtime.
 
-PHASE: V0C -- SOLANA_SHADOW_READ_ONLY
+PHASE: V0D -- ROBINHOOD_SHADOW_READ_ONLY
 ----------------------------------
-This package contains the merged bounded Ink adapter and the one bounded
-public-read Solana/Jupiter adapter. It has no signer, no key handling, no
+This package contains the merged bounded Ink and Solana/Jupiter adapters and
+one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no key handling, no
 transaction encoder, no transaction broadcast surface, and no live-capital
 authority from any other repository.
 
@@ -23,20 +23,34 @@ __version__ = "0.0.1a0"
 
 #: Machine-readable phase marker. Anything that reads this and proceeds to a
 #: network or signing operation is violating the phase contract.
-AUTHORITY = "SOLANA_SHADOW_READ_ONLY"
+AUTHORITY = "ROBINHOOD_SHADOW_READ_ONLY"
 NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False
 
 from .errors import (  # noqa: E402
     BudgetExceededError,
+    BackupAliasError,
+    BackupDestinationError,
+    BackupError,
+    BackupInterruptedError,
+    BackupVerificationError,
     CanonicalFormError,
+    DatabaseIntegrityError,
+    DatabaseMalformedError,
+    DatabaseMissingError,
+    DatabaseOperationError,
+    DatabaseSchemaError,
     DuplicateEconomicActionError,
     IdentityError,
     LedgerError,
     PolicyError,
     PolicyMissingError,
     QntySpotError,
+    LockError,
+    LockHeldError,
+    LockPathError,
+    OperationsError,
     ReplayDivergenceError,
     InkError,
     RpcError,
@@ -52,6 +66,11 @@ from .errors import (  # noqa: E402
     SolanaResponseTooLargeError,
     SolanaProtocolError,
     JupiterApiError,
+    RobinhoodError,
+    RobinhoodTransportError,
+    RobinhoodProtocolError,
+    ZeroXApiError,
+    ZeroXApiKeyRequired,
 )
 from .domain import (  # noqa: E402
     CycleV0,
@@ -101,6 +120,20 @@ __all__ = [
     "LedgerError",
     "DuplicateEconomicActionError",
     "BudgetExceededError",
+    "OperationsError",
+    "LockError",
+    "LockHeldError",
+    "LockPathError",
+    "DatabaseOperationError",
+    "DatabaseMissingError",
+    "DatabaseMalformedError",
+    "DatabaseIntegrityError",
+    "DatabaseSchemaError",
+    "BackupError",
+    "BackupAliasError",
+    "BackupDestinationError",
+    "BackupInterruptedError",
+    "BackupVerificationError",
     "ReplayDivergenceError",
     "SafeHaltError",
     "InkError",
@@ -115,6 +148,11 @@ __all__ = [
     "SolanaResponseTooLargeError",
     "SolanaProtocolError",
     "JupiterApiError",
+    "RobinhoodError",
+    "RobinhoodTransportError",
+    "RobinhoodProtocolError",
+    "ZeroXApiError",
+    "ZeroXApiKeyRequired",
     "Side",
     "LadderKind",
     "LadderLevelV0",

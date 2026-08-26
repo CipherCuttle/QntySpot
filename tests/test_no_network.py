@@ -1,9 +1,9 @@
-"""Architectural enforcement of the V0C read-only authority boundary.
+"""Architectural enforcement of the V0D read-only authority boundary.
 
 These tests do not exercise live behaviour. They read the package source and
 assert that signing, key access, transaction construction/broadcast, and
 ambient nondeterminism are not present. Public transport imports are allowed
-because V0C is the bounded Solana/Jupiter shadow phase.
+because V0D includes bounded Robinhood/Chainlink/0x shadow reads.
 
 The complementary runtime guard lives in ``conftest.py``, which disables the
 socket module for the whole session.
@@ -152,7 +152,7 @@ def test_the_declared_dependency_set_is_empty() -> None:
 
 
 def test_the_package_declares_its_phase_as_read_only_shadow() -> None:
-    assert qntyspot.AUTHORITY == "SOLANA_SHADOW_READ_ONLY"
+    assert qntyspot.AUTHORITY == "ROBINHOOD_SHADOW_READ_ONLY"
     assert qntyspot.NETWORK_AUTHORIZED is True
     assert qntyspot.SIGNING_AUTHORIZED is False
     assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False

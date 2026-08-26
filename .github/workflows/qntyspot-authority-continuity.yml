@@ -1,0 +1,31 @@
+name: qntyspot-authority-continuity
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  authority-continuity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify deterministic authority continuity
+        run: python scripts/check_authority_continuity.py
+      - name: Verify continuity output twice
+        shell: bash
+        run: |
+          first="$(python scripts/check_authority_continuity.py)"
+          second="$(python scripts/check_authority_continuity.py)"
+          test "$first" = "$second"
+      - name: Check whitespace
+        run: git diff --check

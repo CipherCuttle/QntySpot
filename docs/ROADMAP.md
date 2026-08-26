@@ -3,8 +3,8 @@
 ```
 V0A  OFFLINE CORE                     <- merged prerequisite
 V0B  INK SHADOW                        <- this repository, current phase
-V0C  SOLANA SHADOW                        <- this repository, current phase
-V0D  ROBINHOOD SHADOW
+V0C  SOLANA SHADOW                        <- merged prerequisite
+V0D  ROBINHOOD SHADOW                     <- this repository, current phase
 V0E  HOSTILE FAILURE SUITE
 V0F  INK DUST LIVE
 V0G  SOLANA DUST LIVE
@@ -40,7 +40,7 @@ common block, pins the verified pool bytecode hash and factory identity, and
 persists only canonical market observations and shadow decisions. It does not
 discover assets or venues and does not simulate transaction construction.
 
-## V0C — Solana shadow (current)
+## V0C — Solana shadow (merged prerequisite)
 
 A bounded Jupiter Swap V2 and finalized Solana RPC adapter for Solana SPL /
 Token-2022 spot, shadow mode only. It exercises the `SolanaInstrumentRef`
@@ -48,7 +48,7 @@ identity path already present in V0A (cluster, mint address, token program),
 uses no ticker lookup, and records explicit route/program and version-0/ALT
 semantics for deterministic replay.
 
-## V0D — Robinhood shadow
+## V0D — Robinhood shadow (current)
 
 An adapter for Robinhood Chain Stock Tokens (EVM), shadow mode only.
 
