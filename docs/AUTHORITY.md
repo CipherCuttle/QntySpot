@@ -1,4 +1,4 @@
-# Authority — V0D Robinhood shadow
+# Authority — Program B pre-live execution contract
 
 This document is the binding statement of what the current phase of QntySpot
 authorizes and forbids. If any other document in this repository (or any
@@ -7,7 +7,7 @@ scope of `qntyspot/`.
 
 ```
 PROJECT                 = QntySpot
-ACTIVE_PHASE            = QNTY_SPOT_V0D_ROBINHOOD_SHADOW
+ACTIVE_PHASE            = QNTY_SPOT_PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0
 AUTHORITY               = ROBINHOOD_SHADOW_READ_ONLY
 NETWORK_AUTHORIZED      = YES (bounded public Robinhood REST/RPC, Chainlink, and 0x reads only)
 SIGNING_AUTHORIZED      = NO
@@ -19,7 +19,13 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 `qntyspot.NETWORK_AUTHORIZED`, `qntyspot.SIGNING_AUTHORIZED`, and
 `qntyspot.LIVE_CAPITAL_AUTHORIZED`.
 
-## V0D authorizes
+Program B is the active *design* phase. Naming it here changes no flag:
+`AUTHORITY` is still `ROBINHOOD_SHADOW_READ_ONLY`, signing and live capital are
+still `NO`, and capital authority is still `NONE`. Program B architecture does
+not itself create execution authority — see
+[docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
+
+## The read-only shadow authority authorizes
 
 - Deterministic, immutable domain models (`qntyspot/domain.py`,
   `qntyspot/identity.py`)
@@ -47,7 +53,7 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 - Deterministic policy-bound shadow decisions with canonical SHA-256 evidence
   and offline replay from frozen live evidence
 
-## V0D forbids
+## The read-only shadow authority forbids
 
 - private-key access
 - wallet signing
@@ -94,6 +100,41 @@ observation timestamp, the RPC block timestamp, their signed difference, and
 greater than 30 seconds fails closed. This is a technical shadow bound only,
 not a V0H live-capital clock or sequencer-safety guarantee.
 
+## Program B — pre-live execution contract (design only)
+
+`QNTY_SPOT_PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0` freezes the execution
+system later phases must satisfy. It authorizes nothing beyond what is already
+listed above. In particular it does not authorize live capital, funding, token
+approval, private-key access, transaction signing, transaction broadcast,
+transaction submission, autonomous execution, daemon activation, or another 0x
+qualification request.
+
+The contract defines a monotone authority ladder:
+
+```
+LEVEL 0  SHADOW                      reads and deterministic decisions only
+LEVEL 1  RECONCILE_ONLY              observe and reconcile; no signing, no submission
+LEVEL 2  SUBMIT_EXACT_SIGNED_BYTES   submit one frozen signed identity only
+LEVEL 3  HUMAN_SIGNED_EXECUTION      construct a validated envelope; a human signs
+LEVEL 4  AUTONOMOUS_BOUNDED_SIGNER   a future, separately authorized signer
+```
+
+```
+PHASE_GRANTED_AUTHORITY_LEVEL = LEVEL 0 (SHADOW)
+```
+
+`qntyspot/execution_contract.py` refuses every capability above `SHADOW` at
+runtime, whatever level a caller passes and whatever any authority document
+claims, because the ceiling is a constant in this source tree rather than an
+input. Levels 1 through 4 are semantics only; each requires its own explicit
+later phase.
+
+`qntyspot/ledger/execution_schema.py` defines the future execution authority
+tables. Nothing in this repository writes them.
+
+Program B adds no network call, no secret read, no signature, no approval, no
+broadcast, and no capital.
+
 ## Asset selection
 
 Asset selection belongs to the user. Runtime asset admission
@@ -128,6 +169,13 @@ A future rule, not yet implemented:
 boundary. V0B implements the Ink `QuoteSource`; V0C adds the Solana/Jupiter
 `QuoteSource`; V0D adds the Robinhood shadow `QuoteSource`. No execution,
 chain-truth, or reconciliation implementation is added.
+
+Program B gives that rule an evidence contract:
+`qntyspot.execution_contract.evaluate_chain_truth` decides what a set of
+provider observations may conclude, and `reconcile_to_receipt` is the only path
+from external truth to a `FillReceiptV0`. Both are pure functions over records
+the caller supplies; neither reads a chain. No adapter implements
+`ChainTruthSource` or `Reconciler` yet.
 
 ## Changing this document
 

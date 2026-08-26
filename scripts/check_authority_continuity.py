@@ -13,6 +13,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = ROOT / "qntyspot"
 CLOSURE_PATH = ROOT / "docs/PROGRAM_A_CONTROL_PLANE_CLOSURE_V0.md"
+PROGRAM_B_PATH = ROOT / "docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md"
 REGISTRY_PATH = ROOT / "docs/V0E_HOSTILE_FAILURE_SUITE_PREREG_V0.md"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -290,6 +291,72 @@ def _closure_report() -> dict[str, Any]:
     }
 
 
+def _program_b_report() -> dict[str, Any]:
+    """Program B must remain a contract freeze that grants no runtime authority."""
+    from qntyspot.execution_contract import (
+        CONTRACT_VERSION,
+        KILL_SWITCH_PRESERVED_CAPABILITIES,
+        LADDER,
+        PHASE_GRANTED_AUTHORITY_LEVEL,
+        AuthorityLevel,
+        Capability,
+        require_capability,
+    )
+    from qntyspot.errors import AuthorityCeilingError
+    from qntyspot.ledger.execution_schema import EXECUTION_SCHEMA_VERSION, EXECUTION_TABLES
+
+    if PHASE_GRANTED_AUTHORITY_LEVEL is not AuthorityLevel.SHADOW:
+        raise SystemExit("authority continuity failed: Program B phase ceiling moved")
+    ordered = sorted(AuthorityLevel)
+    if any(LADDER[lower] >= LADDER[higher] for lower, higher in zip(ordered, ordered[1:])):
+        raise SystemExit("authority continuity failed: authority ladder is not monotone")
+    escalating = (
+        Capability.RESERVE_CAPITAL,
+        Capability.CONSTRUCT_ENVELOPE,
+        Capability.AUTHORIZE_APPROVAL,
+        Capability.PRODUCE_SIGNATURE,
+        Capability.SUBMIT_EXACT_BYTES,
+    )
+    for capability in escalating:
+        for level in AuthorityLevel:
+            try:
+                require_capability(capability, level)
+            except AuthorityCeilingError:
+                continue
+            raise SystemExit(
+                f"authority continuity failed: {capability.value} reachable at {level.name}"
+            )
+        if capability in KILL_SWITCH_PRESERVED_CAPABILITIES:
+            raise SystemExit(
+                f"authority continuity failed: kill switch preserves {capability.value}"
+            )
+    for capability in (Capability.RECONCILE, Capability.ACCOUNT_QUARANTINE, Capability.OBSERVE_CHAIN):
+        if capability not in KILL_SWITCH_PRESERVED_CAPABILITIES:
+            raise SystemExit(
+                f"authority continuity failed: kill switch suspends {capability.value}"
+            )
+    if not PROGRAM_B_PATH.is_file():
+        raise SystemExit("authority continuity failed: Program B contract is missing")
+    text = PROGRAM_B_PATH.read_text(encoding="utf-8")
+    expected = (
+        "SIGNING_AUTHORIZED        = NO",
+        "LIVE_CAPITAL_AUTHORIZED   = NO",
+        "CAPITAL_AUTHORITY         = NONE",
+        "PHASE_GRANTED_AUTHORITY   = LEVEL 0 (SHADOW)",
+    )
+    if missing := [line for line in expected if line not in text]:
+        raise SystemExit(f"authority continuity failed: Program B fields {missing}")
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "execution_schema_version": EXECUTION_SCHEMA_VERSION,
+        "execution_table_count": len(EXECUTION_TABLES),
+        "granted_authority_level": int(PHASE_GRANTED_AUTHORITY_LEVEL),
+        "ladder_is_monotone": True,
+        "path": PROGRAM_B_PATH.relative_to(ROOT).as_posix(),
+        "sha256": hashlib.sha256(PROGRAM_B_PATH.read_bytes()).hexdigest(),
+    }
+
+
 def _state_machine_report() -> dict[str, Any]:
     from qntyspot.states import (
         BUDGET_HOLDING_STATES,
@@ -344,6 +411,7 @@ def build_report() -> dict[str, Any]:
         },
         "closure": _closure_report(),
         "evidence": _evidence_report(),
+        "program_b": _program_b_report(),
         "registry": _registry_report(),
         "static": static,
         "state_machine": _state_machine_report(),

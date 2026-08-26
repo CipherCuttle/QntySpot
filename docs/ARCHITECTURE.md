@@ -18,6 +18,12 @@ qntyspot/
   economics.py   turns a policy rung into an EconomicBounds / IntentV0: the
                  absolute limit contract. No clock reads, no I/O.
   boundary.py    typing Protocols for the chain/venue truth boundary.
+  execution_contract.py
+                 the frozen Program B pre-live execution contract: the
+                 authority ladder, ExecutionSessionV0, ExecutionEnvelopeV0,
+                 ApprovalActionV0, SignedTransactionRecordV0,
+                 SubmissionAttemptV0, ChainObservationV0, and the deterministic
+                 validators over them. Authorizes nothing.
   ink.py         bounded dual-RPC Ink observation, exact V2 quote arithmetic,
                  canonical shadow decisions, immutable evidence, and replay.
   solana.py      bounded finalized Solana mint reads and current Jupiter Swap
@@ -33,6 +39,11 @@ qntyspot/
     replay.py    deterministic reconstruction from policies + event log.
     recovery.py  restart recovery: sorts every non-terminal intent into
                  ABANDON / RECONCILIATION_REQUIRED / COMPLETE_FROM_RECEIPT.
+    execution_schema.py
+                 the Program B execution authority surface: STRICT tables for
+                 sessions, envelopes, approvals, external actions, signed
+                 transactions, submissions, observations, reconciliations and
+                 operator control. Created on demand; written by nothing.
 ```
 
 ## Data flow
@@ -147,6 +158,31 @@ does check is that the log is internally self-consistent: sequence numbers
 strictly increase, every transition it replays is legal under the current
 state machine, and no event references an action not yet created. See the
 module docstring in `qntyspot/ledger/replay.py`.
+
+## The Program B pre-live execution contract
+
+`qntyspot/execution_contract.py` and `qntyspot/ledger/execution_schema.py`
+describe the execution runtime a later phase must build. They are records,
+digests, deterministic validators and a SQLite schema — no I/O, no clock, no
+signer, no submission surface, and no capability above `SHADOW`.
+
+The shape worth knowing here is the four-way partition on
+`ExecutionEnvelopeV0`. Its *identity* digest covers only what determines what
+the chain would do plus who authorized it; *evidence* (plan, quote, block,
+construction time) is digested separately; *mutable observation* lives on the
+approval and chain-observation records instead; and the authority-policy digest
+is identity rather than evidence. Because evidence is excluded from identity,
+reconstructing the same intent after a crash produces the same `envelope_id`,
+and the database primary key turns reconstruction into a no-op rather than a
+duplicate.
+
+The database, not application code, carries the exactly-once guarantee into
+execution: `signed_transactions.external_action_id` is UNIQUE, so one
+`EconomicActionID` can never hold two economically distinct signed
+transactions, and an exact-byte retransmission reuses the same row because
+`signed_transaction_id` digests the envelope identity and the payload digest.
+
+See [docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
 
 ## FUTURE_DEFERRED: NFT execution
 

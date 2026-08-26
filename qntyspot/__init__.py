@@ -1,11 +1,17 @@
 """QntySpot -- deterministic policy-bound spot shadow runtime.
 
-PHASE: V0D -- ROBINHOOD_SHADOW_READ_ONLY
-----------------------------------
+PHASE: PROGRAM B PRE-LIVE EXECUTION CONTRACT -- ROBINHOOD_SHADOW_READ_ONLY
+--------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
 one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no key handling, no
 transaction encoder, no transaction broadcast surface, and no live-capital
 authority from any other repository.
+
+``execution_contract`` and ``ledger.execution_schema`` are the frozen Program B
+pre-live execution contract: immutable records, deterministic validators, and a
+SQLite authority surface that describes a future runtime. They authorize
+nothing. ``PHASE_GRANTED_AUTHORITY_LEVEL`` is ``AuthorityLevel.SHADOW`` and the
+capability gate refuses everything above it.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger
@@ -71,6 +77,12 @@ from .errors import (  # noqa: E402
     RobinhoodProtocolError,
     ZeroXApiError,
     ZeroXApiKeyRequired,
+    ApprovalContractError,
+    AuthorityCeilingError,
+    ChainTruthError,
+    EnvelopeValidationError,
+    ExecutionContractError,
+    SessionIdentityError,
 )
 from .domain import (  # noqa: E402
     CycleV0,
@@ -95,6 +107,24 @@ from .identity import (  # noqa: E402
     SolanaCluster,
     SolanaInstrumentRef,
     TokenProgram,
+)
+from .execution_contract import (  # noqa: E402
+    CONTRACT_VERSION as PROGRAM_B_CONTRACT_VERSION,
+    PHASE_GRANTED_AUTHORITY_LEVEL,
+    ApprovalActionV0,
+    AuthorityLevel,
+    AuthorityPolicyRefV0,
+    Capability,
+    ChainObservationV0,
+    ChainTruthV0,
+    ChainTruthVerdict,
+    EconomicActionIDV0,
+    ExecutionEnvelopeV0,
+    ExecutionReadiness,
+    ExecutionSessionV0,
+    FinalityPolicyV0,
+    SignedTransactionRecordV0,
+    SubmissionAttemptV0,
 )
 from .policy import load_policy_file, load_policy_text, parse_policy  # noqa: E402
 from .states import IntentState  # noqa: E402
@@ -153,6 +183,12 @@ __all__ = [
     "RobinhoodProtocolError",
     "ZeroXApiError",
     "ZeroXApiKeyRequired",
+    "ExecutionContractError",
+    "AuthorityCeilingError",
+    "SessionIdentityError",
+    "EnvelopeValidationError",
+    "ApprovalContractError",
+    "ChainTruthError",
     "Side",
     "LadderKind",
     "LadderLevelV0",
@@ -174,6 +210,22 @@ __all__ = [
     "SolanaCluster",
     "TokenProgram",
     "IntentState",
+    "PROGRAM_B_CONTRACT_VERSION",
+    "PHASE_GRANTED_AUTHORITY_LEVEL",
+    "AuthorityLevel",
+    "Capability",
+    "AuthorityPolicyRefV0",
+    "ExecutionSessionV0",
+    "ExecutionEnvelopeV0",
+    "ApprovalActionV0",
+    "SignedTransactionRecordV0",
+    "SubmissionAttemptV0",
+    "ChainObservationV0",
+    "ChainTruthV0",
+    "ChainTruthVerdict",
+    "EconomicActionIDV0",
+    "FinalityPolicyV0",
+    "ExecutionReadiness",
     "SolanaRpcClient",
     "JupiterV2Client",
     "SolanaMarketObservationV0",

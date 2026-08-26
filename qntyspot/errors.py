@@ -197,3 +197,27 @@ class ZeroXApiError(RobinhoodError):
 
 class ZeroXApiKeyRequired(RobinhoodError):
     """A firm 0x quote cannot be requested without the local read credential."""
+
+
+class ExecutionContractError(QntySpotError):
+    """A Program B pre-live execution contract rule was violated."""
+
+
+class AuthorityCeilingError(ExecutionContractError):
+    """An operation was attempted above the granted authority ceiling."""
+
+
+class SessionIdentityError(ExecutionContractError):
+    """An execution session identity is malformed or non-portable."""
+
+
+class EnvelopeValidationError(ExecutionContractError):
+    """An unsigned transaction envelope failed the frozen execution contract."""
+
+
+class ApprovalContractError(ExecutionContractError):
+    """An approval action violated the explicit approval contract."""
+
+
+class ChainTruthError(ExecutionContractError):
+    """External chain evidence is malformed or internally inconsistent."""

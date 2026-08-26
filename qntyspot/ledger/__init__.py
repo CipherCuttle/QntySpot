@@ -7,12 +7,24 @@ those two inputs; see :mod:`qntyspot.ledger.replay`.
 """
 
 from .schema import SCHEMA_VERSION, EventType, apply_schema, read_schema_version
+from .execution_schema import (
+    EXECUTION_SCHEMA_SQL,
+    EXECUTION_SCHEMA_VERSION,
+    EXECUTION_TABLES,
+    apply_execution_schema,
+    read_execution_schema_version,
+)
 from .store import SpotLedger, open_ledger
 from .replay import replay_into, reconstruct, assert_replay_equivalence
 from .recovery import RecoveryAction, recover
 
 __all__ = [
     "SCHEMA_VERSION",
+    "EXECUTION_SCHEMA_SQL",
+    "EXECUTION_SCHEMA_VERSION",
+    "EXECUTION_TABLES",
+    "apply_execution_schema",
+    "read_execution_schema_version",
     "EventType",
     "apply_schema",
     "read_schema_version",
