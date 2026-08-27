@@ -435,6 +435,16 @@ def test_a_superseded_envelope_leaves_room_for_a_re_quote(surface) -> None:
     ).fetchone()[0] == 1
 
 
+def test_authorized_envelope_cannot_regress_to_draft(surface) -> None:
+    conn = surface[0].connection
+    insert(conn, "execution_envelopes", **envelope_row(surface[3]))
+    with pytest.raises(sqlite3.IntegrityError, match="lifecycle regression"):
+        conn.execute(
+            "UPDATE execution_envelopes SET lifecycle = 'DRAFT' WHERE envelope_id = ?",
+            ("10" * 32,),
+        )
+
+
 def test_two_authorized_envelopes_cannot_share_a_nonce(surface) -> None:
     ledger, _policy, cycle_id, intent = surface
     conn = ledger.connection
@@ -630,6 +640,46 @@ def test_an_included_observation_must_carry_block_identity(signed) -> None:
             )
 
 
+def test_chain_observation_must_match_signed_action(signed) -> None:
+    ledger, _policy, _cycle_id, _intent, action_id = signed
+    conn = ledger.connection
+    insert(conn, "approval_actions", **approval_row())
+    insert(
+        conn,
+        "external_actions",
+        external_action_id="20" * 32,
+        kind="APPROVAL",
+        economic_action_id=None,
+        approval_action_id="20" * 32,
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="bound to the signed transaction action"):
+        insert(
+            conn,
+            "chain_observations",
+            **observation_row("20" * 32),
+        )
+
+
+def test_reverted_reconciliation_requires_reverted_observation(signed) -> None:
+    conn, action_id = signed[0].connection, signed[4]
+    with pytest.raises(sqlite3.IntegrityError, match="reverted reconciliation"):
+        insert(
+            conn,
+            "reconciliations",
+            reconciliation_id="60" * 32,
+            external_action_id=action_id,
+            verdict="REVERTED",
+            receipt_id=None,
+            transaction_hash="0x" + "ab" * 32,
+            chain_id=57073,
+            taker_address=TAKER,
+            confirmation_depth=64,
+            agreeing_provider_count=2,
+            reconciled_at_epoch_s=NOW,
+            evidence_digest="61" * 32,
+        )
+
+
 def test_an_absent_observation_must_not_carry_a_receipt(signed) -> None:
     conn, action_id = signed[0].connection, signed[4]
     with pytest.raises(sqlite3.IntegrityError):
@@ -714,6 +764,18 @@ def test_only_a_settled_reconciliation_may_carry_a_receipt(signed) -> None:
     drive(ledger, intent.economic_action_id, *PATH_TO_FILLED)
     receipt = full_receipt(intent)
     ledger.append_fill_receipt(receipt, now_epoch_s=NOW)
+    insert(
+        conn,
+        "reconciliations",
+        reconciliation_id="60" * 32,
+        external_action_id=action_id,
+        verdict="SETTLED",
+        receipt_id=receipt.receipt_id,
+        confirmation_depth=64,
+        agreeing_provider_count=2,
+        reconciled_at_epoch_s=NOW,
+        evidence_digest="61" * 32,
+    )
     drive(ledger, intent.economic_action_id, IntentState.RECONCILED, IntentState.FILLED)
     with pytest.raises(sqlite3.IntegrityError):
         insert(
@@ -741,18 +803,6 @@ def test_only_a_settled_reconciliation_may_carry_a_receipt(signed) -> None:
             reconciled_at_epoch_s=NOW,
             evidence_digest="61" * 32,
         )
-    insert(
-        conn,
-        "reconciliations",
-        reconciliation_id="60" * 32,
-        external_action_id=action_id,
-        verdict="SETTLED",
-        receipt_id=receipt.receipt_id,
-        confirmation_depth=64,
-        agreeing_provider_count=2,
-        reconciled_at_epoch_s=NOW,
-        evidence_digest="61" * 32,
-    )
     with pytest.raises(sqlite3.IntegrityError):
         insert(
             conn,

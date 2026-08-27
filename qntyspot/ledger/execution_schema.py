@@ -374,6 +374,30 @@ END;
     for table, columns in _IDENTITY_COLUMNS.items()
 )
 
+_LIFECYCLE_GUARDS_SQL = """
+CREATE TRIGGER execution_envelopes_lifecycle_guard
+BEFORE UPDATE OF lifecycle ON execution_envelopes
+WHEN NOT (
+    NEW.lifecycle = OLD.lifecycle
+    OR (OLD.lifecycle = 'DRAFT' AND NEW.lifecycle IN ('AUTHORIZED','SUPERSEDED','VOID'))
+    OR (OLD.lifecycle = 'AUTHORIZED' AND NEW.lifecycle IN ('SUPERSEDED','VOID'))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'execution_envelopes lifecycle regression');
+END;
+
+CREATE TRIGGER approval_actions_lifecycle_guard
+BEFORE UPDATE OF lifecycle ON approval_actions
+WHEN NOT (
+    NEW.lifecycle = OLD.lifecycle
+    OR (OLD.lifecycle = 'DRAFT' AND NEW.lifecycle IN ('AUTHORIZED','SUPERSEDED','VOID'))
+    OR (OLD.lifecycle = 'AUTHORIZED' AND NEW.lifecycle IN ('SUPERSEDED','VOID','SETTLED'))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'approval_actions lifecycle regression');
+END;
+"""
+
 _CROSS_TABLE_GUARDS_SQL = """
 CREATE TRIGGER execution_envelopes_session_identity_guard
 BEFORE INSERT ON execution_envelopes
@@ -429,6 +453,7 @@ BEGIN
          WHERE ea.external_action_id = NEW.external_action_id
            AND ea.kind = 'ECONOMIC'
            AND ea.economic_action_id = ee.economic_action_id
+           AND ee.lifecycle = 'AUTHORIZED'
            AND NEW.session_id = ee.session_id
            AND NEW.chain_id = ee.chain_id
            AND NEW.taker_address = ee.taker_address
@@ -446,6 +471,18 @@ BEGIN
     ) THEN RAISE(ABORT, 'approval signed transaction subtype does not match external action') END;
 END;
 
+CREATE TRIGGER chain_observations_binding_guard
+BEFORE INSERT ON chain_observations
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM signed_transactions AS st
+     WHERE st.signed_transaction_id = NEW.signed_transaction_id
+       AND st.external_action_id = NEW.external_action_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'chain observation is not bound to the signed transaction action');
+END;
+
 CREATE TRIGGER reconciliations_receipt_kind_guard
 BEFORE INSERT ON reconciliations
 WHEN NEW.receipt_id IS NOT NULL
@@ -457,6 +494,26 @@ BEGIN
     ) THEN RAISE(ABORT, 'only economic external actions may carry a fill receipt') END;
 END;
 
+CREATE TRIGGER reconciliations_receipt_binding_guard
+BEFORE INSERT ON reconciliations
+WHEN NEW.receipt_id IS NOT NULL
+ AND EXISTS (
+    SELECT 1 FROM external_actions
+     WHERE external_action_id = NEW.external_action_id
+       AND kind = 'ECONOMIC'
+ )
+ AND NOT EXISTS (
+    SELECT 1
+      FROM external_actions AS ea
+      JOIN fill_receipts AS fr ON fr.receipt_id = NEW.receipt_id
+     WHERE ea.external_action_id = NEW.external_action_id
+       AND ea.kind = 'ECONOMIC'
+       AND fr.economic_action_id = ea.economic_action_id
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'reconciliation receipt is not bound to the economic action');
+END;
+
 CREATE TRIGGER reconciliations_reverted_binding_guard
 BEFORE INSERT ON reconciliations
 WHEN NEW.verdict = 'REVERTED'
@@ -464,17 +521,24 @@ WHEN NEW.verdict = 'REVERTED'
     SELECT 1
       FROM signed_transactions AS st
       JOIN external_actions AS ea ON ea.external_action_id = st.external_action_id
+      JOIN chain_observations AS co
+        ON co.signed_transaction_id = st.signed_transaction_id
+       AND co.external_action_id = st.external_action_id
      WHERE ea.external_action_id = NEW.external_action_id
        AND st.transaction_hash = NEW.transaction_hash
        AND st.chain_id = NEW.chain_id
        AND st.taker_address = NEW.taker_address
+       AND co.presence = 'INCLUDED'
+       AND co.receipt_status = 'REVERTED'
  )
 BEGIN
     SELECT RAISE(ABORT, 'reverted reconciliation is not bound to the signed transaction');
 END;
 """
 
-EXECUTION_SCHEMA_SQL += _AUTHORIZED_IMMUTABILITY_SQL + _CROSS_TABLE_GUARDS_SQL
+EXECUTION_SCHEMA_SQL += (
+    _AUTHORIZED_IMMUTABILITY_SQL + _LIFECYCLE_GUARDS_SQL + _CROSS_TABLE_GUARDS_SQL
+)
 
 
 def apply_execution_schema(conn: sqlite3.Connection) -> None:

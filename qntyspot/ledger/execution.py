@@ -37,6 +37,7 @@ from ..execution_contract import (
     SignedTransactionRecordV0,
     SubmissionAcknowledgment,
     SubmissionAttemptV0,
+    ValidatedEconomicActionV0,
     VenueQuoteResponseV0,
     ZeroXExecutionExpectationV0,
     assert_approval_admissible,
@@ -64,6 +65,12 @@ __all__ = [
 ]
 
 B1_O04_EXTERNAL_ROOT_BLOCKED = True
+# B1 has no authority service.  The only reference accepted by this offline
+# runtime is the frozen shadow root name, and its ceilings are additionally
+# bounded by the persisted policy below.  A future independently rooted
+# verifier must replace this admission path before any higher authority is
+# considered.
+B1_SHADOW_AUTHORITY_ROOT_ID = "qnty-authority-root-v0"
 
 FAILURE_BOUNDARIES = (
     "session",
@@ -247,6 +254,24 @@ class ExecutionRuntime:
         authority.assert_valid_at(session.started_at_epoch_s)
         if authority.granted_level > AuthorityLevel.SHADOW:
             raise AuthorityCeilingError("B1 runtime cannot grant authority above SHADOW")
+        if authority.authority_root_id != B1_SHADOW_AUTHORITY_ROOT_ID:
+            raise AuthorityCeilingError(
+                "B1 accepts only the frozen shadow authority-root reference"
+            )
+        policy_row = self._conn.execute(
+            "SELECT per_order_cap_atomic, global_cap_atomic FROM policies WHERE policy_id = ?",
+            (session.policy_id,),
+        ).fetchone()
+        if policy_row is None:
+            raise AuthorityCeilingError("the session policy is not admitted in this ledger")
+        if authority.max_reservation_atomic > int(policy_row["per_order_cap_atomic"]):
+            raise AuthorityCeilingError(
+                "authority reservation ceiling exceeds the persisted policy per-order cap"
+            )
+        if authority.max_cumulative_atomic > int(policy_row["global_cap_atomic"]):
+            raise AuthorityCeilingError(
+                "authority cumulative ceiling exceeds the persisted policy global cap"
+            )
         if (
             authority.permitted_repository_commit != session.repository_commit
             or authority.permitted_implementation_digest != session.implementation_digest
@@ -374,6 +399,12 @@ class ExecutionRuntime:
                 )
             held_atomic = actual_held_atomic
             action_row = self._require_economic_intent(envelope.economic_action_id, conn)
+            persisted_bounds = self._bounds_from_intent(action_row)
+            if bounds != persisted_bounds:
+                raise EnvelopeValidationError(
+                    "caller-supplied bounds differ from the persisted intent bounds"
+                )
+            bounds = persisted_bounds
             existing = conn.execute(
                 "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
                 (envelope.envelope_id,),
@@ -434,7 +465,16 @@ class ExecutionRuntime:
             self._reject_if_killed("approval actions")
             self._require_session(session.session_id, conn)
             if approval.economic_action_id is not None:
-                self._require_economic_intent(approval.economic_action_id, conn)
+                action_row = self._require_economic_intent(approval.economic_action_id, conn)
+                bounds = self._bounds_from_intent(action_row)
+                if expectation.sell_amount_atomic > bounds.max_input_atomic:
+                    raise EnvelopeValidationError(
+                        "approval response exceeds the persisted economic bound"
+                    )
+                if venue_response.sell_amount_atomic > bounds.max_input_atomic:
+                    raise EnvelopeValidationError(
+                        "approval venue response exceeds the persisted economic bound"
+                    )
             values = {
                 "approval_action_id": approval.approval_action_id,
                 "session_id": approval.session_id,
@@ -492,6 +532,10 @@ class ExecutionRuntime:
             ).fetchone()
             if envelope is None:
                 raise LedgerError(f"unknown execution envelope {record.envelope_id}")
+            if envelope["lifecycle"] != "AUTHORIZED":
+                raise EnvelopeValidationError(
+                    "signed metadata requires an AUTHORIZED execution envelope"
+                )
             if (
                 envelope["chain_id"] != record.chain_id
                 or envelope["account_nonce"] != record.account_nonce
@@ -669,9 +713,10 @@ class ExecutionRuntime:
             submission_acknowledged=acknowledged,
         )
         rows = conn.execute(
-            "SELECT * FROM chain_observations WHERE signed_transaction_id = ? "
+            "SELECT * FROM chain_observations "
+            "WHERE external_action_id = ? AND signed_transaction_id = ? "
             "ORDER BY observed_at_epoch_s ASC, observation_id ASC",
-            (signed_id,),
+            (action_id, signed_id),
         ).fetchall()
         truth = evaluate_chain_truth(
             expectation,
@@ -810,6 +855,13 @@ class ExecutionRuntime:
             ).fetchone()
             if external is None or external["kind"] != "ECONOMIC":
                 raise LedgerError("only an economic external action can reconcile to settlement")
+            action_row = self._require_economic_intent(economic_action_id, conn)
+            persisted_bounds = self._bounds_from_intent(action_row)
+            if bounds is not None and bounds != persisted_bounds:
+                raise EnvelopeValidationError(
+                    "caller-supplied bounds differ from the persisted intent bounds"
+                )
+            bounds = persisted_bounds
             signed = conn.execute(
                 "SELECT signed_transaction_id FROM signed_transactions "
                 "WHERE external_action_id = ?", (economic_action_id,)
@@ -845,7 +897,6 @@ class ExecutionRuntime:
                 raise SafeHaltError(
                     f"chain truth is {truth.verdict.value}; reconciliation must wait for terminal evidence"
                 )
-            action_row = self._require_economic_intent(economic_action_id, conn)
             state = self.ledger.intent_state(economic_action_id)
             if truth.verdict is ChainTruthVerdict.AMBIGUOUS:
                 self._insert_reconciliation(
@@ -870,8 +921,6 @@ class ExecutionRuntime:
                     )
                 return truth
 
-            if bounds is None:
-                bounds = self._bounds_from_intent(action_row)
             if receipt_id is None:
                 raise LedgerError("a confirmed economic action requires a receipt id")
             receipt = reconcile_to_receipt(
@@ -886,6 +935,12 @@ class ExecutionRuntime:
                 ),
                 truth,
                 bounds,
+                validated_action=ValidatedEconomicActionV0._from_database(
+                    EconomicActionIDV0(economic_action_id),
+                    signed_row["transaction_hash"],
+                    signed_row["chain_id"],
+                    signed_row["taker_address"],
+                ),
                 receipt_id=receipt_id,
                 fee_atomic=fee_atomic,
                 observed_at_epoch_s=now_epoch_s if observed_at_epoch_s is None else observed_at_epoch_s,

@@ -404,6 +404,11 @@ class SpotLedger:
             if to_state is IntentState.RESERVED:
                 self._reserve(conn, economic_action_id, dict(row))
             elif to_state is IntentState.FILLED:
+                if src is IntentState.RECONCILED and self._execution_surface_present(conn):
+                    if not self._has_settled_receipt(conn, economic_action_id):
+                        raise LedgerError(
+                            "FILLED requires a SETTLED reconciliation and matching fill receipt"
+                        )
                 self._settle_reservation(
                     conn, economic_action_id, ReservationStatus.COMMITTED
                 )
@@ -422,7 +427,12 @@ class SpotLedger:
                     )
                 self._settle_reservation(
                     conn, economic_action_id, ReservationStatus.RELEASED
-                )
+                    )
+            elif to_state is IntentState.RECONCILED and self._execution_surface_present(conn):
+                if not self._has_settled_receipt(conn, economic_action_id):
+                    raise LedgerError(
+                        "RECONCILED requires a SETTLED reconciliation and matching fill receipt"
+                    )
             elif to_state is IntentState.SAFE_HALT:
                 self._settle_reservation(
                     conn, economic_action_id, ReservationStatus.QUARANTINED
@@ -445,6 +455,30 @@ class SpotLedger:
             )
 
     @staticmethod
+    def _execution_surface_present(conn: sqlite3.Connection) -> bool:
+        return conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reconciliations'"
+        ).fetchone() is not None
+
+    @staticmethod
+    def _has_settled_receipt(
+        conn: sqlite3.Connection, economic_action_id: str
+    ) -> bool:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM reconciliations AS r
+              JOIN fill_receipts AS f ON f.receipt_id = r.receipt_id
+             WHERE r.external_action_id = ?
+               AND r.verdict = 'SETTLED'
+               AND f.economic_action_id = r.external_action_id
+             LIMIT 1
+            """,
+            (economic_action_id,),
+        ).fetchone()
+        return row is not None
+
+    @staticmethod
     def _has_bound_reverted_reconciliation(
         conn: sqlite3.Connection, economic_action_id: str
     ) -> bool:
@@ -456,11 +490,16 @@ class SpotLedger:
                   FROM reconciliations AS r
                   JOIN signed_transactions AS st
                     ON st.external_action_id = r.external_action_id
+                  JOIN chain_observations AS co
+                    ON co.external_action_id = st.external_action_id
+                   AND co.signed_transaction_id = st.signed_transaction_id
                  WHERE r.external_action_id = ?
                    AND r.verdict = 'REVERTED'
                    AND r.transaction_hash = st.transaction_hash
                    AND r.chain_id = st.chain_id
                    AND r.taker_address = st.taker_address
+                   AND co.presence = 'INCLUDED'
+                   AND co.receipt_status = 'REVERTED'
                  LIMIT 1
                 """,
                 (economic_action_id,),

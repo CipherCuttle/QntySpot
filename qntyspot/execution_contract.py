@@ -68,7 +68,7 @@ I-16  RWA API access is not legal eligibility.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass, field, fields as dataclass_fields
 from enum import Enum, IntEnum
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -112,6 +112,7 @@ __all__ = [
     "EconomicActionIDV0",
     "ChainTruthV0",
     "SettlementExpectationV0",
+    "ValidatedEconomicActionV0",
     "evaluate_chain_truth",
     "reconcile_to_receipt",
     "next_state_for_verdict",
@@ -1182,6 +1183,53 @@ class SettlementExpectationV0:
             raise ChainTruthError("submission_acknowledged must be a bool")
 
 
+_SETTLEMENT_BINDING_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedEconomicActionV0:
+    """Database-bound settlement identity required to mint a fill receipt.
+
+    A digest-shaped string is not sufficient to prove that an external action
+    is an economic action: approval identities have the same representation.
+    The runtime creates this opaque binding only after it has validated the
+    corresponding SQLite external-action and signed-transaction rows.
+    """
+
+    economic_action_id: EconomicActionIDV0
+    transaction_hash: str
+    chain_id: int
+    taker_address: str
+    _token: object = field(default=None, repr=False, compare=False)
+
+    @classmethod
+    def _from_database(
+        cls,
+        economic_action_id: EconomicActionIDV0,
+        transaction_hash: str,
+        chain_id: int,
+        taker_address: str,
+    ) -> "ValidatedEconomicActionV0":
+        return cls(
+            economic_action_id=economic_action_id,
+            transaction_hash=transaction_hash,
+            chain_id=chain_id,
+            taker_address=taker_address,
+            _token=_SETTLEMENT_BINDING_TOKEN,
+        )
+
+    def assert_matches(self, expectation: SettlementExpectationV0) -> None:
+        if self._token is not _SETTLEMENT_BINDING_TOKEN:
+            raise ChainTruthError("settlement binding was not produced by the ledger runtime")
+        if (
+            self.economic_action_id != expectation.economic_action_id
+            or self.transaction_hash != expectation.transaction_hash
+            or self.chain_id != expectation.chain_id
+            or self.taker_address != expectation.taker_address
+        ):
+            raise ChainTruthError("database settlement binding disagrees with the expectation")
+
+
 @dataclass(frozen=True, slots=True)
 class ChainTruthV0:
     """The only conclusion the contract permits to be drawn from observations.
@@ -1349,6 +1397,7 @@ def reconcile_to_receipt(
     truth: ChainTruthV0,
     bounds: EconomicBounds,
     *,
+    validated_action: ValidatedEconomicActionV0,
     receipt_id: str,
     fee_atomic: int,
     observed_at_epoch_s: int,
@@ -1363,6 +1412,11 @@ def reconcile_to_receipt(
     """
     if not isinstance(truth, ChainTruthV0):
         raise ChainTruthError("truth must be a ChainTruthV0")
+    if not isinstance(validated_action, ValidatedEconomicActionV0):
+        raise ChainTruthError(
+            "a database-validated economic action binding is required to produce a receipt"
+        )
+    validated_action.assert_matches(expectation)
     if (
         truth.external_action_id != expectation.economic_action_id
         or truth.transaction_hash != expectation.transaction_hash

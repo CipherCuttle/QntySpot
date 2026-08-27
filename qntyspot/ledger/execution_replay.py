@@ -87,6 +87,7 @@ def _validated_reverted_bindings(snapshot: Mapping[str, Any]) -> frozenset[str]:
         for row in snapshot["tables"]["signed_transactions"]
         if row["envelope_id"] is not None
     }
+    observations = snapshot["tables"]["chain_observations"]
     bindings: set[str] = set()
     for row in snapshot["tables"]["reconciliations"]:
         expected_id = digest_object(
@@ -111,8 +112,42 @@ def _validated_reverted_bindings(snapshot: Mapping[str, Any]) -> frozenset[str]:
                 and row["taker_address"] == signed["taker_address"],
                 "reconciliations: reverted row is not bound to signed metadata",
             )
+            _require(
+                any(
+                    observation["external_action_id"] == row["external_action_id"]
+                    and observation["signed_transaction_id"] == signed["signed_transaction_id"]
+                    and observation["presence"] == "INCLUDED"
+                    and observation["receipt_status"] == "REVERTED"
+                    for observation in observations
+                ),
+                "reconciliations: reverted row has no bound reverted observation",
+            )
             bindings.add(row["external_action_id"])
     return frozenset(bindings)
+
+
+def _validate_settlement_states(target: SpotLedger) -> None:
+    """Reject execution replays that mark settlement without settlement facts."""
+    for row in target.connection.execute(
+        "SELECT economic_action_id, state FROM intents "
+        "WHERE state IN ('RECONCILED','FILLED') ORDER BY economic_action_id"
+    ):
+        settled = target.connection.execute(
+            """
+            SELECT 1
+              FROM reconciliations AS r
+              JOIN fill_receipts AS f ON f.receipt_id = r.receipt_id
+             WHERE r.external_action_id = ?
+               AND r.verdict = 'SETTLED'
+               AND f.economic_action_id = r.external_action_id
+             LIMIT 1
+            """,
+            (row["economic_action_id"],),
+        ).fetchone()
+        _require(
+            settled is not None,
+            f"execution replay: {row['state']} action has no SETTLED reconciliation and fill receipt",
+        )
 
 
 def _validate_identity(table: str, row: Mapping[str, Any]) -> None:
@@ -240,6 +275,7 @@ def replay_execution_into(target: SpotLedger, source: SpotLedger) -> None:
                     f"VALUES ({','.join(':' + name for name in names)})",
                     row,
                 )
+    _validate_settlement_states(target)
 
 
 def reconstruct_execution(source: SpotLedger, *, path: str = ":memory:") -> SpotLedger:

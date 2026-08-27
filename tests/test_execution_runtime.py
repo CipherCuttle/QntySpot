@@ -39,6 +39,7 @@ from qntyspot.execution_contract import (
     SubmissionAcknowledgment,
     SubmissionAttemptV0,
     VenueQuoteResponseV0,
+    ZeroXExecutionExpectationV0,
     derive_transaction_hash,
     decode_allowance_holder_calldata,
 )
@@ -402,6 +403,73 @@ def test_runtime_full_offline_lifecycle_and_replay(tmp_path: Path) -> None:
     runtime.complete_settlement(intent.economic_action_id, now_epoch_s=NOW)
     assert ledger.intent_state(intent.economic_action_id) is IntentState.FILLED
     assert_execution_replay_equivalence(ledger)
+
+
+def test_runtime_uses_persisted_bounds_not_caller_supplied_bounds(tmp_path: Path) -> None:
+    ledger, runtime, _policy, intent, grant, session = setup_runtime(tmp_path)
+    runtime.reserve_action(intent.economic_action_id, now_epoch_s=NOW)
+    calldata = allowance_holder_calldata(
+        sell_token=intent.bounds.input_instrument_id.split(":")[-1],
+        buy_token=intent.bounds.output_instrument_id.split(":")[-1],
+        sell_amount=intent.bounds.max_input_atomic,
+        min_output=1,
+        taker=TAKER,
+    )
+    response = replace(
+        build_response(intent, calldata),
+        buy_amount_atomic=2,
+        min_buy_amount_atomic=1,
+        calldata_sha256=sha256_hex(calldata),
+        calldata_length=len(calldata),
+    )
+    envelope = replace(build_envelope(session, grant, intent, calldata, response), min_output_atomic=1)
+    with pytest.raises(EnvelopeValidationError, match="persisted intent bounds"):
+        runtime.record_execution_envelope(
+            envelope,
+            session,
+            grant,
+            replace(intent.bounds, min_output_atomic=1),
+            ZeroXExecutionExpectationV0(
+                chain_id=RUNTIME_CHAIN_ID,
+                taker_address=TAKER,
+                sell_token=response.sell_token,
+                buy_token=response.buy_token,
+                sell_amount_atomic=response.sell_amount_atomic,
+                min_output_atomic=response.min_buy_amount_atomic,
+                max_quote_age_s=30,
+            ),
+            response,
+            calldata,
+            now_epoch_s=NOW,
+        )
+
+
+def test_authority_root_and_policy_ceiling_are_not_caller_selected(tmp_path: Path) -> None:
+    ledger, runtime, _policy, _intent, grant, session = setup_runtime(tmp_path)
+    with pytest.raises(AuthorityCeilingError, match="frozen shadow authority-root"):
+        runtime.create_execution_session(
+            replace(session, authority_policy_digest=replace(grant, authority_root_id="attacker").authority_policy_digest),
+            replace(grant, authority_root_id="attacker"),
+        )
+    with pytest.raises(AuthorityCeilingError, match="per-order cap"):
+        runtime.create_execution_session(
+            replace(
+                session,
+                authority_policy_digest=replace(
+                    grant, max_reservation_atomic=10**30, max_cumulative_atomic=10**31
+                ).authority_policy_digest,
+                session_ordinal=2,
+            ),
+            replace(grant, max_reservation_atomic=10**30, max_cumulative_atomic=10**31),
+        )
+
+
+def test_reconciled_and_filled_require_settlement_facts(tmp_path: Path) -> None:
+    ledger, runtime, intent, _record, _envelope, _response = prepare_submitted(tmp_path)
+    ledger.transition(intent.economic_action_id, IntentState.INCLUDED, now_epoch_s=NOW)
+    ledger.transition(intent.economic_action_id, IntentState.CONFIRMED, now_epoch_s=NOW)
+    with pytest.raises(LedgerError, match="SETTLED reconciliation"):
+        ledger.transition(intent.economic_action_id, IntentState.RECONCILED, now_epoch_s=NOW)
 
 
 def test_post_submission_rejection_never_releases_without_bound_revert(tmp_path: Path) -> None:
