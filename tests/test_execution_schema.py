@@ -520,6 +520,7 @@ def test_authorized_approval_cannot_be_deleted(surface) -> None:
 
 
 APPEND_ONLY = (
+    "execution_sessions",
     "external_actions",
     "signed_transactions",
     "submission_attempts",

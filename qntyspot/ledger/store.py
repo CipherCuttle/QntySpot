@@ -408,6 +408,18 @@ class SpotLedger:
                     conn, economic_action_id, ReservationStatus.COMMITTED
                 )
             elif to_state in _RELEASING_STATES:
+                if src in {
+                    IntentState.SIGNED,
+                    IntentState.SUBMITTED,
+                    IntentState.INCLUDED,
+                    IntentState.CONFIRMED,
+                } and not self._has_bound_reverted_reconciliation(
+                    conn, economic_action_id
+                ):
+                    raise LedgerError(
+                        "post-submission rejection requires an exact recorded "
+                        "REVERTED reconciliation; capital remains held"
+                    )
                 self._settle_reservation(
                     conn, economic_action_id, ReservationStatus.RELEASED
                 )
@@ -431,6 +443,34 @@ class SpotLedger:
                 now_epoch_s=now_epoch_s,
                 payload=dict(payload or {}),
             )
+
+    @staticmethod
+    def _has_bound_reverted_reconciliation(
+        conn: sqlite3.Connection, economic_action_id: str
+    ) -> bool:
+        """Require a database-bound revert before releasing post-submission."""
+        try:
+            row = conn.execute(
+                """
+                SELECT 1
+                  FROM reconciliations AS r
+                  JOIN signed_transactions AS st
+                    ON st.external_action_id = r.external_action_id
+                 WHERE r.external_action_id = ?
+                   AND r.verdict = 'REVERTED'
+                   AND r.transaction_hash = st.transaction_hash
+                   AND r.chain_id = st.chain_id
+                   AND r.taker_address = st.taker_address
+                 LIMIT 1
+                """,
+                (economic_action_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            raise LedgerError(
+                "post-submission rejection requires the execution schema and "
+                "a recorded reconciliation"
+            ) from exc
+        return row is not None
 
     # -- budget ------------------------------------------------------------
 

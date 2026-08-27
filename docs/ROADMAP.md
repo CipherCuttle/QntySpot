@@ -7,15 +7,15 @@ V0C  SOLANA SHADOW                    <- merged
 V0D  ROBINHOOD SHADOW                 <- merged
 V0E  HOSTILE FAILURE SUITE            <- registry frozen (114 cases), suite merged
 PROGRAM A  CONTROL PLANE CLOSURE      <- closed
-PROGRAM B  PRE-LIVE EXECUTION CONTRACT   <- current phase, design only
-PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION
+PROGRAM B  PRE-LIVE EXECUTION CONTRACT   <- frozen prerequisite
+PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION <- current phase, offline-only
 V0F  INK DUST LIVE
 V0G  SOLANA DUST LIVE
 V0H  ROBINHOOD DUST LIVE
 V1   QntyLab-assisted ladder research
 ```
 
-No phase past Program B is authorized. `SIGNING_AUTHORIZED` and
+No phase past Program B1 is authorized. `SIGNING_AUTHORIZED` and
 `LIVE_CAPITAL_AUTHORIZED` are `NO`, and V0H is not live.
 
 ```
@@ -78,7 +78,7 @@ Reconciled the repaired Robinhood shadow lineage, the operations-hardening
 substrate, and the frozen V0E suite. See
 [docs/PROGRAM_A_CONTROL_PLANE_CLOSURE_V0.md](PROGRAM_A_CONTROL_PLANE_CLOSURE_V0.md).
 
-## Program B — pre-live execution contract (current)
+## Program B — pre-live execution contract (frozen)
 
 A contract and architecture freeze, not an implementation. It defines the
 execution session, envelope, approval, signed-transaction, submission,
@@ -87,11 +87,21 @@ SQLite execution authority surface, and the pre-live qualification matrix. It
 grants no runtime authority above `SHADOW` and changes no authority flag. See
 [docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
 
-## Program B1 — pre-live execution implementation
+## Program B1 — pre-live execution implementation (current)
 
-The runtime that must satisfy the Program B contract, together with the
-obligations B1-O-01 through B1-O-05 the contract names. Not started, and not
-authorized to sign, submit, approve, or deploy capital.
+Implemented as an offline transactional runtime over SQLite core plus the
+execution schema. It closes the post-submission release gate, extracts and
+validates the bounded 0x AllowanceHolder calldata shape, derives local
+Ethereum Keccak transaction hashes from caller-supplied bytes, persists
+submission/observation/reconciliation evidence, latches a kill switch, and
+replays the execution surface deterministically. It performs zero execution or
+venue network activity and is not authorized to sign, submit, approve, or
+deploy capital. The external authority-root consumer is intentionally
+fail-closed because B1 has no independent root verifier.
+
+The next smallest phase, if B1 is accepted, is a separately amended
+zero-capital testnet qualification on Robinhood testnet chain 46630. That
+phase is not started or authorized by this document.
 
 ## V0F / V0G / V0H — Dust live
 

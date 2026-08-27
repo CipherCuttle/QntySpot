@@ -33,7 +33,7 @@ WHAT THE ENGINE ENFORCES, NOT THE APPLICATION
   AUTHORIZED approval per ``(taker, token, spender)``.
 * ``reconciliations.external_action_id`` is UNIQUE, and a SETTLED verdict is
   the only verdict that may carry a receipt.
-* ``signed_transactions``, ``submission_attempts``, ``chain_observations``,
+* ``execution_sessions``, ``signed_transactions``, ``submission_attempts``, ``chain_observations``,
   ``external_actions``, ``reconciliations`` and ``operator_control_events``
   are append-only in the engine, via BEFORE UPDATE / BEFORE DELETE triggers
   that abort. Authorized envelope and approval identity-bearing facts are
@@ -46,9 +46,9 @@ WHAT THIS MODULE IS NOT
 It creates tables. It writes no rows, opens no connection of its own, signs
 nothing, submits nothing, and stores no key material anywhere: a signed
 transaction is represented by a digest of its payload, its length, and its
-hash. ``EXECUTION_SCHEMA_VERSION`` is 0 because this is the design-stage
-surface; whether it folds into the core ``SCHEMA_VERSION`` is a decision for
-``QNTY_SPOT_PROGRAM_B1_PRELIVE_EXECUTION_IMPLEMENTATION_V0``.
+hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 0; the
+B1 runtime applies it alongside the core ``SCHEMA_VERSION`` without changing
+the core schema version.
 """
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ EXECUTION_TABLES = (
 )
 
 _APPEND_ONLY_TABLES = (
+    "execution_sessions",
     "external_actions",
     "signed_transactions",
     "submission_attempts",
@@ -286,12 +287,23 @@ CREATE TABLE reconciliations (
     verdict                TEXT NOT NULL
                            CHECK (verdict IN ('SETTLED','REVERTED','AMBIGUOUS')),
     receipt_id             TEXT REFERENCES fill_receipts(receipt_id),
+    -- Reverted release is valid only for this exact external expectation.
+    -- These are nullable for the historical SETTLED/AMBIGUOUS shape, but a
+    -- REVERTED row must carry all three and the trigger below binds them to
+    -- the canonical signed transaction.
+    transaction_hash      TEXT,
+    chain_id              INTEGER,
+    taker_address         TEXT,
     confirmation_depth     INTEGER NOT NULL CHECK (confirmation_depth >= 0),
     agreeing_provider_count INTEGER NOT NULL CHECK (agreeing_provider_count >= 0),
     reconciled_at_epoch_s  INTEGER NOT NULL CHECK (reconciled_at_epoch_s >= 0),
     evidence_digest        TEXT NOT NULL,
     -- Only a settled reconciliation may carry a receipt, and it must carry one.
-    CHECK ((verdict = 'SETTLED') = (receipt_id IS NOT NULL))
+    CHECK ((verdict = 'SETTLED') = (receipt_id IS NOT NULL)),
+    CHECK (verdict <> 'REVERTED' OR
+           (transaction_hash IS NOT NULL AND chain_id IS NOT NULL AND taker_address IS NOT NULL)),
+    CHECK ((transaction_hash IS NULL) = (chain_id IS NULL)),
+    CHECK ((transaction_hash IS NULL) = (taker_address IS NULL))
 ) STRICT;
 
 CREATE TABLE operator_control_events (
@@ -444,6 +456,22 @@ BEGIN
            AND kind = 'ECONOMIC'
     ) THEN RAISE(ABORT, 'only economic external actions may carry a fill receipt') END;
 END;
+
+CREATE TRIGGER reconciliations_reverted_binding_guard
+BEFORE INSERT ON reconciliations
+WHEN NEW.verdict = 'REVERTED'
+ AND NOT EXISTS (
+    SELECT 1
+      FROM signed_transactions AS st
+      JOIN external_actions AS ea ON ea.external_action_id = st.external_action_id
+     WHERE ea.external_action_id = NEW.external_action_id
+       AND st.transaction_hash = NEW.transaction_hash
+       AND st.chain_id = NEW.chain_id
+       AND st.taker_address = NEW.taker_address
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'reverted reconciliation is not bound to the signed transaction');
+END;
 """
 
 EXECUTION_SCHEMA_SQL += _AUTHORIZED_IMMUTABILITY_SQL + _CROSS_TABLE_GUARDS_SQL
@@ -474,7 +502,7 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
     stamp = (
         "INSERT INTO schema_meta (key, value) VALUES\n"
         f"    ('execution_schema_version', '{EXECUTION_SCHEMA_VERSION}'),\n"
-        "    ('execution_authority', 'DESIGN_ONLY: no signer, no submission, "
+        "    ('execution_authority', 'B1_OFFLINE_ONLY: no signer, no submission, "
         "no capital authority');\n"
     )
     conn.executescript("BEGIN;\n" + EXECUTION_SCHEMA_SQL + "\n" + stamp + "COMMIT;\n")

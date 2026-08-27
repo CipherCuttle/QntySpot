@@ -7,7 +7,7 @@ scope of `qntyspot/`.
 
 ```
 PROJECT                 = QntySpot
-ACTIVE_PHASE            = QNTY_SPOT_PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0
+ACTIVE_PHASE            = QNTY_SPOT_PROGRAM_B1_PRELIVE_EXECUTION_IMPLEMENTATION_V0
 AUTHORITY               = ROBINHOOD_SHADOW_READ_ONLY
 NETWORK_AUTHORIZED      = YES (bounded public Robinhood REST/RPC, Chainlink, and 0x reads only)
 SIGNING_AUTHORIZED      = NO
@@ -19,10 +19,12 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 `qntyspot.NETWORK_AUTHORIZED`, `qntyspot.SIGNING_AUTHORIZED`, and
 `qntyspot.LIVE_CAPITAL_AUTHORIZED`.
 
-Program B is the active *design* phase. Naming it here changes no flag:
-`AUTHORITY` is still `ROBINHOOD_SHADOW_READ_ONLY`, signing and live capital are
-still `NO`, and capital authority is still `NONE`. Program B architecture does
-not itself create execution authority — see
+Program B1 is the active *offline implementation* phase. Naming it here
+changes no flag: `AUTHORITY` is still `ROBINHOOD_SHADOW_READ_ONLY`, signing and
+live capital are still `NO`, and capital authority is still `NONE`. The
+`NETWORK_AUTHORIZED = YES` flag remains the historical bounded-public-read
+ceiling; B1 itself performs zero execution or venue network activity. Program B
+architecture and B1 implementation do not create live execution authority — see
 [docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
 
 ## The read-only shadow authority authorizes
@@ -32,6 +34,10 @@ not itself create execution authority — see
 - Strict, fail-closed policy parsing (`qntyspot/policy.py`)
 - SQLite state transitions with database-enforced invariants
   (`qntyspot/ledger/`)
+- The offline Program B1 execution runtime over the existing SQLite core and
+  execution schema (`qntyspot/ledger/execution.py`), including durable
+  session, reservation, envelope, signed-metadata, submission, observation,
+  reconciliation, kill-switch, and deterministic replay facts
 - Deterministic replay from an empty database plus canonical policies and the
   event log (`qntyspot/ledger/replay.py`)
 - Accounting primitives: atomic budget reservation, commit, release, and
@@ -100,7 +106,7 @@ observation timestamp, the RPC block timestamp, their signed difference, and
 greater than 30 seconds fails closed. This is a technical shadow bound only,
 not a V0H live-capital clock or sequencer-safety guarantee.
 
-## Program B — pre-live execution contract (design only)
+## Program B — pre-live execution contract (frozen design)
 
 `QNTY_SPOT_PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0` freezes the execution
 system later phases must satisfy. It authorizes nothing beyond what is already
@@ -129,11 +135,15 @@ claims, because the ceiling is a constant in this source tree rather than an
 input. Levels 1 through 4 are semantics only; each requires its own explicit
 later phase.
 
-`qntyspot/ledger/execution_schema.py` defines the future execution authority
-tables. Nothing in this repository writes them.
+`qntyspot/ledger/execution_schema.py` defines the execution authority tables.
+The B1 runtime writes only explicit offline records supplied by its caller; it
+does not create venue requests, sign, submit, or broadcast anything.
 
 Program B adds no network call, no secret read, no signature, no approval, no
-broadcast, and no capital.
+broadcast, and no capital. B1 adds the local transactional record/replay
+surface and bounded calldata/hash validation, while preserving that same
+authority boundary. The independently rooted external-authority verifier is
+an explicit fail-closed seam in B1 and remains deferred.
 
 ## Asset selection
 
@@ -156,9 +166,7 @@ QntySpot does not inherit live-capital authority from `Qnty`, `QntyLab`, or
 `QntyAgentRuntime`. See [AGENTS.md](../AGENTS.md#authority-boundary-with-sibling-repositories)
 for the reconciliation record.
 
-## Chain truth boundary (documented, not implemented)
-
-A future rule, not yet implemented:
+## Chain truth boundary (implemented offline, still no chain client)
 
 - chain/venue truth is authoritative for actual fills
 - the local database is authoritative for intended actions
@@ -167,15 +175,20 @@ A future rule, not yet implemented:
 
 `qntyspot/boundary.py` defines the typing `Protocol`s for the chain/venue
 boundary. V0B implements the Ink `QuoteSource`; V0C adds the Solana/Jupiter
-`QuoteSource`; V0D adds the Robinhood shadow `QuoteSource`. No execution,
-chain-truth, or reconciliation implementation is added.
+`QuoteSource`; V0D adds the Robinhood shadow `QuoteSource`. The B1 runtime
+  implements the chain-truth and reconciliation rules over caller-supplied
+  persisted records; it does not implement a `ChainTruthSource` or reach a
+  chain. It records an accepted-but-absent or contradictory outcome as
+  `SAFE_HALT`, and releases a post-submission reservation only after an exact
+  database-bound `REVERTED` reconciliation.
 
 Program B gives that rule an evidence contract:
 `qntyspot.execution_contract.evaluate_chain_truth` decides what a set of
 provider observations may conclude, and `reconcile_to_receipt` is the only path
 from external truth to a `FillReceiptV0`. Both are pure functions over records
-the caller supplies; neither reads a chain. No adapter implements
-`ChainTruthSource` or `Reconciler` yet.
+the caller supplies; neither reads a chain. No venue adapter implements
+`ChainTruthSource` or `Reconciler` yet; the B1 runtime only consumes persisted
+records.
 
 ## Changing this document
 
