@@ -23,6 +23,8 @@ from qntyspot.ledger.execution_schema import (
     apply_execution_schema,
     read_execution_schema_version,
 )
+from qntyspot.ledger import open_ledger
+from qntyspot.ledger.replay import replay_into
 from qntyspot.states import IntentState
 
 SESSION_ID = "01" * 32
@@ -445,6 +447,53 @@ def test_authorized_envelope_cannot_regress_to_draft(surface) -> None:
         )
 
 
+def test_insert_or_replace_cannot_rewrite_execution_facts(signed) -> None:
+    ledger, _policy, _cycle_id, _intent, action_id = signed
+    conn = ledger.connection
+    conn.execute("PRAGMA recursive_triggers = OFF")
+
+    envelope = dict(
+        conn.execute(
+            "SELECT * FROM execution_envelopes WHERE economic_action_id = ?",
+            (action_id,),
+        ).fetchone()
+    )
+    envelope["lifecycle"] = "DRAFT"
+    envelope["max_input_atomic"] = "1"
+    names = sorted(envelope)
+    with pytest.raises(sqlite3.IntegrityError, match="conflict replacement"):
+        conn.execute(
+            f"INSERT OR REPLACE INTO execution_envelopes ({','.join(names)}) "
+            f"VALUES ({','.join(':' + name for name in names)})",
+            envelope,
+        )
+
+    observation = observation_row(action_id)
+    insert(conn, "chain_observations", **observation)
+    observation["receipt_status"] = "REVERTED"
+    observation["effective_input_atomic"] = None
+    observation["effective_output_atomic"] = None
+    names = sorted(observation)
+    with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+        conn.execute(
+            f"INSERT OR REPLACE INTO chain_observations ({','.join(names)}) "
+            f"VALUES ({','.join(':' + name for name in names)})",
+            observation,
+        )
+
+
+def test_core_replay_rejects_execution_enabled_targets(surface) -> None:
+    source = surface[0]
+    target = open_ledger()
+    apply_execution_schema(target.connection)
+    with pytest.raises(LedgerError, match="execution-enabled targets"):
+        replay_into(
+            target,
+            canonical_policies=source.canonical_policies(),
+            events=source.events(),
+        )
+
+
 def test_two_authorized_envelopes_cannot_share_a_nonce(surface) -> None:
     ledger, _policy, cycle_id, intent = surface
     conn = ledger.connection
@@ -763,7 +812,19 @@ def test_only_a_settled_reconciliation_may_carry_a_receipt(signed) -> None:
     conn = ledger.connection
     drive(ledger, intent.economic_action_id, *PATH_TO_FILLED)
     receipt = full_receipt(intent)
-    ledger.append_fill_receipt(receipt, now_epoch_s=NOW)
+    insert(
+        conn,
+        "fill_receipts",
+        receipt_id=receipt.receipt_id,
+        economic_action_id=receipt.economic_action_id,
+        external_ref=receipt.external_ref,
+        input_atomic_filled=str(receipt.input_atomic_filled),
+        output_atomic_filled=str(receipt.output_atomic_filled),
+        fee_atomic=str(receipt.fee_atomic),
+        observed_at_epoch_s=receipt.observed_at_epoch_s,
+        source=receipt.source,
+        appended_seq=1,
+    )
     insert(
         conn,
         "reconciliations",

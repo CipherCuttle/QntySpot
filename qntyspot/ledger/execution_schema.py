@@ -330,6 +330,124 @@ BEGIN
 END;
 """
 
+_CONFLICT_REPLACEMENT_SQL = """
+CREATE TRIGGER execution_sessions_no_conflict_replace
+BEFORE INSERT ON execution_sessions
+WHEN EXISTS (SELECT 1 FROM execution_sessions WHERE session_id = NEW.session_id)
+   OR EXISTS (
+       SELECT 1 FROM execution_sessions
+        WHERE identity_digest = NEW.identity_digest
+          AND started_at_epoch_s = NEW.started_at_epoch_s
+          AND session_ordinal = NEW.session_ordinal
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'execution_sessions is append-only');
+END;
+
+CREATE TRIGGER approval_actions_no_conflict_replace
+BEFORE INSERT ON approval_actions
+WHEN EXISTS (SELECT 1 FROM approval_actions WHERE approval_action_id = NEW.approval_action_id)
+   OR (
+       NEW.lifecycle = 'AUTHORIZED'
+       AND EXISTS (
+           SELECT 1 FROM approval_actions
+            WHERE lifecycle = 'AUTHORIZED'
+              AND taker_address = NEW.taker_address
+              AND token_address = NEW.token_address
+              AND spender_address = NEW.spender_address
+       )
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'approval action conflict replacement is forbidden');
+END;
+
+CREATE TRIGGER execution_envelopes_no_conflict_replace
+BEFORE INSERT ON execution_envelopes
+WHEN EXISTS (SELECT 1 FROM execution_envelopes WHERE envelope_id = NEW.envelope_id)
+   OR (
+       NEW.lifecycle = 'AUTHORIZED'
+       AND EXISTS (
+           SELECT 1 FROM execution_envelopes
+            WHERE lifecycle = 'AUTHORIZED'
+              AND (
+                  economic_action_id = NEW.economic_action_id
+                  OR (
+                      taker_address = NEW.taker_address
+                      AND chain_id = NEW.chain_id
+                      AND account_nonce = NEW.account_nonce
+                  )
+              )
+       )
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'execution envelope conflict replacement is forbidden');
+END;
+
+CREATE TRIGGER external_actions_no_conflict_replace
+BEFORE INSERT ON external_actions
+WHEN EXISTS (SELECT 1 FROM external_actions WHERE external_action_id = NEW.external_action_id)
+   OR (NEW.economic_action_id IS NOT NULL AND EXISTS (
+       SELECT 1 FROM external_actions WHERE economic_action_id = NEW.economic_action_id
+   ))
+   OR (NEW.approval_action_id IS NOT NULL AND EXISTS (
+       SELECT 1 FROM external_actions WHERE approval_action_id = NEW.approval_action_id
+   ))
+BEGIN
+    SELECT RAISE(ABORT, 'external_actions is append-only');
+END;
+
+CREATE TRIGGER signed_transactions_no_conflict_replace
+BEFORE INSERT ON signed_transactions
+WHEN EXISTS (SELECT 1 FROM signed_transactions WHERE signed_transaction_id = NEW.signed_transaction_id)
+   OR EXISTS (SELECT 1 FROM signed_transactions WHERE external_action_id = NEW.external_action_id)
+   OR EXISTS (SELECT 1 FROM signed_transactions WHERE raw_signed_sha256 = NEW.raw_signed_sha256)
+   OR EXISTS (SELECT 1 FROM signed_transactions WHERE transaction_hash = NEW.transaction_hash)
+   OR EXISTS (
+       SELECT 1 FROM signed_transactions
+        WHERE chain_id = NEW.chain_id
+          AND taker_address = NEW.taker_address
+          AND account_nonce = NEW.account_nonce
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'signed_transactions is append-only');
+END;
+
+CREATE TRIGGER submission_attempts_no_conflict_replace
+BEFORE INSERT ON submission_attempts
+WHEN EXISTS (SELECT 1 FROM submission_attempts WHERE submission_attempt_id = NEW.submission_attempt_id)
+   OR EXISTS (
+       SELECT 1 FROM submission_attempts
+        WHERE signed_transaction_id = NEW.signed_transaction_id
+          AND provider_id = NEW.provider_id
+          AND attempt_ordinal = NEW.attempt_ordinal
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'submission_attempts is append-only');
+END;
+
+CREATE TRIGGER chain_observations_no_conflict_replace
+BEFORE INSERT ON chain_observations
+WHEN EXISTS (SELECT 1 FROM chain_observations WHERE observation_id = NEW.observation_id)
+BEGIN
+    SELECT RAISE(ABORT, 'chain_observations is append-only');
+END;
+
+CREATE TRIGGER reconciliations_no_conflict_replace
+BEFORE INSERT ON reconciliations
+WHEN EXISTS (SELECT 1 FROM reconciliations WHERE reconciliation_id = NEW.reconciliation_id)
+   OR EXISTS (SELECT 1 FROM reconciliations WHERE external_action_id = NEW.external_action_id)
+BEGIN
+    SELECT RAISE(ABORT, 'reconciliations is append-only');
+END;
+
+CREATE TRIGGER operator_control_events_no_conflict_replace
+BEFORE INSERT ON operator_control_events
+WHEN EXISTS (SELECT 1 FROM operator_control_events WHERE seq = NEW.seq)
+BEGIN
+    SELECT RAISE(ABORT, 'operator_control_events is append-only');
+END;
+"""
+
 EXECUTION_SCHEMA_SQL = _SCHEMA_TEMPLATE.format(**_CHECKS) + "".join(
     _APPEND_ONLY_TEMPLATE.format(table=table) for table in _APPEND_ONLY_TABLES
 )
@@ -537,7 +655,10 @@ END;
 """
 
 EXECUTION_SCHEMA_SQL += (
-    _AUTHORIZED_IMMUTABILITY_SQL + _LIFECYCLE_GUARDS_SQL + _CROSS_TABLE_GUARDS_SQL
+    _AUTHORIZED_IMMUTABILITY_SQL
+    + _LIFECYCLE_GUARDS_SQL
+    + _CROSS_TABLE_GUARDS_SQL
+    + _CONFLICT_REPLACEMENT_SQL
 )
 
 
@@ -563,6 +684,11 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
         )
     if collisions := sorted(have & set(EXECUTION_TABLES)):
         raise LedgerError(f"execution schema already applied: {collisions}")
+    conn.execute("PRAGMA recursive_triggers = ON")
+    if not conn.execute("PRAGMA recursive_triggers").fetchone()[0]:
+        raise LedgerError(
+            "SQLite refused to enable recursive_triggers; refusing to apply execution schema"
+        )
     stamp = (
         "INSERT INTO schema_meta (key, value) VALUES\n"
         f"    ('execution_schema_version', '{EXECUTION_SCHEMA_VERSION}'),\n"

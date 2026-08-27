@@ -15,7 +15,7 @@ from ..execution_contract import (
 )
 from .execution import ExecutionRuntime
 from .execution_schema import EXECUTION_TABLES, apply_execution_schema
-from .replay import replay_into
+from .replay import _EXECUTION_REPLAY_TOKEN, replay_into
 from .store import SpotLedger, open_ledger
 
 __all__ = [
@@ -289,6 +289,7 @@ def reconstruct_execution(source: SpotLedger, *, path: str = ":memory:") -> Spot
         canonical_policies=source.canonical_policies(),
         events=source.events(),
         trusted_reverted_external_action_ids=reverted_bindings,
+        _execution_replay_token=_EXECUTION_REPLAY_TOKEN,
     )
     replay_execution_into(target, source)
     target.integrity_check()

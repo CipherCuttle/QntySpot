@@ -175,6 +175,13 @@ BEGIN
     SELECT RAISE(ABORT, 'state_events is append-only');
 END;
 
+CREATE TRIGGER state_events_no_conflict_replace
+BEFORE INSERT ON state_events
+WHEN EXISTS (SELECT 1 FROM state_events WHERE seq = NEW.seq)
+BEGIN
+    SELECT RAISE(ABORT, 'state_events is append-only');
+END;
+
 CREATE TABLE budget_reservations (
     economic_action_id  TEXT PRIMARY KEY REFERENCES intents(economic_action_id),
     policy_id           TEXT NOT NULL REFERENCES policies(policy_id),
@@ -216,6 +223,14 @@ BEFORE DELETE ON fill_receipts
 BEGIN
     SELECT RAISE(ABORT, 'fill_receipts is append-only');
 END;
+
+CREATE TRIGGER fill_receipts_no_conflict_replace
+BEFORE INSERT ON fill_receipts
+WHEN EXISTS (SELECT 1 FROM fill_receipts WHERE receipt_id = NEW.receipt_id)
+   OR EXISTS (SELECT 1 FROM fill_receipts WHERE external_ref = NEW.external_ref)
+BEGIN
+    SELECT RAISE(ABORT, 'fill_receipts is append-only');
+END;
 """
 
 SCHEMA_SQL = _SCHEMA_TEMPLATE.format(**_CHECKS)
@@ -230,12 +245,16 @@ def configure_connection(conn: sqlite3.Connection, *, wal: bool, busy_timeout_ms
     """
     register_atomic_functions(conn)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA recursive_triggers = ON")
     conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
     if wal:
         conn.execute("PRAGMA journal_mode = WAL")
     enabled = conn.execute("PRAGMA foreign_keys").fetchone()[0]
     if not enabled:
         raise LedgerError("SQLite refused to enable foreign_keys; refusing to continue")
+    recursive = conn.execute("PRAGMA recursive_triggers").fetchone()[0]
+    if not recursive:
+        raise LedgerError("SQLite refused to enable recursive_triggers; refusing to continue")
 
 
 def apply_schema(conn: sqlite3.Connection) -> None:
@@ -246,6 +265,11 @@ def apply_schema(conn: sqlite3.Connection) -> None:
     if existing:
         raise LedgerError(
             f"refusing to apply schema over existing tables: {sorted(r[0] for r in existing)}"
+        )
+    conn.execute("PRAGMA recursive_triggers = ON")
+    if not conn.execute("PRAGMA recursive_triggers").fetchone()[0]:
+        raise LedgerError(
+            "SQLite refused to enable recursive_triggers; refusing to apply schema"
         )
     # executescript() commits any pending transaction before it runs, so the
     # script carries its own BEGIN/COMMIT. Either the whole schema lands or

@@ -38,6 +38,7 @@ from ..execution_contract import (
     SubmissionAcknowledgment,
     SubmissionAttemptV0,
     ValidatedEconomicActionV0,
+    _validated_economic_action_from_database,
     VenueQuoteResponseV0,
     ZeroXExecutionExpectationV0,
     assert_approval_admissible,
@@ -923,6 +924,12 @@ class ExecutionRuntime:
 
             if receipt_id is None:
                 raise LedgerError("a confirmed economic action requires a receipt id")
+            validated_action = _validated_economic_action_from_database(
+                EconomicActionIDV0(economic_action_id),
+                signed_row["transaction_hash"],
+                signed_row["chain_id"],
+                signed_row["taker_address"],
+            )
             receipt = reconcile_to_receipt(
                 __import__(
                     "qntyspot.execution_contract", fromlist=["SettlementExpectationV0"]
@@ -935,12 +942,7 @@ class ExecutionRuntime:
                 ),
                 truth,
                 bounds,
-                validated_action=ValidatedEconomicActionV0._from_database(
-                    EconomicActionIDV0(economic_action_id),
-                    signed_row["transaction_hash"],
-                    signed_row["chain_id"],
-                    signed_row["taker_address"],
-                ),
+                validated_action=validated_action,
                 receipt_id=receipt_id,
                 fee_atomic=fee_atomic,
                 observed_at_epoch_s=now_epoch_s if observed_at_epoch_s is None else observed_at_epoch_s,
@@ -948,7 +950,11 @@ class ExecutionRuntime:
             )
             if state not in {IntentState.CONFIRMED, IntentState.INCLUDED, IntentState.SUBMITTED, IntentState.SIGNED}:
                 raise SafeHaltError(f"confirmed settlement cannot be accounted from {state.value}")
-            self.ledger.append_fill_receipt(receipt, now_epoch_s=now_epoch_s)
+            self.ledger.append_execution_fill_receipt(
+                receipt,
+                validated_action=validated_action,
+                now_epoch_s=now_epoch_s,
+            )
             self._insert_reconciliation(
                 conn, economic_action_id, truth, now_epoch_s, receipt_id=receipt.receipt_id,
             )

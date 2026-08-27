@@ -43,6 +43,11 @@ from ..domain import (
     RuntimeStateV0,
     Side,
 )
+from ..execution_contract import (
+    EconomicActionIDV0,
+    SettlementExpectationV0,
+    ValidatedEconomicActionV0,
+)
 from ..errors import (
     BudgetExceededError,
     DuplicateEconomicActionError,
@@ -646,6 +651,81 @@ class SpotLedger:
     # -- receipts ----------------------------------------------------------
 
     def append_fill_receipt(self, receipt: FillReceiptV0, *, now_epoch_s: int) -> bool:
+        if self._execution_surface_present(self._conn):
+            raise LedgerError(
+                "B1 fill receipts must be appended by ExecutionRuntime with a "
+                "database-validated economic binding"
+            )
+        with self._write() as conn:
+            return self._append_fill_receipt_in_transaction(conn, receipt, now_epoch_s=now_epoch_s)
+
+    def append_execution_fill_receipt(
+        self,
+        receipt: FillReceiptV0,
+        *,
+        validated_action: ValidatedEconomicActionV0,
+        now_epoch_s: int,
+    ) -> bool:
+        """Append a B1 receipt only after checking its execution rows in SQLite."""
+        with self._write() as conn:
+            if not self._execution_surface_present(conn):
+                raise LedgerError("B1 execution receipt requires the execution schema")
+            row = conn.execute(
+                """
+                SELECT ea.kind, st.transaction_hash, st.chain_id, st.taker_address,
+                       st.signed_transaction_id
+                  FROM external_actions AS ea
+                  JOIN signed_transactions AS st
+                    ON st.external_action_id = ea.external_action_id
+                 WHERE ea.external_action_id = ?
+                   AND ea.kind = 'ECONOMIC'
+                """,
+                (receipt.economic_action_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerError(
+                    "B1 receipt requires a database-bound economic signed transaction"
+                )
+            expectation = SettlementExpectationV0(
+                economic_action_id=EconomicActionIDV0(receipt.economic_action_id),
+                transaction_hash=row["transaction_hash"],
+                chain_id=row["chain_id"],
+                taker_address=row["taker_address"],
+                submission_acknowledged=True,
+            )
+            validated_action.assert_matches(expectation)
+            if receipt.external_ref != row["transaction_hash"]:
+                raise LedgerError("B1 receipt external reference is not the signed transaction hash")
+            observation = conn.execute(
+                """
+                SELECT 1
+                  FROM chain_observations
+                 WHERE external_action_id = ?
+                   AND signed_transaction_id = ?
+                   AND presence = 'INCLUDED'
+                   AND receipt_status = 'SUCCESS'
+                   AND effective_input_atomic = ?
+                   AND effective_output_atomic = ?
+                 LIMIT 1
+                """,
+                (
+                    receipt.economic_action_id,
+                    row["signed_transaction_id"],
+                    encode_atomic(receipt.input_atomic_filled, field="input_filled"),
+                    encode_atomic(receipt.output_atomic_filled, field="output_filled"),
+                ),
+            ).fetchone()
+            if observation is None:
+                raise LedgerError(
+                    "B1 receipt requires a bound successful chain observation"
+                )
+            return self._append_fill_receipt_in_transaction(
+                conn, receipt, now_epoch_s=now_epoch_s
+            )
+
+    def _append_fill_receipt_in_transaction(
+        self, conn: sqlite3.Connection, receipt: FillReceiptV0, *, now_epoch_s: int
+    ) -> bool:
         """Record external truth about a settlement.
 
         Returns whether the receipt respected the bounds that were committed.
@@ -655,85 +735,84 @@ class SpotLedger:
         maximum, drives the intent to ``SAFE_HALT`` in the same transaction.
         Ambiguity is never resolved by assuming the happy path.
         """
-        with self._write() as conn:
-            row = conn.execute(
-                "SELECT state, policy_id, cycle_id, bounds_json FROM intents "
-                "WHERE economic_action_id = ?",
-                (receipt.economic_action_id,),
-            ).fetchone()
-            if row is None:
-                raise LedgerError(f"unknown economic action {receipt.economic_action_id}")
-            state = IntentState(row["state"])
-            if state not in _RECEIPT_STATES:
-                raise LedgerError(
-                    f"a fill receipt is not meaningful while the intent is {state.value}"
-                )
+        row = conn.execute(
+            "SELECT state, policy_id, cycle_id, bounds_json FROM intents "
+            "WHERE economic_action_id = ?",
+            (receipt.economic_action_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerError(f"unknown economic action {receipt.economic_action_id}")
+        state = IntentState(row["state"])
+        if state not in _RECEIPT_STATES:
+            raise LedgerError(
+                f"a fill receipt is not meaningful while the intent is {state.value}"
+            )
 
-            seq = self._next_seq(conn)
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO fill_receipts (
-                        receipt_id, economic_action_id, external_ref, input_atomic_filled,
-                        output_atomic_filled, fee_atomic, observed_at_epoch_s, source,
-                        appended_seq
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        receipt.receipt_id,
-                        receipt.economic_action_id,
-                        receipt.external_ref,
-                        encode_atomic(receipt.input_atomic_filled, field="input_filled"),
-                        encode_atomic(receipt.output_atomic_filled, field="output_filled"),
-                        encode_atomic(receipt.fee_atomic, field="fee"),
-                        receipt.observed_at_epoch_s,
-                        receipt.source,
-                        seq,
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:
-                raise LedgerError(
-                    f"duplicate fill receipt ({receipt.receipt_id} / {receipt.external_ref}): {exc}"
-                ) from exc
+        seq = self._next_seq(conn)
+        try:
+            conn.execute(
+                """
+                INSERT INTO fill_receipts (
+                    receipt_id, economic_action_id, external_ref, input_atomic_filled,
+                    output_atomic_filled, fee_atomic, observed_at_epoch_s, source,
+                    appended_seq
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    receipt.receipt_id,
+                    receipt.economic_action_id,
+                    receipt.external_ref,
+                    encode_atomic(receipt.input_atomic_filled, field="input_filled"),
+                    encode_atomic(receipt.output_atomic_filled, field="output_filled"),
+                    encode_atomic(receipt.fee_atomic, field="fee"),
+                    receipt.observed_at_epoch_s,
+                    receipt.source,
+                    seq,
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise LedgerError(
+                f"duplicate fill receipt ({receipt.receipt_id} / {receipt.external_ref}): {exc}"
+            ) from exc
 
+        self._append_event(
+            conn,
+            event_type=EventType.FILL_RECEIPT_APPENDED,
+            policy_id=row["policy_id"],
+            cycle_id=row["cycle_id"],
+            economic_action_id=receipt.economic_action_id,
+            from_state=state.value,
+            to_state=None,
+            now_epoch_s=now_epoch_s,
+            payload=receipt.canonical_object(),
+        )
+
+        bounds = strict_json_loads(row["bounds_json"])
+        ok = self._receipt_within_bounds(conn, receipt, bounds)
+        if not ok:
+            assert_legal_transition(state, IntentState.SAFE_HALT)
+            # The fill happened, it just landed outside the committed
+            # bounds. The capital is gone, so it is quarantined rather than
+            # returned to the available pool.
+            self._settle_reservation(
+                conn, receipt.economic_action_id, ReservationStatus.QUARANTINED
+            )
+            conn.execute(
+                "UPDATE intents SET state = ? WHERE economic_action_id = ?",
+                (IntentState.SAFE_HALT.value, receipt.economic_action_id),
+            )
             self._append_event(
                 conn,
-                event_type=EventType.FILL_RECEIPT_APPENDED,
+                event_type=EventType.INTENT_TRANSITION,
                 policy_id=row["policy_id"],
                 cycle_id=row["cycle_id"],
                 economic_action_id=receipt.economic_action_id,
                 from_state=state.value,
-                to_state=None,
+                to_state=IntentState.SAFE_HALT.value,
                 now_epoch_s=now_epoch_s,
-                payload=receipt.canonical_object(),
+                payload={"reason": "FILL_OUTSIDE_COMMITTED_BOUNDS"},
             )
-
-            bounds = strict_json_loads(row["bounds_json"])
-            ok = self._receipt_within_bounds(conn, receipt, bounds)
-            if not ok:
-                assert_legal_transition(state, IntentState.SAFE_HALT)
-                # The fill happened, it just landed outside the committed
-                # bounds. The capital is gone, so it is quarantined rather than
-                # returned to the available pool.
-                self._settle_reservation(
-                    conn, receipt.economic_action_id, ReservationStatus.QUARANTINED
-                )
-                conn.execute(
-                    "UPDATE intents SET state = ? WHERE economic_action_id = ?",
-                    (IntentState.SAFE_HALT.value, receipt.economic_action_id),
-                )
-                self._append_event(
-                    conn,
-                    event_type=EventType.INTENT_TRANSITION,
-                    policy_id=row["policy_id"],
-                    cycle_id=row["cycle_id"],
-                    economic_action_id=receipt.economic_action_id,
-                    from_state=state.value,
-                    to_state=IntentState.SAFE_HALT.value,
-                    now_epoch_s=now_epoch_s,
-                    payload={"reason": "FILL_OUTSIDE_COMMITTED_BOUNDS"},
-                )
-            return ok
+        return ok
 
     @staticmethod
     def _receipt_within_bounds(

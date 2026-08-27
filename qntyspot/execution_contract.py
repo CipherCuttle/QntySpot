@@ -112,7 +112,6 @@ __all__ = [
     "EconomicActionIDV0",
     "ChainTruthV0",
     "SettlementExpectationV0",
-    "ValidatedEconomicActionV0",
     "evaluate_chain_truth",
     "reconcile_to_receipt",
     "next_state_for_verdict",
@@ -1202,22 +1201,6 @@ class ValidatedEconomicActionV0:
     taker_address: str
     _token: object = field(default=None, repr=False, compare=False)
 
-    @classmethod
-    def _from_database(
-        cls,
-        economic_action_id: EconomicActionIDV0,
-        transaction_hash: str,
-        chain_id: int,
-        taker_address: str,
-    ) -> "ValidatedEconomicActionV0":
-        return cls(
-            economic_action_id=economic_action_id,
-            transaction_hash=transaction_hash,
-            chain_id=chain_id,
-            taker_address=taker_address,
-            _token=_SETTLEMENT_BINDING_TOKEN,
-        )
-
     def assert_matches(self, expectation: SettlementExpectationV0) -> None:
         if self._token is not _SETTLEMENT_BINDING_TOKEN:
             raise ChainTruthError("settlement binding was not produced by the ledger runtime")
@@ -1228,6 +1211,21 @@ class ValidatedEconomicActionV0:
             or self.taker_address != expectation.taker_address
         ):
             raise ChainTruthError("database settlement binding disagrees with the expectation")
+
+
+def _validated_economic_action_from_database(
+    economic_action_id: EconomicActionIDV0,
+    transaction_hash: str,
+    chain_id: int,
+    taker_address: str,
+) -> "ValidatedEconomicActionV0":
+    return ValidatedEconomicActionV0(
+        economic_action_id=economic_action_id,
+        transaction_hash=transaction_hash,
+        chain_id=chain_id,
+        taker_address=taker_address,
+        _token=_SETTLEMENT_BINDING_TOKEN,
+    )
 
 
 @dataclass(frozen=True, slots=True)

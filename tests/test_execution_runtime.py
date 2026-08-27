@@ -19,7 +19,7 @@ from execution_support import (
     TAKER,
 )
 from qntyspot.canon import digest_object, sha256_hex
-from qntyspot.domain import Side
+from qntyspot.domain import FillReceiptV0, Side
 from qntyspot.economics import build_intent
 from qntyspot.errors import (
     AuthorityCeilingError,
@@ -403,6 +403,22 @@ def test_runtime_full_offline_lifecycle_and_replay(tmp_path: Path) -> None:
     runtime.complete_settlement(intent.economic_action_id, now_epoch_s=NOW)
     assert ledger.intent_state(intent.economic_action_id) is IntentState.FILLED
     assert_execution_replay_equivalence(ledger)
+
+
+def test_b1_receipts_require_runtime_database_binding(tmp_path: Path) -> None:
+    ledger, _runtime, intent, record, _envelope, _response = prepare_submitted(tmp_path)
+    receipt = FillReceiptV0(
+        receipt_id="direct-receipt",
+        economic_action_id=intent.economic_action_id,
+        external_ref=record.transaction_hash,
+        input_atomic_filled=intent.bounds.max_input_atomic,
+        output_atomic_filled=intent.bounds.min_output_atomic,
+        fee_atomic=0,
+        observed_at_epoch_s=NOW,
+        source="direct-caller",
+    )
+    with pytest.raises(LedgerError, match="ExecutionRuntime"):
+        ledger.append_fill_receipt(receipt, now_epoch_s=NOW)
 
 
 def test_runtime_uses_persisted_bounds_not_caller_supplied_bounds(tmp_path: Path) -> None:

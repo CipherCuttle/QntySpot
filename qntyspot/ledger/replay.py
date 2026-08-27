@@ -37,6 +37,8 @@ from .store import SpotLedger, open_ledger
 
 __all__ = ["replay_into", "reconstruct", "assert_replay_equivalence"]
 
+_EXECUTION_REPLAY_TOKEN = object()
+
 _RELEASING = {IntentState.CANCELLED, IntentState.EXPIRED, IntentState.REJECTED}
 
 
@@ -51,9 +53,17 @@ def replay_into(
     canonical_policies: Sequence[str],
     events: Sequence[Mapping[str, Any]],
     trusted_reverted_external_action_ids: frozenset[str] = frozenset(),
+    _execution_replay_token: object | None = None,
 ) -> None:
     """Rebuild ``target`` (which must be empty) from policies and events."""
     conn = target.connection
+    execution_tables = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_sessions'"
+    ).fetchone()
+    if execution_tables is not None and _execution_replay_token is not _EXECUTION_REPLAY_TOKEN:
+        raise LedgerError(
+            "execution-enabled targets require replay_execution_into for B1 validation"
+        )
     if conn.execute("SELECT COUNT(*) FROM state_events").fetchone()[0]:
         raise LedgerError("replay target must be an empty ledger")
 

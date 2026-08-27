@@ -71,6 +71,7 @@ from qntyspot.execution_contract import (
     SubmissionAcknowledgment,
     SubmissionAttemptV0,
     ValidatedEconomicActionV0,
+    _validated_economic_action_from_database,
     assert_approval_admissible,
     assert_envelope_admissible,
     assert_envelope_matches_venue_response,
@@ -810,7 +811,7 @@ def expect(acknowledged: bool = True) -> SettlementExpectationV0:
 
 
 def validated_action(exp: SettlementExpectationV0) -> ValidatedEconomicActionV0:
-    return ValidatedEconomicActionV0._from_database(
+    return _validated_economic_action_from_database(
         exp.economic_action_id,
         exp.transaction_hash,
         exp.chain_id,
