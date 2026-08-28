@@ -68,12 +68,12 @@ I-16  RWA API access is not legal eligibility.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, fields as dataclass_fields
+from dataclasses import dataclass, field, fields as dataclass_fields
 from enum import Enum, IntEnum
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from .canon import digest_object
+from .canon import digest_object, sha256_hex
 from .domain import EconomicBounds, FillReceiptV0
 from .errors import (
     ApprovalContractError,
@@ -119,6 +119,9 @@ __all__ = [
     "ExecutionReadinessV0",
     "VenueQuoteResponseV0",
     "ZeroXExecutionExpectationV0",
+    "AllowanceHolderCalldataV0",
+    "decode_allowance_holder_calldata",
+    "derive_transaction_hash",
     "evaluate_zero_x_execution_readiness",
     "assert_envelope_matches_venue_response",
     "assert_envelope_admissible",
@@ -1179,6 +1182,52 @@ class SettlementExpectationV0:
             raise ChainTruthError("submission_acknowledged must be a bool")
 
 
+_SETTLEMENT_BINDING_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedEconomicActionV0:
+    """Database-bound settlement identity required to mint a fill receipt.
+
+    A digest-shaped string is not sufficient to prove that an external action
+    is an economic action: approval identities have the same representation.
+    The runtime creates this opaque binding only after it has validated the
+    corresponding SQLite external-action and signed-transaction rows.
+    """
+
+    economic_action_id: EconomicActionIDV0
+    transaction_hash: str
+    chain_id: int
+    taker_address: str
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def assert_matches(self, expectation: SettlementExpectationV0) -> None:
+        if self._token is not _SETTLEMENT_BINDING_TOKEN:
+            raise ChainTruthError("settlement binding was not produced by the ledger runtime")
+        if (
+            self.economic_action_id != expectation.economic_action_id
+            or self.transaction_hash != expectation.transaction_hash
+            or self.chain_id != expectation.chain_id
+            or self.taker_address != expectation.taker_address
+        ):
+            raise ChainTruthError("database settlement binding disagrees with the expectation")
+
+
+def _validated_economic_action_from_database(
+    economic_action_id: EconomicActionIDV0,
+    transaction_hash: str,
+    chain_id: int,
+    taker_address: str,
+) -> "ValidatedEconomicActionV0":
+    return ValidatedEconomicActionV0(
+        economic_action_id=economic_action_id,
+        transaction_hash=transaction_hash,
+        chain_id=chain_id,
+        taker_address=taker_address,
+        _token=_SETTLEMENT_BINDING_TOKEN,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ChainTruthV0:
     """The only conclusion the contract permits to be drawn from observations.
@@ -1346,6 +1395,7 @@ def reconcile_to_receipt(
     truth: ChainTruthV0,
     bounds: EconomicBounds,
     *,
+    validated_action: ValidatedEconomicActionV0,
     receipt_id: str,
     fee_atomic: int,
     observed_at_epoch_s: int,
@@ -1360,6 +1410,11 @@ def reconcile_to_receipt(
     """
     if not isinstance(truth, ChainTruthV0):
         raise ChainTruthError("truth must be a ChainTruthV0")
+    if not isinstance(validated_action, ValidatedEconomicActionV0):
+        raise ChainTruthError(
+            "a database-validated economic action binding is required to produce a receipt"
+        )
+    validated_action.assert_matches(expectation)
     if (
         truth.external_action_id != expectation.economic_action_id
         or truth.transaction_hash != expectation.transaction_hash
@@ -1572,6 +1627,488 @@ class ZeroXExecutionExpectationV0:
         _label(self.quote_mode, field="quote_mode")
 
 
+@dataclass(frozen=True, slots=True)
+class AllowanceHolderCalldataV0:
+    """The bounded facts extracted from one AllowanceHolder call.
+
+    This is intentionally not a general ABI representation.  It covers the
+    current 0x v2 ERC-20 AllowanceHolder form:
+
+    ``AllowanceHolder.exec(operator, token, amount, target, bytes)`` forwarding
+    to ``Settler.execute(AllowedSlippage, bytes[], bytes32)``.  The outer
+    amount/token and inner slippage tuple are the economic seams this phase
+    must bind; action bytes are admitted only when their selector is one of the
+    supported Settler action forms.
+    """
+
+    allowance_holder_selector: str
+    operator_address: str
+    sell_token: str
+    sell_amount_atomic: int
+    settler_target: str
+    settler_selector: str
+    recipient: str
+    buy_token: str
+    min_output_atomic: int
+    action_selectors: tuple[str, ...]
+
+
+def _selector(text: str) -> str:
+    from .keccak import keccak256_hex
+
+    return "0x" + keccak256_hex(text.encode("ascii"))[:8]
+
+
+_ALLOWANCE_HOLDER_EXEC_SELECTOR = _selector("exec(address,address,uint256,address,bytes)")
+_SETTLER_EXEC_SELECTOR = _selector("execute((address,address,uint256),bytes[],bytes32)")
+_ACTION_SELECTORS = {
+    _selector("NATIVE_CHECK(uint256,uint256)"),
+    _selector("CHECK_SLIPPAGE(bool)"),
+    _selector("UNISWAPV3(address,uint256,bytes,uint256)"),
+    _selector("UNISWAPV2(address,address,uint256,address,uint24,uint256)"),
+    _selector("BASIC(address,uint256,address,uint256,bytes)"),
+    _selector("DODOV1(address,uint256,address,bool,uint256)"),
+    _selector("DODOV2(address,address,uint256,address,bool,uint256)"),
+    _selector("VELODROME(address,uint256,address,uint24,uint256)"),
+    _selector("MAVERICKV2(address,address,uint256,address,bool,int32,uint256)"),
+    _selector("EULERSWAP(address,address,uint256,address,bool,uint256)"),
+    _selector("RENEGADE(address,address,address,uint256,bool,uint256,bytes,uint256)"),
+    _selector("POSITIVE_SLIPPAGE(address,address,uint256,uint256)"),
+}
+_NON_SETTLEMENT_ACTION_SELECTORS = {
+    _selector("NATIVE_CHECK(uint256,uint256)"),
+    _selector("CHECK_SLIPPAGE(bool)"),
+}
+_ACTION_LAYOUTS = {
+    _selector("NATIVE_CHECK(uint256,uint256)"): (2, ()),
+    _selector("CHECK_SLIPPAGE(bool)"): (1, ()),
+    _selector("UNISWAPV3(address,uint256,bytes,uint256)"): (4, (2,)),
+    _selector("UNISWAPV2(address,address,uint256,address,uint24,uint256)"): (6, ()),
+    _selector("BASIC(address,uint256,address,uint256,bytes)"): (5, (4,)),
+    _selector("DODOV1(address,uint256,address,bool,uint256)"): (5, ()),
+    _selector("DODOV2(address,address,uint256,address,bool,uint256)"): (6, ()),
+    _selector("VELODROME(address,uint256,address,uint24,uint256)"): (5, ()),
+    _selector("MAVERICKV2(address,address,uint256,address,bool,int32,uint256)"): (7, ()),
+    _selector("EULERSWAP(address,address,uint256,address,bool,uint256)"): (6, ()),
+    _selector("RENEGADE(address,address,address,uint256,bool,uint256,bytes,uint256)"): (8, (6,)),
+    _selector("POSITIVE_SLIPPAGE(address,address,uint256,uint256)"): (4, ()),
+}
+_SETTLER_BASIS = 1_000_000
+
+
+def _calldata_bytes(value: bytes | str) -> bytes:
+    if isinstance(value, bytes):
+        result = value
+    elif isinstance(value, str) and value.startswith("0x") and len(value) % 2 == 0:
+        try:
+            result = bytes.fromhex(value[2:])
+        except ValueError as exc:
+            raise EnvelopeValidationError("calldata hex is malformed") from exc
+    else:
+        raise EnvelopeValidationError("calldata must be explicit bytes or 0x-prefixed hex")
+    if not result:
+        raise EnvelopeValidationError("calldata must not be empty")
+    return result
+
+
+def _calldata_word(data: bytes, offset: int, *, field: str) -> int:
+    if offset < 0 or offset + 32 > len(data):
+        raise EnvelopeValidationError(f"calldata {field} word is out of bounds")
+    return int.from_bytes(data[offset : offset + 32], "big")
+
+
+def _calldata_address(data: bytes, offset: int, *, field: str) -> str:
+    word = data[offset : offset + 32]
+    if len(word) != 32 or word[:12] != b"\x00" * 12:
+        raise EnvelopeValidationError(f"calldata {field} is not a canonical address word")
+    address = "0x" + word[12:].hex()
+    return _address(address, field=f"calldata {field}")
+
+
+def _calldata_dynamic_bytes(data: bytes, args_start: int, offset: int, *, field: str) -> bytes:
+    if offset != 32 * 5:
+        raise EnvelopeValidationError(f"calldata {field} offset is not canonical")
+    start = args_start + offset
+    length = _calldata_word(data, start, field=f"{field}.length")
+    end = start + 32 + length
+    padded_end = start + 32 + ((length + 31) // 32) * 32
+    if end > len(data) or padded_end != len(data):
+        raise EnvelopeValidationError(f"calldata {field} has trailing or truncated bytes")
+    if any(data[end:padded_end]):
+        raise EnvelopeValidationError(f"calldata {field} has non-zero ABI padding")
+    return data[start + 32 : end]
+
+
+def _action_word(action_args: bytes, index: int, *, field: str) -> int:
+    return _calldata_word(action_args, index * 32, field=field)
+
+
+def _action_address(action_args: bytes, index: int, *, field: str) -> str:
+    return _calldata_address(action_args, index * 32, field=field)
+
+
+def _action_bool(action_args: bytes, index: int, *, field: str) -> bool:
+    value = _action_word(action_args, index, field=field)
+    if value not in (0, 1):
+        raise EnvelopeValidationError(f"calldata {field} is not a canonical bool")
+    return bool(value)
+
+
+def _assert_action_minimum(
+    action_args: bytes,
+    index: int,
+    expected_min_output_atomic: int | None,
+    *,
+    field: str,
+) -> None:
+    minimum = _action_word(action_args, index, field=field)
+    if minimum <= 0 or minimum > MAX_UINT256:
+        raise EnvelopeValidationError(f"calldata {field} is not a positive uint256")
+    if expected_min_output_atomic is not None and minimum < expected_min_output_atomic:
+        raise EnvelopeValidationError(f"calldata {field} weakens the bound")
+
+
+def _assert_action_ppm(action_args: bytes, index: int, *, field: str) -> None:
+    ppm = _action_word(action_args, index, field=field)
+    if ppm > _SETTLER_BASIS:
+        raise EnvelopeValidationError(f"calldata {field} exceeds the Settler basis")
+
+
+def _validate_action_semantics(
+    selector: str,
+    action_args: bytes,
+    dynamic_values: Mapping[int, bytes],
+    *,
+    expected_sell_token: str | None,
+    expected_buy_token: str | None,
+    expected_taker_address: str | None,
+    expected_sell_amount_atomic: int | None,
+    expected_min_output_atomic: int | None,
+    transaction_value_atomic: int,
+) -> None:
+    """Bind every economic field exposed by the supported Settler actions.
+
+    The outer AllowanceHolder amount is the maximum input supplied by the
+    taker. Settler actions consume a bounded proportion of that balance or
+    carry their own maximum explicitly, so a selector-only check is not
+    sufficient: a nested action can otherwise redirect the token or payout.
+    """
+    if selector == _selector("NATIVE_CHECK(uint256,uint256)"):
+        _action_word(action_args, 0, field="NATIVE_CHECK.deadline")
+        msg_value = _action_word(action_args, 1, field="NATIVE_CHECK.msgValue")
+        if msg_value > transaction_value_atomic:
+            raise EnvelopeValidationError(
+                "calldata NATIVE_CHECK requires more native value than the transaction carries"
+            )
+        return
+    if selector == _selector("CHECK_SLIPPAGE(bool)"):
+        _action_bool(action_args, 0, field="CHECK_SLIPPAGE.transferExactLimit")
+        return
+
+    recipient_index: int | None = None
+    sell_index: int | None = None
+    buy_index: int | None = None
+    minimum_index: int | None = None
+    ppm_index: int | None = None
+
+    if selector == _selector("UNISWAPV3(address,uint256,bytes,uint256)"):
+        recipient_index, ppm_index, minimum_index = 0, 1, 3
+        path = dynamic_values[2]
+        if len(path) < 43 or (len(path) - 20) % 23:
+            raise EnvelopeValidationError("calldata UNISWAPV3 path is malformed")
+        path_sell = "0x" + path[:20].hex()
+        path_buy = "0x" + path[-20:].hex()
+        if expected_sell_token is not None and path_sell != expected_sell_token:
+            raise EnvelopeValidationError("calldata UNISWAPV3 path sells a different token")
+        if expected_buy_token is not None and path_buy != expected_buy_token:
+            raise EnvelopeValidationError("calldata UNISWAPV3 path buys a different token")
+    elif selector == _selector("UNISWAPV2(address,address,uint256,address,uint24,uint256)"):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 2, 5
+        _action_address(action_args, 3, field="UNISWAPV2.pool")
+        if _action_word(action_args, 4, field="UNISWAPV2.swapInfo") > 0xFFFFFF:
+            raise EnvelopeValidationError("calldata UNISWAPV2.swapInfo is not a uint24")
+    elif selector == _selector("BASIC(address,uint256,address,uint256,bytes)"):
+        sell_index, ppm_index = 0, 1
+        _action_address(action_args, 2, field="BASIC.pool")
+        raw_offset = _action_word(action_args, 3, field="BASIC.offset")
+        data = dynamic_values[4]
+        if (data and raw_offset + 32 > len(data)) or (not data and raw_offset != 0):
+            raise EnvelopeValidationError("calldata BASIC offset is outside pool data")
+    elif selector == _selector("DODOV1(address,uint256,address,bool,uint256)"):
+        sell_index, ppm_index, minimum_index = 0, 1, 4
+        _action_address(action_args, 2, field="DODOV1.pool")
+        _action_bool(action_args, 3, field="DODOV1.quoteForBase")
+    elif selector == _selector("DODOV2(address,address,uint256,address,bool,uint256)"):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 5
+        _action_address(action_args, 3, field="DODOV2.pool")
+        _action_bool(action_args, 4, field="DODOV2.quoteForBase")
+    elif selector == _selector("VELODROME(address,uint256,address,uint24,uint256)"):
+        recipient_index, ppm_index, minimum_index = 0, 1, 4
+        _action_address(action_args, 2, field="VELODROME.pool")
+        if _action_word(action_args, 3, field="VELODROME.swapInfo") > 0xFFFFFF:
+            raise EnvelopeValidationError("calldata VELODROME.swapInfo is not a uint24")
+    elif selector == _selector(
+        "MAVERICKV2(address,address,uint256,address,bool,int32,uint256)"
+    ):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 2, 6
+        _action_address(action_args, 3, field="MAVERICKV2.pool")
+        _action_bool(action_args, 4, field="MAVERICKV2.tokenAIn")
+    elif selector == _selector("EULERSWAP(address,address,uint256,address,bool,uint256)"):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 2, 5
+        _action_address(action_args, 3, field="EULERSWAP.pool")
+        _action_bool(action_args, 4, field="EULERSWAP.zeroForOne")
+    elif selector == _selector(
+        "RENEGADE(address,address,address,uint256,bool,uint256,bytes,uint256)"
+    ):
+        recipient_index, sell_index, buy_index = 0, 1, 2
+        max_sell = _action_word(action_args, 3, field="RENEGADE.maxSellAmount")
+        if expected_sell_amount_atomic is not None and max_sell > expected_sell_amount_atomic:
+            raise EnvelopeValidationError("calldata RENEGADE exceeds the input bound")
+        _action_bool(action_args, 4, field="RENEGADE.refundNativeEth")
+        minimum_index = 7
+    elif selector == _selector("POSITIVE_SLIPPAGE(address,address,uint256,uint256)"):
+        recipient_index, buy_index = 0, 1
+        _action_word(action_args, 2, field="POSITIVE_SLIPPAGE.expectedAmount")
+        _action_word(action_args, 3, field="POSITIVE_SLIPPAGE.maxPpm")
+    else:  # pragma: no cover - guarded by the selector table
+        raise EnvelopeValidationError(f"unknown Settler action selector {selector}")
+
+    if ppm_index is not None:
+        _assert_action_ppm(action_args, ppm_index, field=f"{selector}.ppm")
+    if recipient_index is not None and expected_taker_address is not None:
+        if _action_address(action_args, recipient_index, field=f"{selector}.recipient") != expected_taker_address:
+            raise EnvelopeValidationError(f"calldata {selector} names a different recipient")
+    if sell_index is not None and expected_sell_token is not None:
+        if _action_address(action_args, sell_index, field=f"{selector}.sellToken") != expected_sell_token:
+            raise EnvelopeValidationError(f"calldata {selector} sells a different token")
+    if buy_index is not None and expected_buy_token is not None:
+        if _action_address(action_args, buy_index, field=f"{selector}.buyToken") != expected_buy_token:
+            raise EnvelopeValidationError(f"calldata {selector} buys a different token")
+    if minimum_index is not None:
+        _assert_action_minimum(
+            action_args,
+            minimum_index,
+            expected_min_output_atomic,
+            field=f"{selector}.minimumOutput",
+        )
+
+
+def _decode_actions(
+    data: bytes,
+    args_start: int,
+    offset: int,
+    *,
+    expected_sell_token: str | None,
+    expected_buy_token: str | None,
+    expected_taker_address: str | None,
+    expected_sell_amount_atomic: int | None,
+    expected_min_output_atomic: int | None,
+    transaction_value_atomic: int,
+) -> tuple[str, ...]:
+    if offset != 32 + 32 * 4:
+        raise EnvelopeValidationError("calldata actions offset is not canonical")
+    array_start = args_start + offset
+    count = _calldata_word(data, array_start, field="actions.length")
+    if count == 0 or count > 64:
+        raise EnvelopeValidationError("calldata actions must contain 1..64 calls")
+    # ABI offsets in a dynamic array are relative to the element-head start,
+    # immediately after the array length word. Interpreting them relative to
+    # ``array_start`` accepts malformed fixtures and rejects canonical 0x data.
+    array_body_start = array_start + 32
+    head_end = array_body_start + count * 32
+    if head_end > len(data):
+        raise EnvelopeValidationError("calldata actions head is truncated")
+    starts: list[int] = []
+    for index in range(count):
+        relative = _calldata_word(data, array_start + 32 + index * 32, field="actions.offset")
+        if relative % 32 or relative < count * 32:
+            raise EnvelopeValidationError("calldata action offset is not canonical")
+        start = array_body_start + relative
+        length = _calldata_word(data, start, field="action.length")
+        end = start + 32 + length
+        padded_end = start + 32 + ((length + 31) // 32) * 32
+        if length < 4 or padded_end > len(data) or any(data[end:padded_end]):
+            raise EnvelopeValidationError("calldata action is truncated")
+        starts.append(start)
+        action_selector = "0x" + data[start + 32 : start + 36].hex()
+        if action_selector not in _ACTION_SELECTORS:
+            raise EnvelopeValidationError(f"unknown Settler action selector {action_selector}")
+        action_args = data[start + 36 : end]
+        arg_words, dynamic_indexes = _ACTION_LAYOUTS[action_selector]
+        head_size = arg_words * 32
+        if len(action_args) < head_size:
+            raise EnvelopeValidationError("Settler action arguments are truncated")
+        if not dynamic_indexes and len(action_args) != head_size:
+            raise EnvelopeValidationError("Settler action has unexpected trailing bytes")
+        dynamic_starts: list[int] = []
+        dynamic_values: dict[int, bytes] = {}
+        for dynamic_index in dynamic_indexes:
+            dynamic_offset = int.from_bytes(
+                action_args[dynamic_index * 32 : (dynamic_index + 1) * 32], "big"
+            )
+            if dynamic_offset != head_size:
+                raise EnvelopeValidationError("Settler action dynamic offset is not canonical")
+            if dynamic_offset + 32 > len(action_args):
+                raise EnvelopeValidationError("Settler action dynamic value is truncated")
+            dynamic_length = int.from_bytes(
+                action_args[dynamic_offset : dynamic_offset + 32], "big"
+            )
+            dynamic_end = dynamic_offset + 32 + dynamic_length
+            dynamic_padded_end = dynamic_offset + 32 + ((dynamic_length + 31) // 32) * 32
+            if dynamic_padded_end > len(action_args) or any(
+                action_args[dynamic_end:dynamic_padded_end]
+            ):
+                raise EnvelopeValidationError("Settler action dynamic value is malformed")
+            dynamic_starts.append(dynamic_offset)
+            dynamic_values[dynamic_index] = action_args[dynamic_offset + 32 : dynamic_end]
+        if dynamic_starts:
+            if dynamic_starts != sorted(dynamic_starts) or dynamic_starts[0] != head_size:
+                raise EnvelopeValidationError("Settler action dynamic values are not canonical")
+            final_offset = dynamic_starts[-1]
+            final_length = int.from_bytes(
+                action_args[final_offset : final_offset + 32], "big"
+            )
+            final_end = final_offset + 32 + ((final_length + 31) // 32) * 32
+            if final_end != len(action_args):
+                raise EnvelopeValidationError("Settler action has trailing bytes")
+        _validate_action_semantics(
+            action_selector,
+            action_args,
+            dynamic_values,
+            expected_sell_token=expected_sell_token,
+            expected_buy_token=expected_buy_token,
+            expected_taker_address=expected_taker_address,
+            expected_sell_amount_atomic=expected_sell_amount_atomic,
+            expected_min_output_atomic=expected_min_output_atomic,
+            transaction_value_atomic=transaction_value_atomic,
+        )
+    if starts != sorted(starts) or len(set(starts)) != len(starts) or starts[0] != head_end:
+        raise EnvelopeValidationError("calldata actions are not densely ordered")
+    for index, start in enumerate(starts[:-1]):
+        length = _calldata_word(data, start, field="action.length")
+        padded_end = start + 32 + ((length + 31) // 32) * 32
+        if padded_end != starts[index + 1]:
+            raise EnvelopeValidationError("calldata actions are not densely ordered")
+    # Each action is a dynamic bytes value. Requiring the final padded action
+    # to end at the calldata boundary rejects hidden suffixes and aliases.
+    last_start = starts[-1]
+    last_length = _calldata_word(data, last_start, field="final action.length")
+    final_end = last_start + 32 + ((last_length + 31) // 32) * 32
+    if final_end != len(data):
+        raise EnvelopeValidationError("calldata actions have trailing bytes")
+    return tuple("0x" + data[start + 32 : start + 36].hex() for start in starts)
+
+
+def decode_allowance_holder_calldata(
+    calldata: bytes | str,
+    *,
+    expected_entry_point: str | None = None,
+    expected_allowance_target: str | None = None,
+    expected_sell_token: str | None = None,
+    expected_buy_token: str | None = None,
+    expected_sell_amount_atomic: int | None = None,
+    expected_taker_address: str | None = None,
+    expected_min_output_atomic: int | None = None,
+    transaction_value_atomic: int = 0,
+) -> AllowanceHolderCalldataV0:
+    """Decode and bind the exact bounded ERC-20 AllowanceHolder form.
+
+    No selector, offset, dynamic tail, action, token, amount, recipient, or
+    minimum-output field is inferred. Unknown shapes and all supplied expected
+    field disagreements raise ``EnvelopeValidationError``.
+    """
+    data = _calldata_bytes(calldata)
+    if data[:4].hex() != _ALLOWANCE_HOLDER_EXEC_SELECTOR[2:]:
+        raise EnvelopeValidationError("calldata is not AllowanceHolder.exec")
+    if transaction_value_atomic != 0:
+        raise EnvelopeValidationError("AllowanceHolder calldata requires zero transaction value")
+    if len(data) < 4 + 5 * 32:
+        raise EnvelopeValidationError("AllowanceHolder.exec calldata is truncated")
+    args_start = 4
+    operator = _calldata_address(data, args_start, field="operator")
+    sell_token = _calldata_address(data, args_start + 32, field="sell token")
+    sell_amount = _calldata_word(data, args_start + 64, field="sell amount")
+    if sell_amount <= 0 or sell_amount > MAX_UINT256:
+        raise EnvelopeValidationError("calldata sell amount is not a positive uint256")
+    target = _calldata_address(data, args_start + 96, field="Settler target")
+    if operator != target:
+        raise EnvelopeValidationError("AllowanceHolder operator must equal the Settler target")
+    inner = _calldata_dynamic_bytes(
+        data, args_start, _calldata_word(data, args_start + 128, field="forwarded data offset"),
+        field="forwarded data",
+    )
+    if len(inner) < 4 + 5 * 32 or "0x" + inner[:4].hex() != _SETTLER_EXEC_SELECTOR:
+        raise EnvelopeValidationError("forwarded data is not Settler.execute")
+    inner_args = 4
+    recipient = _calldata_address(inner, inner_args, field="recipient")
+    buy_token = _calldata_address(inner, inner_args + 32, field="buy token")
+    min_output = _calldata_word(inner, inner_args + 64, field="minimum output")
+    if min_output <= 0 or min_output > MAX_UINT256:
+        raise EnvelopeValidationError("calldata minimum output is not positive")
+    actions = _decode_actions(
+        inner,
+        inner_args,
+        _calldata_word(inner, inner_args + 96, field="actions offset"),
+        expected_sell_token=expected_sell_token,
+        expected_buy_token=expected_buy_token,
+        expected_taker_address=expected_taker_address,
+        expected_sell_amount_atomic=expected_sell_amount_atomic,
+        expected_min_output_atomic=expected_min_output_atomic,
+        transaction_value_atomic=transaction_value_atomic,
+    )
+    if not any(selector not in _NON_SETTLEMENT_ACTION_SELECTORS for selector in actions):
+        raise EnvelopeValidationError("calldata contains no supported settlement action")
+
+    # ``transaction.to`` and ``allowanceTarget`` are response fields rather
+    # than calldata fields.  Validate their shapes here, but do not collapse
+    # the two security concepts into the nested Settler target.
+    for name, value in (("entry point", expected_entry_point), ("allowance target", expected_allowance_target)):
+        if value is not None:
+            _address(value, field=f"expected {name}")
+    if (
+        expected_entry_point is not None
+        and expected_allowance_target is not None
+        and expected_entry_point != expected_allowance_target
+    ):
+        raise EnvelopeValidationError("entry point and allowance target disagree")
+    if expected_allowance_target == target:
+        raise EnvelopeValidationError(
+            "the approval target must be distinct from the nested Settler target"
+        )
+    expected = (
+        ("sell token", expected_sell_token, sell_token),
+        ("buy token", expected_buy_token, buy_token),
+        ("sell amount", expected_sell_amount_atomic, sell_amount),
+        ("taker/recipient", expected_taker_address, recipient),
+    )
+    for name, expected_value, actual in expected:
+        if expected_value is not None and actual != expected_value:
+            raise EnvelopeValidationError(f"calldata {name} disagrees with the bound")
+    if expected_min_output_atomic is not None and min_output < expected_min_output_atomic:
+        raise EnvelopeValidationError("calldata minimum output is weaker than the bound")
+    return AllowanceHolderCalldataV0(
+        allowance_holder_selector=_ALLOWANCE_HOLDER_EXEC_SELECTOR,
+        operator_address=operator,
+        sell_token=sell_token,
+        sell_amount_atomic=sell_amount,
+        settler_target=target,
+        settler_selector=_SETTLER_EXEC_SELECTOR,
+        recipient=recipient,
+        buy_token=buy_token,
+        min_output_atomic=min_output,
+        action_selectors=actions,
+    )
+
+
+def derive_transaction_hash(raw_signed_transaction: bytes) -> str:
+    """Derive an EVM transaction hash from explicit signed bytes."""
+    if not isinstance(raw_signed_transaction, bytes) or not raw_signed_transaction:
+        raise EnvelopeValidationError("raw signed transaction must be non-empty bytes")
+    from .keccak import keccak256_hex
+
+    return "0x" + keccak256_hex(raw_signed_transaction)
+
+
 class ExecutionReadiness(str, Enum):
     """I-01. None of these values is an authority, and none implies edge."""
 
@@ -1730,6 +2267,7 @@ def assert_envelope_admissible(
     venue_response: VenueQuoteResponseV0,
     held_atomic: int,
     now_epoch_s: int,
+    calldata: bytes | str | None = None,
 ) -> None:
     """The mandatory composite gate before an envelope could ever be signable.
 
@@ -1747,6 +2285,25 @@ def assert_envelope_admissible(
             "venue response is not executable: " + ",".join(readiness.reasons)
         )
     assert_envelope_matches_venue_response(envelope, venue_response)
+    if calldata is not None:
+        decoded = decode_allowance_holder_calldata(
+            calldata,
+            expected_entry_point=venue_response.transaction_to,
+            expected_allowance_target=venue_response.allowance_target,
+            expected_sell_token=venue_response.sell_token,
+            expected_buy_token=venue_response.buy_token,
+            expected_sell_amount_atomic=venue_response.sell_amount_atomic,
+            expected_taker_address=venue_response.taker_address,
+            expected_min_output_atomic=expectation.min_output_atomic,
+            transaction_value_atomic=venue_response.transaction_value_atomic,
+        )
+        calldata_bytes = _calldata_bytes(calldata)
+        if envelope.calldata_sha256 != sha256_hex(calldata_bytes):
+            raise EnvelopeValidationError("envelope calldata digest does not match the bytes")
+        if envelope.calldata_length != len(calldata_bytes):
+            raise EnvelopeValidationError("envelope calldata length does not match the bytes")
+        if decoded.min_output_atomic < envelope.min_output_atomic:
+            raise EnvelopeValidationError("calldata minimum output weakens the envelope bound")
     if envelope.session_identity_digest != session.identity_digest:
         raise EnvelopeValidationError("envelope was built under a different session identity")
     if envelope.economic_action_id != economic_action_id:

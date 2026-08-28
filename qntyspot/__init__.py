@@ -1,6 +1,6 @@
 """QntySpot -- deterministic policy-bound spot shadow runtime.
 
-PHASE: PROGRAM B PRE-LIVE EXECUTION CONTRACT -- ROBINHOOD_SHADOW_READ_ONLY
+PHASE: PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION -- ROBINHOOD_SHADOW_READ_ONLY
 --------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
 one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no key handling, no
@@ -8,10 +8,10 @@ transaction encoder, no transaction broadcast surface, and no live-capital
 authority from any other repository.
 
 ``execution_contract`` and ``ledger.execution_schema`` are the frozen Program B
-pre-live execution contract: immutable records, deterministic validators, and a
-SQLite authority surface that describes a future runtime. They authorize
-nothing. ``PHASE_GRANTED_AUTHORITY_LEVEL`` is ``AuthorityLevel.SHADOW`` and the
-capability gate refuses everything above it.
+pre-live execution contract. ``ledger.execution`` is the offline B1 runtime:
+immutable records, deterministic validators, and a SQLite authority surface
+with no network, signer, or capital capability. They authorize nothing above
+``AuthorityLevel.SHADOW`` and the capability gate refuses everything above it.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger

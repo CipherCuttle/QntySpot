@@ -17,6 +17,20 @@ from .execution_schema import (
 from .store import SpotLedger, open_ledger
 from .replay import replay_into, reconstruct, assert_replay_equivalence
 from .recovery import RecoveryAction, recover
+from .execution import (
+    B1_O04_EXTERNAL_ROOT_BLOCKED,
+    ExternalAuthorityProofV0,
+    ExecutionRuntime,
+    ExecutionStore,
+    FAILURE_BOUNDARIES,
+    verify_external_authority_proof,
+)
+from .execution_replay import (
+    assert_execution_replay_equivalence,
+    execution_snapshot,
+    reconstruct_execution,
+    replay_execution_into,
+)
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -35,4 +49,14 @@ __all__ = [
     "assert_replay_equivalence",
     "RecoveryAction",
     "recover",
+    "B1_O04_EXTERNAL_ROOT_BLOCKED",
+    "ExternalAuthorityProofV0",
+    "ExecutionRuntime",
+    "ExecutionStore",
+    "FAILURE_BOUNDARIES",
+    "verify_external_authority_proof",
+    "execution_snapshot",
+    "replay_execution_into",
+    "reconstruct_execution",
+    "assert_execution_replay_equivalence",
 ]

@@ -33,7 +33,7 @@ WHAT THE ENGINE ENFORCES, NOT THE APPLICATION
   AUTHORIZED approval per ``(taker, token, spender)``.
 * ``reconciliations.external_action_id`` is UNIQUE, and a SETTLED verdict is
   the only verdict that may carry a receipt.
-* ``signed_transactions``, ``submission_attempts``, ``chain_observations``,
+* ``execution_sessions``, ``signed_transactions``, ``submission_attempts``, ``chain_observations``,
   ``external_actions``, ``reconciliations`` and ``operator_control_events``
   are append-only in the engine, via BEFORE UPDATE / BEFORE DELETE triggers
   that abort. Authorized envelope and approval identity-bearing facts are
@@ -46,9 +46,9 @@ WHAT THIS MODULE IS NOT
 It creates tables. It writes no rows, opens no connection of its own, signs
 nothing, submits nothing, and stores no key material anywhere: a signed
 transaction is represented by a digest of its payload, its length, and its
-hash. ``EXECUTION_SCHEMA_VERSION`` is 0 because this is the design-stage
-surface; whether it folds into the core ``SCHEMA_VERSION`` is a decision for
-``QNTY_SPOT_PROGRAM_B1_PRELIVE_EXECUTION_IMPLEMENTATION_V0``.
+hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 0; the
+B1 runtime applies it alongside the core ``SCHEMA_VERSION`` without changing
+the core schema version.
 """
 
 from __future__ import annotations
@@ -81,6 +81,7 @@ EXECUTION_TABLES = (
 )
 
 _APPEND_ONLY_TABLES = (
+    "execution_sessions",
     "external_actions",
     "signed_transactions",
     "submission_attempts",
@@ -286,12 +287,23 @@ CREATE TABLE reconciliations (
     verdict                TEXT NOT NULL
                            CHECK (verdict IN ('SETTLED','REVERTED','AMBIGUOUS')),
     receipt_id             TEXT REFERENCES fill_receipts(receipt_id),
+    -- Reverted release is valid only for this exact external expectation.
+    -- These are nullable for the historical SETTLED/AMBIGUOUS shape, but a
+    -- REVERTED row must carry all three and the trigger below binds them to
+    -- the canonical signed transaction.
+    transaction_hash      TEXT,
+    chain_id              INTEGER,
+    taker_address         TEXT,
     confirmation_depth     INTEGER NOT NULL CHECK (confirmation_depth >= 0),
     agreeing_provider_count INTEGER NOT NULL CHECK (agreeing_provider_count >= 0),
     reconciled_at_epoch_s  INTEGER NOT NULL CHECK (reconciled_at_epoch_s >= 0),
     evidence_digest        TEXT NOT NULL,
     -- Only a settled reconciliation may carry a receipt, and it must carry one.
-    CHECK ((verdict = 'SETTLED') = (receipt_id IS NOT NULL))
+    CHECK ((verdict = 'SETTLED') = (receipt_id IS NOT NULL)),
+    CHECK (verdict <> 'REVERTED' OR
+           (transaction_hash IS NOT NULL AND chain_id IS NOT NULL AND taker_address IS NOT NULL)),
+    CHECK ((transaction_hash IS NULL) = (chain_id IS NULL)),
+    CHECK ((transaction_hash IS NULL) = (taker_address IS NULL))
 ) STRICT;
 
 CREATE TABLE operator_control_events (
@@ -315,6 +327,124 @@ CREATE TRIGGER {table}_no_delete
 BEFORE DELETE ON {table}
 BEGIN
     SELECT RAISE(ABORT, '{table} is append-only');
+END;
+"""
+
+_CONFLICT_REPLACEMENT_SQL = """
+CREATE TRIGGER execution_sessions_no_conflict_replace
+BEFORE INSERT ON execution_sessions
+WHEN EXISTS (SELECT 1 FROM execution_sessions WHERE session_id = NEW.session_id)
+   OR EXISTS (
+       SELECT 1 FROM execution_sessions
+        WHERE identity_digest = NEW.identity_digest
+          AND started_at_epoch_s = NEW.started_at_epoch_s
+          AND session_ordinal = NEW.session_ordinal
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'execution_sessions is append-only');
+END;
+
+CREATE TRIGGER approval_actions_no_conflict_replace
+BEFORE INSERT ON approval_actions
+WHEN EXISTS (SELECT 1 FROM approval_actions WHERE approval_action_id = NEW.approval_action_id)
+   OR (
+       NEW.lifecycle = 'AUTHORIZED'
+       AND EXISTS (
+           SELECT 1 FROM approval_actions
+            WHERE lifecycle = 'AUTHORIZED'
+              AND taker_address = NEW.taker_address
+              AND token_address = NEW.token_address
+              AND spender_address = NEW.spender_address
+       )
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'approval action conflict replacement is forbidden');
+END;
+
+CREATE TRIGGER execution_envelopes_no_conflict_replace
+BEFORE INSERT ON execution_envelopes
+WHEN EXISTS (SELECT 1 FROM execution_envelopes WHERE envelope_id = NEW.envelope_id)
+   OR (
+       NEW.lifecycle = 'AUTHORIZED'
+       AND EXISTS (
+           SELECT 1 FROM execution_envelopes
+            WHERE lifecycle = 'AUTHORIZED'
+              AND (
+                  economic_action_id = NEW.economic_action_id
+                  OR (
+                      taker_address = NEW.taker_address
+                      AND chain_id = NEW.chain_id
+                      AND account_nonce = NEW.account_nonce
+                  )
+              )
+       )
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'execution envelope conflict replacement is forbidden');
+END;
+
+CREATE TRIGGER external_actions_no_conflict_replace
+BEFORE INSERT ON external_actions
+WHEN EXISTS (SELECT 1 FROM external_actions WHERE external_action_id = NEW.external_action_id)
+   OR (NEW.economic_action_id IS NOT NULL AND EXISTS (
+       SELECT 1 FROM external_actions WHERE economic_action_id = NEW.economic_action_id
+   ))
+   OR (NEW.approval_action_id IS NOT NULL AND EXISTS (
+       SELECT 1 FROM external_actions WHERE approval_action_id = NEW.approval_action_id
+   ))
+BEGIN
+    SELECT RAISE(ABORT, 'external_actions is append-only');
+END;
+
+CREATE TRIGGER signed_transactions_no_conflict_replace
+BEFORE INSERT ON signed_transactions
+WHEN EXISTS (SELECT 1 FROM signed_transactions WHERE signed_transaction_id = NEW.signed_transaction_id)
+   OR EXISTS (SELECT 1 FROM signed_transactions WHERE external_action_id = NEW.external_action_id)
+   OR EXISTS (SELECT 1 FROM signed_transactions WHERE raw_signed_sha256 = NEW.raw_signed_sha256)
+   OR EXISTS (SELECT 1 FROM signed_transactions WHERE transaction_hash = NEW.transaction_hash)
+   OR EXISTS (
+       SELECT 1 FROM signed_transactions
+        WHERE chain_id = NEW.chain_id
+          AND taker_address = NEW.taker_address
+          AND account_nonce = NEW.account_nonce
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'signed_transactions is append-only');
+END;
+
+CREATE TRIGGER submission_attempts_no_conflict_replace
+BEFORE INSERT ON submission_attempts
+WHEN EXISTS (SELECT 1 FROM submission_attempts WHERE submission_attempt_id = NEW.submission_attempt_id)
+   OR EXISTS (
+       SELECT 1 FROM submission_attempts
+        WHERE signed_transaction_id = NEW.signed_transaction_id
+          AND provider_id = NEW.provider_id
+          AND attempt_ordinal = NEW.attempt_ordinal
+   )
+BEGIN
+    SELECT RAISE(ABORT, 'submission_attempts is append-only');
+END;
+
+CREATE TRIGGER chain_observations_no_conflict_replace
+BEFORE INSERT ON chain_observations
+WHEN EXISTS (SELECT 1 FROM chain_observations WHERE observation_id = NEW.observation_id)
+BEGIN
+    SELECT RAISE(ABORT, 'chain_observations is append-only');
+END;
+
+CREATE TRIGGER reconciliations_no_conflict_replace
+BEFORE INSERT ON reconciliations
+WHEN EXISTS (SELECT 1 FROM reconciliations WHERE reconciliation_id = NEW.reconciliation_id)
+   OR EXISTS (SELECT 1 FROM reconciliations WHERE external_action_id = NEW.external_action_id)
+BEGIN
+    SELECT RAISE(ABORT, 'reconciliations is append-only');
+END;
+
+CREATE TRIGGER operator_control_events_no_conflict_replace
+BEFORE INSERT ON operator_control_events
+WHEN EXISTS (SELECT 1 FROM operator_control_events WHERE seq = NEW.seq)
+BEGIN
+    SELECT RAISE(ABORT, 'operator_control_events is append-only');
 END;
 """
 
@@ -361,6 +491,30 @@ END;
 """
     for table, columns in _IDENTITY_COLUMNS.items()
 )
+
+_LIFECYCLE_GUARDS_SQL = """
+CREATE TRIGGER execution_envelopes_lifecycle_guard
+BEFORE UPDATE OF lifecycle ON execution_envelopes
+WHEN NOT (
+    NEW.lifecycle = OLD.lifecycle
+    OR (OLD.lifecycle = 'DRAFT' AND NEW.lifecycle IN ('AUTHORIZED','SUPERSEDED','VOID'))
+    OR (OLD.lifecycle = 'AUTHORIZED' AND NEW.lifecycle IN ('SUPERSEDED','VOID'))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'execution_envelopes lifecycle regression');
+END;
+
+CREATE TRIGGER approval_actions_lifecycle_guard
+BEFORE UPDATE OF lifecycle ON approval_actions
+WHEN NOT (
+    NEW.lifecycle = OLD.lifecycle
+    OR (OLD.lifecycle = 'DRAFT' AND NEW.lifecycle IN ('AUTHORIZED','SUPERSEDED','VOID'))
+    OR (OLD.lifecycle = 'AUTHORIZED' AND NEW.lifecycle IN ('SUPERSEDED','VOID','SETTLED'))
+)
+BEGIN
+    SELECT RAISE(ABORT, 'approval_actions lifecycle regression');
+END;
+"""
 
 _CROSS_TABLE_GUARDS_SQL = """
 CREATE TRIGGER execution_envelopes_session_identity_guard
@@ -417,6 +571,7 @@ BEGIN
          WHERE ea.external_action_id = NEW.external_action_id
            AND ea.kind = 'ECONOMIC'
            AND ea.economic_action_id = ee.economic_action_id
+           AND ee.lifecycle = 'AUTHORIZED'
            AND NEW.session_id = ee.session_id
            AND NEW.chain_id = ee.chain_id
            AND NEW.taker_address = ee.taker_address
@@ -434,6 +589,18 @@ BEGIN
     ) THEN RAISE(ABORT, 'approval signed transaction subtype does not match external action') END;
 END;
 
+CREATE TRIGGER chain_observations_binding_guard
+BEFORE INSERT ON chain_observations
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM signed_transactions AS st
+     WHERE st.signed_transaction_id = NEW.signed_transaction_id
+       AND st.external_action_id = NEW.external_action_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'chain observation is not bound to the signed transaction action');
+END;
+
 CREATE TRIGGER reconciliations_receipt_kind_guard
 BEFORE INSERT ON reconciliations
 WHEN NEW.receipt_id IS NOT NULL
@@ -444,9 +611,55 @@ BEGIN
            AND kind = 'ECONOMIC'
     ) THEN RAISE(ABORT, 'only economic external actions may carry a fill receipt') END;
 END;
+
+CREATE TRIGGER reconciliations_receipt_binding_guard
+BEFORE INSERT ON reconciliations
+WHEN NEW.receipt_id IS NOT NULL
+ AND EXISTS (
+    SELECT 1 FROM external_actions
+     WHERE external_action_id = NEW.external_action_id
+       AND kind = 'ECONOMIC'
+ )
+ AND NOT EXISTS (
+    SELECT 1
+      FROM external_actions AS ea
+      JOIN fill_receipts AS fr ON fr.receipt_id = NEW.receipt_id
+     WHERE ea.external_action_id = NEW.external_action_id
+       AND ea.kind = 'ECONOMIC'
+       AND fr.economic_action_id = ea.economic_action_id
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'reconciliation receipt is not bound to the economic action');
+END;
+
+CREATE TRIGGER reconciliations_reverted_binding_guard
+BEFORE INSERT ON reconciliations
+WHEN NEW.verdict = 'REVERTED'
+ AND NOT EXISTS (
+    SELECT 1
+      FROM signed_transactions AS st
+      JOIN external_actions AS ea ON ea.external_action_id = st.external_action_id
+      JOIN chain_observations AS co
+        ON co.signed_transaction_id = st.signed_transaction_id
+       AND co.external_action_id = st.external_action_id
+     WHERE ea.external_action_id = NEW.external_action_id
+       AND st.transaction_hash = NEW.transaction_hash
+       AND st.chain_id = NEW.chain_id
+       AND st.taker_address = NEW.taker_address
+       AND co.presence = 'INCLUDED'
+       AND co.receipt_status = 'REVERTED'
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'reverted reconciliation is not bound to the signed transaction');
+END;
 """
 
-EXECUTION_SCHEMA_SQL += _AUTHORIZED_IMMUTABILITY_SQL + _CROSS_TABLE_GUARDS_SQL
+EXECUTION_SCHEMA_SQL += (
+    _AUTHORIZED_IMMUTABILITY_SQL
+    + _LIFECYCLE_GUARDS_SQL
+    + _CROSS_TABLE_GUARDS_SQL
+    + _CONFLICT_REPLACEMENT_SQL
+)
 
 
 def apply_execution_schema(conn: sqlite3.Connection) -> None:
@@ -471,10 +684,15 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
         )
     if collisions := sorted(have & set(EXECUTION_TABLES)):
         raise LedgerError(f"execution schema already applied: {collisions}")
+    conn.execute("PRAGMA recursive_triggers = ON")
+    if not conn.execute("PRAGMA recursive_triggers").fetchone()[0]:
+        raise LedgerError(
+            "SQLite refused to enable recursive_triggers; refusing to apply execution schema"
+        )
     stamp = (
         "INSERT INTO schema_meta (key, value) VALUES\n"
         f"    ('execution_schema_version', '{EXECUTION_SCHEMA_VERSION}'),\n"
-        "    ('execution_authority', 'DESIGN_ONLY: no signer, no submission, "
+        "    ('execution_authority', 'B1_OFFLINE_ONLY: no signer, no submission, "
         "no capital authority');\n"
     )
     conn.executescript("BEGIN;\n" + EXECUTION_SCHEMA_SQL + "\n" + stamp + "COMMIT;\n")

@@ -70,6 +70,8 @@ from qntyspot.execution_contract import (
     SignedTransactionRecordV0,
     SubmissionAcknowledgment,
     SubmissionAttemptV0,
+    ValidatedEconomicActionV0,
+    _validated_economic_action_from_database,
     assert_approval_admissible,
     assert_envelope_admissible,
     assert_envelope_matches_venue_response,
@@ -808,6 +810,15 @@ def expect(acknowledged: bool = True) -> SettlementExpectationV0:
     )
 
 
+def validated_action(exp: SettlementExpectationV0) -> ValidatedEconomicActionV0:
+    return _validated_economic_action_from_database(
+        exp.economic_action_id,
+        exp.transaction_hash,
+        exp.chain_id,
+        exp.taker_address,
+    )
+
+
 def truth_for(*observations, finality=STRICT_FINALITY, acknowledged: bool = True):
     return evaluate_chain_truth(expect(acknowledged), observations, finality)
 
@@ -895,6 +906,7 @@ def test_latest_pending_evidence_overrules_stale_inclusion() -> None:
             expect(),
             truth,
             bounds(),
+            validated_action=validated_action(expect()),
             receipt_id="99" * 32,
             fee_atomic=0,
             observed_at_epoch_s=NOW,
@@ -956,6 +968,7 @@ def test_only_a_confirmed_verdict_may_produce_a_receipt() -> None:
         expect(),
         truth_for(included("provider-a"), included("provider-b")),
         bounds(),
+        validated_action=validated_action(expect()),
         receipt_id="receipt-0001",
         fee_atomic=0,
         observed_at_epoch_s=NOW,
@@ -981,6 +994,7 @@ def test_anything_short_of_confirmed_refuses_to_produce_a_receipt(observations) 
             expect(),
             truth_for(*observations),
             bounds(),
+            validated_action=validated_action(expect()),
             receipt_id="receipt-0001",
             fee_atomic=0,
             observed_at_epoch_s=NOW,
@@ -998,6 +1012,7 @@ def test_a_settlement_outside_the_committed_bounds_halts() -> None:
             expect(),
             truth,
             bounds(),
+            validated_action=validated_action(expect()),
             receipt_id="receipt-0001",
             fee_atomic=0,
             observed_at_epoch_s=NOW,
@@ -1020,6 +1035,7 @@ def test_chain_truth_cannot_be_reused_for_another_expectation() -> None:
             other,
             truth,
             bounds(),
+            validated_action=validated_action(other),
             receipt_id="98" * 32,
             fee_atomic=0,
             observed_at_epoch_s=NOW,

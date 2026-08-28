@@ -37,6 +37,8 @@ from .store import SpotLedger, open_ledger
 
 __all__ = ["replay_into", "reconstruct", "assert_replay_equivalence"]
 
+_EXECUTION_REPLAY_TOKEN = object()
+
 _RELEASING = {IntentState.CANCELLED, IntentState.EXPIRED, IntentState.REJECTED}
 
 
@@ -50,9 +52,18 @@ def replay_into(
     *,
     canonical_policies: Sequence[str],
     events: Sequence[Mapping[str, Any]],
+    trusted_reverted_external_action_ids: frozenset[str] = frozenset(),
+    _execution_replay_token: object | None = None,
 ) -> None:
     """Rebuild ``target`` (which must be empty) from policies and events."""
     conn = target.connection
+    execution_tables = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_sessions'"
+    ).fetchone()
+    if execution_tables is not None and _execution_replay_token is not _EXECUTION_REPLAY_TOKEN:
+        raise LedgerError(
+            "execution-enabled targets require replay_execution_into for B1 validation"
+        )
     if conn.execute("SELECT COUNT(*) FROM state_events").fetchone()[0]:
         raise LedgerError("replay target must be an empty ledger")
 
@@ -98,7 +109,13 @@ def replay_into(
                     action_id in seen_actions,
                     f"event {seq}: transition for unknown action {action_id}",
                 )
-                _apply_transition(wconn, str(action_id), event, seq)
+                _apply_transition(
+                    wconn,
+                    str(action_id),
+                    event,
+                    seq,
+                    trusted_reverted_external_action_ids=trusted_reverted_external_action_ids,
+                )
             elif etype == EventType.FILL_RECEIPT_APPENDED.value:
                 _require(
                     action_id in seen_actions,
@@ -193,7 +210,12 @@ def _apply_intent_created(
 
 
 def _apply_transition(
-    conn: sqlite3.Connection, action_id: str, event: Mapping[str, Any], seq: int
+    conn: sqlite3.Connection,
+    action_id: str,
+    event: Mapping[str, Any],
+    seq: int,
+    *,
+    trusted_reverted_external_action_ids: frozenset[str] = frozenset(),
 ) -> None:
     row = conn.execute(
         """
@@ -239,6 +261,36 @@ def _apply_transition(
     elif dst is IntentState.FILLED:
         _settle(conn, action_id, ReservationStatus.COMMITTED, seq)
     elif dst in _RELEASING:
+        if src in {
+            IntentState.SIGNED,
+            IntentState.SUBMITTED,
+            IntentState.INCLUDED,
+            IntentState.CONFIRMED,
+        }:
+            try:
+                bound = conn.execute(
+                    """
+                    SELECT 1
+                      FROM reconciliations AS r
+                      JOIN signed_transactions AS st
+                        ON st.external_action_id = r.external_action_id
+                     WHERE r.external_action_id = ?
+                       AND r.verdict = 'REVERTED'
+                       AND r.transaction_hash = st.transaction_hash
+                       AND r.chain_id = st.chain_id
+                       AND r.taker_address = st.taker_address
+                     LIMIT 1
+                    """,
+                    (action_id,),
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                raise ReplayDivergenceError(
+                    f"event {seq}: post-submission rejection has no execution reconciliation"
+                ) from exc
+            _require(
+                bound is not None or action_id in trusted_reverted_external_action_ids,
+                f"event {seq}: post-submission rejection is not bound to a confirmed revert",
+            )
         _settle(conn, action_id, ReservationStatus.RELEASED, seq)
     elif dst is IntentState.SAFE_HALT:
         _settle(conn, action_id, ReservationStatus.QUARANTINED, seq)
