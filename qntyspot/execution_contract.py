@@ -449,6 +449,8 @@ class AuthorityPolicyRefV0:
             error=AuthorityCeilingError,
         )
         _label(self.permitted_network_id, field="permitted_network_id", error=AuthorityCeilingError)
+        if self.permitted_network_id == "*":
+            raise AuthorityCeilingError("wildcard network grants are forbidden")
         _address(self.permitted_taker_address, field="permitted_taker_address", error=AuthorityCeilingError)
         _portable(self.permitted_venue_id, field="permitted_venue_id")
         _atomic(self.max_reservation_atomic, field="max_reservation_atomic", positive=True, error=AuthorityCeilingError)

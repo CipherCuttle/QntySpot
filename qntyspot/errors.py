@@ -207,6 +207,10 @@ class AuthorityCeilingError(ExecutionContractError):
     """An operation was attempted above the granted authority ceiling."""
 
 
+class AuthorityVerificationError(ExecutionContractError):
+    """An external authority root, receipt, or binding failed closed."""
+
+
 class SessionIdentityError(ExecutionContractError):
     """An execution session identity is malformed or non-portable."""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from ..canon import digest_object
@@ -14,7 +15,7 @@ from ..execution_contract import (
     SubmissionAttemptV0,
 )
 from .execution import ExecutionRuntime
-from .execution_schema import EXECUTION_TABLES, apply_execution_schema
+from .execution_schema import EXECUTION_SCHEMA_VERSION, EXECUTION_TABLES, apply_execution_schema
 from .replay import _EXECUTION_REPLAY_TOKEN, replay_into
 from .store import SpotLedger, open_ledger
 
@@ -27,6 +28,7 @@ __all__ = [
 
 _COPY_ORDER = (
     "execution_sessions",
+    "authority_root_state",
     "approval_actions",
     "execution_envelopes",
     "external_actions",
@@ -43,6 +45,14 @@ def _require(condition: bool, message: str) -> None:
         raise ReplayDivergenceError(message)
 
 
+def _is_digest(value: Any) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+    )
+
+
 def execution_snapshot(source: SpotLedger) -> dict[str, Any]:
     """Return all execution facts in explicit, deterministic table order."""
     if not all(
@@ -55,6 +65,7 @@ def execution_snapshot(source: SpotLedger) -> dict[str, Any]:
     tables: dict[str, list[dict[str, Any]]] = {}
     order_by = {
         "execution_sessions": "session_id",
+        "authority_root_state": "trust_config_digest",
         "execution_envelopes": "envelope_id",
         "approval_actions": "approval_action_id",
         "external_actions": "external_action_id",
@@ -72,7 +83,7 @@ def execution_snapshot(source: SpotLedger) -> dict[str, Any]:
             )
         ]
     return {
-        "execution_schema_version": 0,
+        "execution_schema_version": EXECUTION_SCHEMA_VERSION,
         "kill_switch_engaged": any(
             row["engaged"] == 1 for row in tables["operator_control_events"]
         ),
@@ -170,6 +181,29 @@ def _validate_identity(table: str, row: Mapping[str, Any]) -> None:
             )
             _require(record.identity_digest == row["identity_digest"], f"{table}: identity digest mismatch")
             _require(record.session_id == row["session_id"], f"{table}: session id mismatch")
+        elif table == "authority_root_state":
+            for column in (
+                "trust_config_digest",
+                "public_key_fingerprint",
+                "highest_accepted_receipt_id",
+            ):
+                _require(_is_digest(row[column]), f"{table}: {column} is not a digest")
+            _require(
+                type(row["root_id"]) is str and bool(row["root_id"]),
+                f"{table}: root_id is not a label",
+            )
+            _require(
+                type(row["minimum_authority_epoch"]) is int
+                and type(row["highest_accepted_epoch"]) is int
+                and type(row["highest_accepted_at_epoch_s"]) is int,
+                f"{table}: epoch state has invalid types",
+            )
+            _require(
+                row["minimum_authority_epoch"] > 0
+                and row["highest_accepted_epoch"] >= row["minimum_authority_epoch"]
+                and row["highest_accepted_at_epoch_s"] >= 0,
+                f"{table}: epoch state is invalid",
+            )
         elif table == "execution_envelopes":
             record = ExecutionEnvelopeV0(
                 session_id=row["session_id"],

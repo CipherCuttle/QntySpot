@@ -17,6 +17,7 @@ from ..canon import digest_object, parse_canonical_decimal, sha256_hex, strict_j
 from ..domain import EconomicBounds, Side
 from ..errors import (
     AuthorityCeilingError,
+    AuthorityVerificationError,
     ChainTruthError,
     EnvelopeValidationError,
     LedgerError,
@@ -47,6 +48,7 @@ from ..execution_contract import (
     reconcile_to_receipt,
     derive_transaction_hash,
 )
+from ..authority_root import VerifiedAuthorityGrantV0
 from ..states import EXTERNALLY_AMBIGUOUS_STATES, IntentState
 from .execution_schema import (
     EXECUTION_SCHEMA_VERSION,
@@ -304,6 +306,79 @@ class ExecutionRuntime:
             return self._insert_or_match(
                 conn, "execution_sessions", "session_id", session.session_id, values
             )
+
+    def record_verified_authority(
+        self,
+        verified: VerifiedAuthorityGrantV0,
+        *,
+        accepted_at_epoch_s: int,
+    ) -> bool:
+        """Persist the external verification high-water mark only.
+
+        This records evidence for continuity and replay.  It does not alter
+        the phase ceiling, session authority, or any execution capability.
+        The SQLite trigger rejects root/config identity changes and epoch
+        rollback for the same externally pinned configuration.
+        """
+        if not isinstance(verified, VerifiedAuthorityGrantV0):
+            raise AuthorityVerificationError("only a verified authority grant may be recorded")
+        if isinstance(accepted_at_epoch_s, bool) or not isinstance(accepted_at_epoch_s, int) or accepted_at_epoch_s < 0:
+            raise AuthorityVerificationError("accepted_at_epoch_s must be a non-negative integer")
+        values = {
+            "trust_config_digest": verified.trust_config_digest,
+            "root_id": verified.root_id,
+            "public_key_fingerprint": verified.public_key_fingerprint,
+            "minimum_authority_epoch": verified.minimum_authority_epoch,
+            "highest_accepted_epoch": verified.receipt.authority_epoch,
+            "highest_accepted_receipt_id": verified.receipt_id,
+            "highest_accepted_at_epoch_s": accepted_at_epoch_s,
+        }
+        with self._transaction("authority_acceptance") as conn:
+            row = conn.execute(
+                "SELECT * FROM authority_root_state WHERE trust_config_digest = ?",
+                (verified.trust_config_digest,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO authority_root_state "
+                    "(trust_config_digest, root_id, public_key_fingerprint, "
+                    "minimum_authority_epoch, highest_accepted_epoch, "
+                    "highest_accepted_receipt_id, highest_accepted_at_epoch_s) "
+                    "VALUES (:trust_config_digest, :root_id, :public_key_fingerprint, "
+                    ":minimum_authority_epoch, :highest_accepted_epoch, "
+                    ":highest_accepted_receipt_id, :highest_accepted_at_epoch_s)",
+                    values,
+                )
+                return True
+            if any(
+                row[name] != values[name]
+                for name in (
+                    "root_id",
+                    "public_key_fingerprint",
+                    "minimum_authority_epoch",
+                )
+            ):
+                raise AuthorityVerificationError("stored authority root identity disagrees")
+            if verified.receipt.authority_epoch < row["highest_accepted_epoch"]:
+                raise AuthorityVerificationError("authority receipt epoch rolls back local continuity")
+            if verified.receipt.authority_epoch == row["highest_accepted_epoch"]:
+                if verified.receipt_id != row["highest_accepted_receipt_id"]:
+                    raise AuthorityVerificationError(
+                        "different authority receipt at an accepted epoch"
+                    )
+                return False
+            conn.execute(
+                "UPDATE authority_root_state SET highest_accepted_epoch = ?, "
+                "highest_accepted_receipt_id = ?, highest_accepted_at_epoch_s = ? "
+                "WHERE trust_config_digest = ?",
+                (
+                    verified.receipt.authority_epoch,
+                    verified.receipt_id,
+                    accepted_at_epoch_s,
+                    verified.trust_config_digest,
+                ),
+            )
+            return True
 
     def reserve_action(self, economic_action_id: str, *, now_epoch_s: int) -> bool:
         with self._transaction("reservation"):
@@ -1054,6 +1129,7 @@ class ExecutionRuntime:
         tables: dict[str, list[dict[str, Any]]] = {}
         order_by = {
             "execution_sessions": "session_id",
+            "authority_root_state": "trust_config_digest",
             "execution_envelopes": "envelope_id",
             "approval_actions": "approval_action_id",
             "external_actions": "external_action_id",
@@ -1070,7 +1146,7 @@ class ExecutionRuntime:
                 )
             ]
         return {
-            "execution_schema_version": 0,
+            "execution_schema_version": EXECUTION_SCHEMA_VERSION,
             "kill_switch_engaged": self._kill_engaged(),
             "tables": tables,
         }
