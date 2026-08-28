@@ -8,14 +8,16 @@ V0D  ROBINHOOD SHADOW                 <- merged
 V0E  HOSTILE FAILURE SUITE            <- registry frozen (114 cases), suite merged
 PROGRAM A  CONTROL PLANE CLOSURE      <- closed
 PROGRAM B  PRE-LIVE EXECUTION CONTRACT   <- frozen prerequisite
-PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION <- current phase, offline-only
+PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION <- canonical pass, offline-only
+EXTERNAL AUTHORITY-ROOT CONTRACT          <- current contract freeze, offline-only
+QNTY AUTHORITY-ROOT IMPLEMENTATION        <- next, not started
 V0F  INK DUST LIVE
 V0G  SOLANA DUST LIVE
 V0H  ROBINHOOD DUST LIVE
 V1   QntyLab-assisted ladder research
 ```
 
-No phase past Program B1 is authorized. `SIGNING_AUTHORIZED` and
+No execution phase past Program B1 is authorized. `SIGNING_AUTHORIZED` and
 `LIVE_CAPITAL_AUTHORIZED` are `NO`, and V0H is not live.
 
 ```
@@ -99,9 +101,16 @@ venue network activity and is not authorized to sign, submit, approve, or
 deploy capital. The external authority-root consumer is intentionally
 fail-closed because B1 has no independent root verifier.
 
-The next smallest phase, if B1 is accepted, is a separately amended
-zero-capital testnet qualification on Robinhood testnet chain 46630. That
-phase is not started or authorized by this document.
+The external authority-root contract is now the active offline contract phase.
+It freezes `TrustedAuthorityRootV0`, `AuthorityGrantReceiptV0`, and
+`VerifiedAuthorityGrantV0`, the external trust-anchor boundary, Ed25519
+verification, epoch/expiry rules, exact scope binding, the dual-control
+intersection rule, and SQLite continuity evidence. It does not implement or
+deploy an independent issuer, and it does not authorize Robinhood testnet.
+
+The next phase is `QNTY_AUTHORITY_ROOT_IMPLEMENTATION_V0`. Any later
+zero-capital Robinhood testnet qualification requires a separate amendment
+after that implementation is reviewed.
 
 ## V0F / V0G / V0H — Dust live
 

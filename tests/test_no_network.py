@@ -144,9 +144,10 @@ def test_no_module_reads_a_clock(path: Path) -> None:
                 )
 
 
-def test_the_declared_dependency_set_is_empty() -> None:
+def test_the_declared_dependency_set_preserves_the_boundary() -> None:
     pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert "dependencies = []" in pyproject
+    assert '"cryptography>=41.0"' in pyproject
+    assert "dependencies = []" not in pyproject
     for forbidden in ("web3", "viem", "solana", "solders", "requests", "httpx", "aiohttp"):
         assert f'"{forbidden}' not in pyproject, f"{forbidden} must not be a dependency"
 

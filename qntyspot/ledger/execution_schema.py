@@ -46,7 +46,7 @@ WHAT THIS MODULE IS NOT
 It creates tables. It writes no rows, opens no connection of its own, signs
 nothing, submits nothing, and stores no key material anywhere: a signed
 transaction is represented by a digest of its payload, its length, and its
-hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 0; the
+hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 1; the
 B1 runtime applies it alongside the core ``SCHEMA_VERSION`` without changing
 the core schema version.
 """
@@ -66,10 +66,11 @@ __all__ = [
     "read_execution_schema_version",
 ]
 
-EXECUTION_SCHEMA_VERSION = 0
+EXECUTION_SCHEMA_VERSION = 1
 
 EXECUTION_TABLES = (
     "execution_sessions",
+    "authority_root_state",
     "execution_envelopes",
     "approval_actions",
     "external_actions",
@@ -121,6 +122,19 @@ CREATE TABLE execution_sessions (
     started_at_epoch_s    INTEGER NOT NULL CHECK (started_at_epoch_s >= 0),
     session_ordinal       INTEGER NOT NULL CHECK (session_ordinal >= 0),
     UNIQUE (identity_digest, started_at_epoch_s, session_ordinal)
+) STRICT;
+
+-- This is a local continuity projection, not the external trust anchor.
+-- There is one high-water mark per digest-pinned operator configuration so a
+-- new externally configured root cannot silently rewrite the old history.
+CREATE TABLE authority_root_state (
+    trust_config_digest          TEXT PRIMARY KEY,
+    root_id                      TEXT NOT NULL,
+    public_key_fingerprint       TEXT NOT NULL,
+    minimum_authority_epoch      INTEGER NOT NULL CHECK (minimum_authority_epoch > 0),
+    highest_accepted_epoch       INTEGER NOT NULL CHECK (highest_accepted_epoch >= minimum_authority_epoch),
+    highest_accepted_receipt_id  TEXT NOT NULL,
+    highest_accepted_at_epoch_s  INTEGER NOT NULL CHECK (highest_accepted_at_epoch_s >= 0)
 ) STRICT;
 
 CREATE TABLE approval_actions (
@@ -331,6 +345,26 @@ END;
 """
 
 _CONFLICT_REPLACEMENT_SQL = """
+CREATE TRIGGER authority_root_state_no_rollback
+BEFORE UPDATE ON authority_root_state
+WHEN NEW.trust_config_digest <> OLD.trust_config_digest
+   OR NEW.root_id <> OLD.root_id
+   OR NEW.public_key_fingerprint <> OLD.public_key_fingerprint
+   OR NEW.minimum_authority_epoch <> OLD.minimum_authority_epoch
+   OR NEW.highest_accepted_epoch < OLD.highest_accepted_epoch
+   OR (NEW.highest_accepted_epoch = OLD.highest_accepted_epoch
+       AND NEW.highest_accepted_receipt_id <> OLD.highest_accepted_receipt_id)
+   OR NEW.highest_accepted_at_epoch_s < OLD.highest_accepted_at_epoch_s
+BEGIN
+    SELECT RAISE(ABORT, 'authority root state rollback or identity change');
+END;
+
+CREATE TRIGGER authority_root_state_no_delete
+BEFORE DELETE ON authority_root_state
+BEGIN
+    SELECT RAISE(ABORT, 'authority root state is non-deletable');
+END;
+
 CREATE TRIGGER execution_sessions_no_conflict_replace
 BEFORE INSERT ON execution_sessions
 WHEN EXISTS (SELECT 1 FROM execution_sessions WHERE session_id = NEW.session_id)

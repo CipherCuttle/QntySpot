@@ -147,6 +147,7 @@ _TX_HASH_RE = re.compile(r"^0x[0-9a-f]{64}$")
 #: ("build-host-07.internal") is refused while a version ("cpython-3.14") is
 #: not. Paths, URLs, whitespace and mixed case are refused outright.
 _PORTABLE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[0-9]+)*$")
+_RESERVED_EXACT_SCOPE_TOKENS = frozenset({"*", "any", "latest"})
 
 #: Substrings that must never appear in a contract record's field name. A
 #: record that carries one of these is carrying material this phase forbids.
@@ -240,6 +241,17 @@ def _portable(value: Any, *, field: str) -> str:
 def _label(value: Any, *, field: str, error: type[Exception] = EnvelopeValidationError) -> str:
     if not isinstance(value, str) or not value or len(value) > 128 or value.strip() != value:
         raise error(f"{field}: must be a short non-empty label")
+    return value
+
+
+def _assert_exact_scope(
+    value: Any, *, field: str, error: type[Exception]
+) -> str:
+    """Reject wildcard and alias tokens where a scope must be exact."""
+    if not isinstance(value, str):
+        raise error(f"{field}: exact scope must be a string")
+    if value.strip().casefold() in _RESERVED_EXACT_SCOPE_TOKENS:
+        raise error(f"{field}: wildcard and alias scopes are forbidden")
     return value
 
 
@@ -443,14 +455,39 @@ class AuthorityPolicyRefV0:
             pattern=_COMMIT_RE,
             error=AuthorityCeilingError,
         )
+        _assert_exact_scope(
+            self.permitted_repository_commit,
+            field="permitted_repository_commit",
+            error=AuthorityCeilingError,
+        )
         _digest(
             self.permitted_implementation_digest,
             field="permitted_implementation_digest",
             error=AuthorityCeilingError,
         )
+        _assert_exact_scope(
+            self.permitted_implementation_digest,
+            field="permitted_implementation_digest",
+            error=AuthorityCeilingError,
+        )
         _label(self.permitted_network_id, field="permitted_network_id", error=AuthorityCeilingError)
+        _assert_exact_scope(
+            self.permitted_network_id,
+            field="permitted_network_id",
+            error=AuthorityCeilingError,
+        )
         _address(self.permitted_taker_address, field="permitted_taker_address", error=AuthorityCeilingError)
+        _assert_exact_scope(
+            self.permitted_taker_address,
+            field="permitted_taker_address",
+            error=AuthorityCeilingError,
+        )
         _portable(self.permitted_venue_id, field="permitted_venue_id")
+        _assert_exact_scope(
+            self.permitted_venue_id,
+            field="permitted_venue_id",
+            error=AuthorityCeilingError,
+        )
         _atomic(self.max_reservation_atomic, field="max_reservation_atomic", positive=True, error=AuthorityCeilingError)
         _atomic(self.max_cumulative_atomic, field="max_cumulative_atomic", positive=True, error=AuthorityCeilingError)
         if self.max_reservation_atomic > self.max_cumulative_atomic:

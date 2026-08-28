@@ -8,11 +8,14 @@ version = "0.0.1a0"
 description = "QntySpot V0A - offline deterministic core for a future policy-bound spot execution runtime"
 requires-python = ">=3.11"
 license = { text = "UNLICENSED" }
-dependencies = []
+dependencies = [
+    "cryptography>=41.0",
+]
 
 # V0A DEPENDENCY BOUNDARY (enforced by tests/test_no_network.py):
 #   no web3, no viem, no solana/solders, no HTTP client, no database server.
-#   Standard library only. SQLite is the persistence substrate.
+#   Standard-library core plus the narrow cryptographic verification dependency
+#   for Ed25519 authority receipts. SQLite is the persistence substrate.
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]

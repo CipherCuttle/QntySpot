@@ -1,4 +1,4 @@
-# Authority — Program B pre-live execution contract
+# Authority — external authority-root contract phase
 
 This document is the binding statement of what the current phase of QntySpot
 authorizes and forbids. If any other document in this repository (or any
@@ -7,7 +7,7 @@ scope of `qntyspot/`.
 
 ```
 PROJECT                 = QntySpot
-ACTIVE_PHASE            = QNTY_SPOT_PROGRAM_B1_PRELIVE_EXECUTION_IMPLEMENTATION_V0
+ACTIVE_PHASE            = QNTY_SPOT_EXTERNAL_AUTHORITY_ROOT_CONTRACT_V0
 AUTHORITY               = ROBINHOOD_SHADOW_READ_ONLY
 NETWORK_AUTHORIZED      = YES (bounded public Robinhood REST/RPC, Chainlink, and 0x reads only)
 SIGNING_AUTHORIZED      = NO
@@ -19,13 +19,22 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 `qntyspot.NETWORK_AUTHORIZED`, `qntyspot.SIGNING_AUTHORIZED`, and
 `qntyspot.LIVE_CAPITAL_AUTHORIZED`.
 
-Program B1 is the active *offline implementation* phase. Naming it here
-changes no flag: `AUTHORITY` is still `ROBINHOOD_SHADOW_READ_ONLY`, signing and
-live capital are still `NO`, and capital authority is still `NONE`. The
-`NETWORK_AUTHORIZED = YES` flag remains the historical bounded-public-read
-ceiling; B1 itself performs zero execution or venue network activity. Program B
-architecture and B1 implementation do not create live execution authority — see
+The external authority-root contract is the active *offline contract* phase.
+Naming it here changes no flag: `AUTHORITY` is still
+`ROBINHOOD_SHADOW_READ_ONLY`, signing and live capital are still `NO`, and
+capital authority is still `NONE`. The `NETWORK_AUTHORIZED = YES` flag remains
+the historical bounded-public-read ceiling; this phase performs zero execution
+or venue network activity. Program B architecture, B1 implementation, and
+this external-root contract do not create live execution authority — see
 [docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
+
+The frozen external-root consumer contract is documented in
+[docs/EXTERNAL_AUTHORITY_ROOT_CONTRACT_V0.md](EXTERNAL_AUTHORITY_ROOT_CONTRACT_V0.md).
+QntySpot consumes a serialized receipt plus an explicit external trust
+configuration. It does not contain or select root private material, does not
+self-issue, and does not treat a verified receipt as sufficient to escape the
+source phase ceiling. The external root is not implemented or deployed in this
+phase.
 
 ## The read-only shadow authority authorizes
 

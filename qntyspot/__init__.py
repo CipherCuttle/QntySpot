@@ -3,15 +3,17 @@
 PHASE: PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION -- ROBINHOOD_SHADOW_READ_ONLY
 --------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
-one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no key handling, no
-transaction encoder, no transaction broadcast surface, and no live-capital
-authority from any other repository.
+one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no
+key handling, no transaction encoder, no transaction broadcast surface, and
+no live-capital authority from any other repository.
 
 ``execution_contract`` and ``ledger.execution_schema`` are the frozen Program B
-pre-live execution contract. ``ledger.execution`` is the offline B1 runtime:
-immutable records, deterministic validators, and a SQLite authority surface
-with no network, signer, or capital capability. They authorize nothing above
-``AuthorityLevel.SHADOW`` and the capability gate refuses everything above it.
+pre-live execution contract. ``ledger.execution`` is the offline B1 runtime;
+``authority_root`` is the external-root contract consumer. Together they
+provide immutable records, deterministic validators, and a SQLite authority
+surface with no network, signer, or capital capability. They authorize
+nothing above ``AuthorityLevel.SHADOW`` and the capability gate refuses
+everything above it.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger
@@ -83,6 +85,7 @@ from .errors import (  # noqa: E402
     EnvelopeValidationError,
     ExecutionContractError,
     SessionIdentityError,
+    AuthorityVerificationError,
 )
 from .domain import (  # noqa: E402
     CycleV0,
@@ -125,6 +128,20 @@ from .execution_contract import (  # noqa: E402
     FinalityPolicyV0,
     SignedTransactionRecordV0,
     SubmissionAttemptV0,
+)
+from .authority_root import (  # noqa: E402
+    AUTHORITY_ROOT_CONTRACT_VERSION,
+    AuthorityGrantReceiptV0,
+    AuthorityIssuancePolicyV0,
+    TrustedAuthorityRootV0,
+    VerifiedAuthorityGrantV0,
+    effective_authority_level,
+    effective_capabilities,
+    effective_capital_ceilings,
+    assert_effective_capital_within,
+    load_trusted_authority_root,
+    assert_issuance_request_admissible,
+    verify_authority_grant,
 )
 from .policy import load_policy_file, load_policy_text, parse_policy  # noqa: E402
 from .states import IntentState  # noqa: E402
@@ -189,6 +206,7 @@ __all__ = [
     "EnvelopeValidationError",
     "ApprovalContractError",
     "ChainTruthError",
+    "AuthorityVerificationError",
     "Side",
     "LadderKind",
     "LadderLevelV0",
@@ -220,6 +238,18 @@ __all__ = [
     "ApprovalActionV0",
     "SignedTransactionRecordV0",
     "SubmissionAttemptV0",
+    "AUTHORITY_ROOT_CONTRACT_VERSION",
+    "TrustedAuthorityRootV0",
+    "AuthorityGrantReceiptV0",
+    "AuthorityIssuancePolicyV0",
+    "VerifiedAuthorityGrantV0",
+    "load_trusted_authority_root",
+    "assert_issuance_request_admissible",
+    "verify_authority_grant",
+    "effective_authority_level",
+    "effective_capabilities",
+    "effective_capital_ceilings",
+    "assert_effective_capital_within",
     "ChainObservationV0",
     "ChainTruthV0",
     "ChainTruthVerdict",
