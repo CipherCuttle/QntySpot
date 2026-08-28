@@ -33,6 +33,7 @@ from .execution_contract import (
     AuthorityLevel,
     AuthorityPolicyRefV0,
     ExecutionSessionV0,
+    _assert_exact_scope,
     _assert_authority_session_binding,
 )
 
@@ -196,8 +197,11 @@ class AuthorityIssuancePolicyV0:
             if type(values) is not tuple or not values:
                 raise AuthorityVerificationError(f"{field_name} must be a non-empty tuple")
             for value in values:
-                if not isinstance(value, str) or value in {"*", "latest", "any"}:
-                    raise AuthorityVerificationError(f"{field_name} contains a wildcard")
+                _assert_exact_scope(
+                    value,
+                    field=field_name,
+                    error=AuthorityVerificationError,
+                )
         _positive_int(self.max_reservation_atomic, field_name="max_reservation_atomic")
         _positive_int(self.max_cumulative_atomic, field_name="max_cumulative_atomic")
         if self.max_reservation_atomic > self.max_cumulative_atomic:
@@ -238,6 +242,14 @@ def assert_issuance_request_admissible(
         raise AuthorityVerificationError("issuance request targets a different root")
     if request.granted_level > policy.maximum_issuable_level:
         raise AuthorityVerificationError("issuance level exceeds issuer policy")
+    for field_name, value in (
+        ("permitted_repository_commit", request.permitted_repository_commit),
+        ("permitted_implementation_digest", request.permitted_implementation_digest),
+        ("permitted_network_id", request.permitted_network_id),
+        ("permitted_taker_address", request.permitted_taker_address),
+        ("permitted_venue_id", request.permitted_venue_id),
+    ):
+        _assert_exact_scope(value, field=field_name, error=AuthorityVerificationError)
     if request.permitted_network_id not in policy.allowed_network_ids:
         raise AuthorityVerificationError("issuance network is not allowed")
     if request.permitted_taker_address not in policy.allowed_taker_addresses:
@@ -329,8 +341,14 @@ class AuthorityGrantReceiptV0:
             raise AuthorityVerificationError("unknown authority policy schema")
         if self.authority_policy.authority_root_id != self.root_id:
             raise AuthorityVerificationError("receipt root_id disagrees with authority policy")
-        if self.authority_policy.permitted_network_id == "*":
-            raise AuthorityVerificationError("wildcard network grants are forbidden")
+        for field_name, value in (
+            ("permitted_repository_commit", self.authority_policy.permitted_repository_commit),
+            ("permitted_implementation_digest", self.authority_policy.permitted_implementation_digest),
+            ("permitted_network_id", self.authority_policy.permitted_network_id),
+            ("permitted_taker_address", self.authority_policy.permitted_taker_address),
+            ("permitted_venue_id", self.authority_policy.permitted_venue_id),
+        ):
+            _assert_exact_scope(value, field=field_name, error=AuthorityVerificationError)
         if type(self.signature) is not bytes or len(self.signature) != 64:
             raise AuthorityVerificationError("signature must be exactly 64 Ed25519 bytes")
         if self.schema != GRANT_SCHEMA:
@@ -606,13 +624,22 @@ def _require_verified(grant: Any) -> VerifiedAuthorityGrantV0:
     return grant
 
 
+def _assert_verified_grant_current(
+    grant: VerifiedAuthorityGrantV0, *, now_epoch_s: int
+) -> None:
+    """Revalidate the receipt interval at every authority-consumption point."""
+    grant.authority_policy.assert_valid_at(now_epoch_s)
+
+
 def effective_authority_level(
     *,
     source_phase_ceiling: AuthorityLevel,
     verified_grant: VerifiedAuthorityGrantV0,
+    now_epoch_s: int,
 ) -> AuthorityLevel:
     """Apply the two independent authority gates by intersection."""
     grant = _require_verified(verified_grant)
+    _assert_verified_grant_current(grant, now_epoch_s=now_epoch_s)
     if not isinstance(source_phase_ceiling, AuthorityLevel):
         raise AuthorityCeilingError("source_phase_ceiling is not an AuthorityLevel")
     if source_phase_ceiling > PHASE_GRANTED_AUTHORITY_LEVEL:
@@ -626,6 +653,7 @@ def effective_capabilities(
     *,
     source_phase_ceiling: AuthorityLevel,
     verified_grant: VerifiedAuthorityGrantV0,
+    now_epoch_s: int,
     kill_switch: bool = False,
     safe_halt: bool = False,
 ) -> frozenset[Capability]:
@@ -633,6 +661,7 @@ def effective_capabilities(
     level = effective_authority_level(
         source_phase_ceiling=source_phase_ceiling,
         verified_grant=verified_grant,
+        now_epoch_s=now_epoch_s,
     )
     capabilities = LADDER[level]
     if kill_switch or safe_halt:
@@ -645,9 +674,11 @@ def effective_capital_ceilings(
     local_per_action_atomic: int,
     local_cumulative_atomic: int,
     verified_grant: VerifiedAuthorityGrantV0,
+    now_epoch_s: int,
 ) -> tuple[int, int]:
     """Intersect local policy ceilings with the external upper bound."""
     grant = _require_verified(verified_grant)
+    _assert_verified_grant_current(grant, now_epoch_s=now_epoch_s)
     _positive_int(local_per_action_atomic, field_name="local_per_action_atomic")
     _positive_int(local_cumulative_atomic, field_name="local_cumulative_atomic")
     if local_per_action_atomic > local_cumulative_atomic:
@@ -666,6 +697,7 @@ def assert_effective_capital_within(
     local_per_action_atomic: int,
     local_cumulative_atomic: int,
     verified_grant: VerifiedAuthorityGrantV0,
+    now_epoch_s: int,
 ) -> None:
     """Reject an action outside the intersection of local and external caps."""
     if type(requested_atomic) is not int or requested_atomic <= 0:
@@ -676,6 +708,7 @@ def assert_effective_capital_within(
         local_per_action_atomic=local_per_action_atomic,
         local_cumulative_atomic=local_cumulative_atomic,
         verified_grant=verified_grant,
+        now_epoch_s=now_epoch_s,
     )
     if requested_atomic > per_action:
         raise AuthorityCeilingError("requested capital exceeds the effective per-action ceiling")

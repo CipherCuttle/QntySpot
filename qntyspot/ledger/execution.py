@@ -324,6 +324,12 @@ class ExecutionRuntime:
             raise AuthorityVerificationError("only a verified authority grant may be recorded")
         if isinstance(accepted_at_epoch_s, bool) or not isinstance(accepted_at_epoch_s, int) or accepted_at_epoch_s < 0:
             raise AuthorityVerificationError("accepted_at_epoch_s must be a non-negative integer")
+        try:
+            verified.authority_policy.assert_valid_at(accepted_at_epoch_s)
+        except AuthorityCeilingError as exc:
+            raise AuthorityVerificationError(
+                "authority receipt is not valid at acceptance time"
+            ) from exc
         values = {
             "trust_config_digest": verified.trust_config_digest,
             "root_id": verified.root_id,

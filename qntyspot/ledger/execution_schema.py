@@ -46,7 +46,7 @@ WHAT THIS MODULE IS NOT
 It creates tables. It writes no rows, opens no connection of its own, signs
 nothing, submits nothing, and stores no key material anywhere: a signed
 transaction is represented by a digest of its payload, its length, and its
-hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 0; the
+hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 1; the
 B1 runtime applies it alongside the core ``SCHEMA_VERSION`` without changing
 the core schema version.
 """
@@ -354,8 +354,15 @@ WHEN NEW.trust_config_digest <> OLD.trust_config_digest
    OR NEW.highest_accepted_epoch < OLD.highest_accepted_epoch
    OR (NEW.highest_accepted_epoch = OLD.highest_accepted_epoch
        AND NEW.highest_accepted_receipt_id <> OLD.highest_accepted_receipt_id)
+   OR NEW.highest_accepted_at_epoch_s < OLD.highest_accepted_at_epoch_s
 BEGIN
     SELECT RAISE(ABORT, 'authority root state rollback or identity change');
+END;
+
+CREATE TRIGGER authority_root_state_no_delete
+BEFORE DELETE ON authority_root_state
+BEGIN
+    SELECT RAISE(ABORT, 'authority root state is non-deletable');
 END;
 
 CREATE TRIGGER execution_sessions_no_conflict_replace

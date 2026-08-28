@@ -30,7 +30,7 @@ from qntyspot.authority_root import (
     verify_authority_grant,
 )
 from qntyspot.canon import canonical_json_bytes, sha256_hex
-from qntyspot.errors import AuthorityCeilingError, AuthorityVerificationError
+from qntyspot.errors import AuthorityCeilingError, AuthorityVerificationError, SessionIdentityError
 from qntyspot.execution_contract import (
     LADDER,
     AuthorityLevel,
@@ -50,6 +50,14 @@ TAKER = "0x00000000000000000000000000000000000000aa"
 ROOT_ID = "qnty-authority-root-v0"
 NETWORK_ID = "evm:4663"
 VENUE_ID = "zero-x-allowance-holder"
+RESERVED_SCOPE_ALIASES = ("*", "any", "ANY", " any ", "latest", "LATEST", " latest ")
+AUTHORITY_SCOPE_FIELDS = (
+    "permitted_repository_commit",
+    "permitted_implementation_digest",
+    "permitted_network_id",
+    "permitted_taker_address",
+    "permitted_venue_id",
+)
 
 SHADOW_SIGNATURE = bytes.fromhex(
     "9c21d092e59b19d65b003e51d8079a8df22aee58610a67010c5cd391409ac635"
@@ -300,23 +308,28 @@ def test_higher_external_grant_cannot_escape_shadow_source_ceiling(
     assert effective_authority_level(
         source_phase_ceiling=AuthorityLevel.SHADOW,
         verified_grant=verified,
+        now_epoch_s=NOW,
     ) is AuthorityLevel.SHADOW
     assert effective_capabilities(
         source_phase_ceiling=AuthorityLevel.SHADOW,
         verified_grant=verified,
+        now_epoch_s=NOW,
     ) == LADDER[AuthorityLevel.SHADOW]
     assert Capability.PRODUCE_SIGNATURE not in effective_capabilities(
         source_phase_ceiling=AuthorityLevel.SHADOW,
         verified_grant=verified,
+        now_epoch_s=NOW,
     )
     assert Capability.SUBMIT_EXACT_BYTES not in effective_capabilities(
         source_phase_ceiling=AuthorityLevel.SHADOW,
         verified_grant=verified,
+        now_epoch_s=NOW,
     )
     with pytest.raises(AuthorityCeilingError, match="current reviewed phase"):
         effective_capabilities(
             source_phase_ceiling=AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER,
             verified_grant=verified,
+            now_epoch_s=NOW,
         )
 
 
@@ -325,6 +338,7 @@ def test_both_gates_are_required() -> None:
         effective_capabilities(
             source_phase_ceiling=AuthorityLevel.SHADOW,
             verified_grant=None,  # type: ignore[arg-type]
+            now_epoch_s=NOW,
         )
     with pytest.raises(TypeError):
         VerifiedAuthorityGrantV0()  # type: ignore[call-arg]
@@ -337,6 +351,7 @@ def test_capital_is_always_the_minimum_of_local_and_external_ceilings(
         local_per_action_atomic=2_000_000,
         local_cumulative_atomic=8_000_000,
         verified_grant=shadow_verified,
+        now_epoch_s=NOW,
     ) == (1_000_000, 4_000_000)
     with pytest.raises(AuthorityCeilingError, match="per-action"):
         assert_effective_capital_within(
@@ -345,6 +360,7 @@ def test_capital_is_always_the_minimum_of_local_and_external_ceilings(
             local_per_action_atomic=2_000_000,
             local_cumulative_atomic=8_000_000,
             verified_grant=shadow_verified,
+            now_epoch_s=NOW,
         )
     with pytest.raises(AuthorityCeilingError, match="cumulative"):
         assert_effective_capital_within(
@@ -353,6 +369,143 @@ def test_capital_is_always_the_minimum_of_local_and_external_ceilings(
             local_per_action_atomic=2_000_000,
             local_cumulative_atomic=8_000_000,
             verified_grant=shadow_verified,
+            now_epoch_s=NOW,
+        )
+
+
+@pytest.mark.parametrize("alias", RESERVED_SCOPE_ALIASES)
+@pytest.mark.parametrize("field_name", AUTHORITY_SCOPE_FIELDS)
+def test_authority_policy_rejects_reserved_exact_scope_aliases(
+    field_name: str, alias: str
+) -> None:
+    with pytest.raises((AuthorityCeilingError, SessionIdentityError)):
+        replace(_policy(AuthorityLevel.SHADOW), **{field_name: alias})
+
+
+@pytest.mark.parametrize("alias", RESERVED_SCOPE_ALIASES)
+@pytest.mark.parametrize(
+    "field_name",
+    ("allowed_network_ids", "allowed_taker_addresses", "allowed_venue_ids"),
+)
+def test_issuance_policy_rejects_reserved_exact_scope_aliases(
+    field_name: str, alias: str
+) -> None:
+    values = {
+        "allowed_network_ids": (NETWORK_ID,),
+        "allowed_taker_addresses": (TAKER,),
+        "allowed_venue_ids": (VENUE_ID,),
+    }
+    values[field_name] = (alias,)
+    with pytest.raises(AuthorityVerificationError):
+        AuthorityIssuancePolicyV0(
+            root_id=ROOT_ID,
+            repository_identity="CipherCuttle/QntySpot",
+            maximum_issuable_level=AuthorityLevel.RECONCILE_ONLY,
+            allowed_network_ids=values["allowed_network_ids"],
+            allowed_taker_addresses=values["allowed_taker_addresses"],
+            allowed_venue_ids=values["allowed_venue_ids"],
+            max_reservation_atomic=1_000_000,
+            max_cumulative_atomic=4_000_000,
+            max_grant_duration_s=1_000,
+        )
+
+
+@pytest.mark.parametrize("alias", RESERVED_SCOPE_ALIASES)
+@pytest.mark.parametrize("field_name", AUTHORITY_SCOPE_FIELDS)
+def test_authority_receipt_rejects_reserved_exact_scope_aliases(
+    field_name: str, alias: str
+) -> None:
+    policy = _policy(AuthorityLevel.SHADOW)
+    object.__setattr__(policy, field_name, alias)
+    with pytest.raises(AuthorityVerificationError):
+        AuthorityGrantReceiptV0(
+            root_id=ROOT_ID,
+            public_key_fingerprint=ANCHOR_FINGERPRINT,
+            signature_algorithm=ED25519_SIGNATURE_ALGORITHM,
+            authority_epoch=8,
+            serial=1,
+            issued_at_epoch_s=NOW - 10,
+            authority_policy=policy,
+            signature=bytes(64),
+        )
+
+
+@pytest.mark.parametrize("alias", RESERVED_SCOPE_ALIASES)
+@pytest.mark.parametrize("field_name", AUTHORITY_SCOPE_FIELDS)
+def test_issuance_request_rejects_reserved_exact_scope_aliases(
+    field_name: str, alias: str
+) -> None:
+    issuer_policy = AuthorityIssuancePolicyV0(
+        root_id=ROOT_ID,
+        repository_identity="CipherCuttle/QntySpot",
+        maximum_issuable_level=AuthorityLevel.RECONCILE_ONLY,
+        allowed_network_ids=(NETWORK_ID,),
+        allowed_taker_addresses=(TAKER,),
+        allowed_venue_ids=(VENUE_ID,),
+        max_reservation_atomic=1_000_000,
+        max_cumulative_atomic=4_000_000,
+        max_grant_duration_s=1_000,
+    )
+    request = _policy(AuthorityLevel.RECONCILE_ONLY)
+    object.__setattr__(request, field_name, alias)
+    with pytest.raises(AuthorityVerificationError):
+        assert_issuance_request_admissible(
+            issuer_policy,
+            request,
+            repository_identity="CipherCuttle/QntySpot",
+        )
+
+
+def test_anyswap_like_venue_identity_remains_an_exact_identity() -> None:
+    issuer_policy = AuthorityIssuancePolicyV0(
+        root_id=ROOT_ID,
+        repository_identity="CipherCuttle/QntySpot",
+        maximum_issuable_level=AuthorityLevel.RECONCILE_ONLY,
+        allowed_network_ids=(NETWORK_ID,),
+        allowed_taker_addresses=(TAKER,),
+        allowed_venue_ids=("anyswap-v1",),
+        max_reservation_atomic=1_000_000,
+        max_cumulative_atomic=4_000_000,
+        max_grant_duration_s=1_000,
+    )
+    request = replace(_policy(AuthorityLevel.RECONCILE_ONLY), permitted_venue_id="anyswap-v1")
+    assert_issuance_request_admissible(
+        issuer_policy,
+        request,
+        repository_identity="CipherCuttle/QntySpot",
+    )
+
+
+def test_verified_grant_is_revalidated_at_every_consumption_time(
+    shadow_verified: VerifiedAuthorityGrantV0,
+) -> None:
+    with pytest.raises(AuthorityCeilingError, match="not valid"):
+        effective_authority_level(
+            source_phase_ceiling=AuthorityLevel.SHADOW,
+            verified_grant=shadow_verified,
+            now_epoch_s=NOW - 101,
+        )
+    with pytest.raises(AuthorityCeilingError, match="not valid"):
+        effective_capabilities(
+            source_phase_ceiling=AuthorityLevel.SHADOW,
+            verified_grant=shadow_verified,
+            now_epoch_s=NOW + 900,
+        )
+    with pytest.raises(AuthorityCeilingError, match="not valid"):
+        effective_capital_ceilings(
+            local_per_action_atomic=2_000_000,
+            local_cumulative_atomic=8_000_000,
+            verified_grant=shadow_verified,
+            now_epoch_s=NOW + 900,
+        )
+    with pytest.raises(AuthorityCeilingError, match="not valid"):
+        assert_effective_capital_within(
+            requested_atomic=1,
+            held_atomic=0,
+            local_per_action_atomic=2_000_000,
+            local_cumulative_atomic=8_000_000,
+            verified_grant=shadow_verified,
+            now_epoch_s=NOW + 900,
         )
 
 
@@ -442,6 +595,66 @@ def test_sqlite_persists_external_epoch_and_rejects_local_rollback(
                 (TRUST_CONFIG_DIGEST,),
             )
         assert_execution_replay_equivalence(ledger)
+
+
+def test_sqlite_authority_root_state_blocks_hostile_sql_but_allows_high_water_advance(
+    tmp_path,
+    shadow_verified: VerifiedAuthorityGrantV0,
+) -> None:
+    with open_ledger(str(tmp_path / "authority-state.sqlite3")) as ledger:
+        runtime = ExecutionRuntime(ledger)
+        assert runtime.record_verified_authority(shadow_verified, accepted_at_epoch_s=NOW)
+        conn = ledger.connection
+        state_key = (TRUST_CONFIG_DIGEST,)
+
+        hostile_updates = (
+            ("trust_config_digest", "aa" * 32),
+            ("root_id", "other-root"),
+            ("public_key_fingerprint", "bb" * 32),
+            ("minimum_authority_epoch", 8),
+            ("highest_accepted_epoch", 7),
+            ("highest_accepted_receipt_id", "cc" * 32),
+            ("highest_accepted_at_epoch_s", NOW - 1),
+        )
+        for column, value in hostile_updates:
+            with pytest.raises(sqlite3.IntegrityError, match="rollback"):
+                conn.execute(
+                    f"UPDATE authority_root_state SET {column} = ? "
+                    "WHERE trust_config_digest = ?",
+                    (value, *state_key),
+                )
+
+        with pytest.raises(sqlite3.IntegrityError, match="non-deletable"):
+            conn.execute(
+                "DELETE FROM authority_root_state WHERE trust_config_digest = ?",
+                state_key,
+            )
+
+        conn.execute(
+            "UPDATE authority_root_state SET highest_accepted_epoch = ?, "
+            "highest_accepted_receipt_id = ?, highest_accepted_at_epoch_s = ? "
+            "WHERE trust_config_digest = ?",
+            (9, "dd" * 32, NOW + 1, TRUST_CONFIG_DIGEST),
+        )
+        row = conn.execute(
+            "SELECT * FROM authority_root_state WHERE trust_config_digest = ?",
+            state_key,
+        ).fetchone()
+        assert row["highest_accepted_epoch"] == 9
+        assert row["highest_accepted_receipt_id"] == "dd" * 32
+        assert row["highest_accepted_at_epoch_s"] == NOW + 1
+
+
+def test_expired_verified_grant_cannot_be_recorded(
+    tmp_path,
+    shadow_verified: VerifiedAuthorityGrantV0,
+) -> None:
+    with open_ledger(str(tmp_path / "expired-authority.sqlite3")) as ledger:
+        with pytest.raises(AuthorityVerificationError, match="acceptance time"):
+            ExecutionRuntime(ledger).record_verified_authority(
+                shadow_verified,
+                accepted_at_epoch_s=NOW + 900,
+            )
 
 
 def test_runtime_will_not_record_an_unverified_receipt(tmp_path, shadow_receipt) -> None:

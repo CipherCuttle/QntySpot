@@ -356,7 +356,7 @@ provenance, but their authority identity uses the stable session identity
 digest. Once a row leaves `DRAFT`, SQLite prevents deletion or mutation of its
 identity-bearing facts; only the lifecycle may advance.
 
-`EXECUTION_SCHEMA_VERSION` is `0`. The surface is applied on demand and stamped
+`EXECUTION_SCHEMA_VERSION` is `1`. The surface is applied on demand and stamped
 separately from the core `SCHEMA_VERSION`; whether it folds into the core
 schema is a B1 decision. Applying it does not disturb the core snapshot, and
 `tests/test_execution_schema.py` proves the core still replays exactly with the
