@@ -1693,6 +1693,7 @@ _ACTION_LAYOUTS = {
     _selector("RENEGADE(address,address,address,uint256,bool,uint256,bytes,uint256)"): (8, (6,)),
     _selector("POSITIVE_SLIPPAGE(address,address,uint256,uint256)"): (4, ()),
 }
+_SETTLER_BASIS = 1_000_000
 
 
 def _calldata_bytes(value: bytes | str) -> bytes:
@@ -1725,7 +1726,7 @@ def _calldata_address(data: bytes, offset: int, *, field: str) -> str:
 
 
 def _calldata_dynamic_bytes(data: bytes, args_start: int, offset: int, *, field: str) -> bytes:
-    if offset % 32 or offset < 32 * 5:
+    if offset != 32 * 5:
         raise EnvelopeValidationError(f"calldata {field} offset is not canonical")
     start = args_start + offset
     length = _calldata_word(data, start, field=f"{field}.length")
@@ -1738,26 +1739,195 @@ def _calldata_dynamic_bytes(data: bytes, args_start: int, offset: int, *, field:
     return data[start + 32 : end]
 
 
-def _decode_actions(data: bytes, args_start: int, offset: int) -> tuple[str, ...]:
-    if offset % 32 or offset < 32 + 32 * 4:
+def _action_word(action_args: bytes, index: int, *, field: str) -> int:
+    return _calldata_word(action_args, index * 32, field=field)
+
+
+def _action_address(action_args: bytes, index: int, *, field: str) -> str:
+    return _calldata_address(action_args, index * 32, field=field)
+
+
+def _action_bool(action_args: bytes, index: int, *, field: str) -> bool:
+    value = _action_word(action_args, index, field=field)
+    if value not in (0, 1):
+        raise EnvelopeValidationError(f"calldata {field} is not a canonical bool")
+    return bool(value)
+
+
+def _assert_action_minimum(
+    action_args: bytes,
+    index: int,
+    expected_min_output_atomic: int | None,
+    *,
+    field: str,
+) -> None:
+    minimum = _action_word(action_args, index, field=field)
+    if minimum <= 0 or minimum > MAX_UINT256:
+        raise EnvelopeValidationError(f"calldata {field} is not a positive uint256")
+    if expected_min_output_atomic is not None and minimum < expected_min_output_atomic:
+        raise EnvelopeValidationError(f"calldata {field} weakens the bound")
+
+
+def _assert_action_ppm(action_args: bytes, index: int, *, field: str) -> None:
+    ppm = _action_word(action_args, index, field=field)
+    if ppm > _SETTLER_BASIS:
+        raise EnvelopeValidationError(f"calldata {field} exceeds the Settler basis")
+
+
+def _validate_action_semantics(
+    selector: str,
+    action_args: bytes,
+    dynamic_values: Mapping[int, bytes],
+    *,
+    expected_sell_token: str | None,
+    expected_buy_token: str | None,
+    expected_taker_address: str | None,
+    expected_sell_amount_atomic: int | None,
+    expected_min_output_atomic: int | None,
+    transaction_value_atomic: int,
+) -> None:
+    """Bind every economic field exposed by the supported Settler actions.
+
+    The outer AllowanceHolder amount is the maximum input supplied by the
+    taker. Settler actions consume a bounded proportion of that balance or
+    carry their own maximum explicitly, so a selector-only check is not
+    sufficient: a nested action can otherwise redirect the token or payout.
+    """
+    if selector == _selector("NATIVE_CHECK(uint256,uint256)"):
+        _action_word(action_args, 0, field="NATIVE_CHECK.deadline")
+        msg_value = _action_word(action_args, 1, field="NATIVE_CHECK.msgValue")
+        if msg_value > transaction_value_atomic:
+            raise EnvelopeValidationError(
+                "calldata NATIVE_CHECK requires more native value than the transaction carries"
+            )
+        return
+    if selector == _selector("CHECK_SLIPPAGE(bool)"):
+        _action_bool(action_args, 0, field="CHECK_SLIPPAGE.transferExactLimit")
+        return
+
+    recipient_index: int | None = None
+    sell_index: int | None = None
+    buy_index: int | None = None
+    minimum_index: int | None = None
+    ppm_index: int | None = None
+
+    if selector == _selector("UNISWAPV3(address,uint256,bytes,uint256)"):
+        recipient_index, ppm_index, minimum_index = 0, 1, 3
+        path = dynamic_values[2]
+        if len(path) < 43 or (len(path) - 20) % 23:
+            raise EnvelopeValidationError("calldata UNISWAPV3 path is malformed")
+        path_sell = "0x" + path[:20].hex()
+        path_buy = "0x" + path[-20:].hex()
+        if expected_sell_token is not None and path_sell != expected_sell_token:
+            raise EnvelopeValidationError("calldata UNISWAPV3 path sells a different token")
+        if expected_buy_token is not None and path_buy != expected_buy_token:
+            raise EnvelopeValidationError("calldata UNISWAPV3 path buys a different token")
+    elif selector == _selector("UNISWAPV2(address,address,uint256,address,uint24,uint256)"):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 2, 5
+        _action_address(action_args, 3, field="UNISWAPV2.pool")
+        if _action_word(action_args, 4, field="UNISWAPV2.swapInfo") > 0xFFFFFF:
+            raise EnvelopeValidationError("calldata UNISWAPV2.swapInfo is not a uint24")
+    elif selector == _selector("BASIC(address,uint256,address,uint256,bytes)"):
+        sell_index, ppm_index = 0, 1
+        _action_address(action_args, 2, field="BASIC.pool")
+        raw_offset = _action_word(action_args, 3, field="BASIC.offset")
+        data = dynamic_values[4]
+        if (data and raw_offset + 32 > len(data)) or (not data and raw_offset != 0):
+            raise EnvelopeValidationError("calldata BASIC offset is outside pool data")
+    elif selector == _selector("DODOV1(address,uint256,address,bool,uint256)"):
+        sell_index, ppm_index, minimum_index = 0, 1, 4
+        _action_address(action_args, 2, field="DODOV1.pool")
+        _action_bool(action_args, 3, field="DODOV1.quoteForBase")
+    elif selector == _selector("DODOV2(address,address,uint256,address,bool,uint256)"):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 5
+        _action_address(action_args, 3, field="DODOV2.pool")
+        _action_bool(action_args, 4, field="DODOV2.quoteForBase")
+    elif selector == _selector("VELODROME(address,uint256,address,uint24,uint256)"):
+        recipient_index, ppm_index, minimum_index = 0, 1, 4
+        _action_address(action_args, 2, field="VELODROME.pool")
+        if _action_word(action_args, 3, field="VELODROME.swapInfo") > 0xFFFFFF:
+            raise EnvelopeValidationError("calldata VELODROME.swapInfo is not a uint24")
+    elif selector == _selector(
+        "MAVERICKV2(address,address,uint256,address,bool,int32,uint256)"
+    ):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 2, 6
+        _action_address(action_args, 3, field="MAVERICKV2.pool")
+        _action_bool(action_args, 4, field="MAVERICKV2.tokenAIn")
+    elif selector == _selector("EULERSWAP(address,address,uint256,address,bool,uint256)"):
+        recipient_index, sell_index, ppm_index, minimum_index = 0, 1, 2, 5
+        _action_address(action_args, 3, field="EULERSWAP.pool")
+        _action_bool(action_args, 4, field="EULERSWAP.zeroForOne")
+    elif selector == _selector(
+        "RENEGADE(address,address,address,uint256,bool,uint256,bytes,uint256)"
+    ):
+        recipient_index, sell_index, buy_index = 0, 1, 2
+        max_sell = _action_word(action_args, 3, field="RENEGADE.maxSellAmount")
+        if expected_sell_amount_atomic is not None and max_sell > expected_sell_amount_atomic:
+            raise EnvelopeValidationError("calldata RENEGADE exceeds the input bound")
+        _action_bool(action_args, 4, field="RENEGADE.refundNativeEth")
+        minimum_index = 7
+    elif selector == _selector("POSITIVE_SLIPPAGE(address,address,uint256,uint256)"):
+        recipient_index, buy_index = 0, 1
+        _action_word(action_args, 2, field="POSITIVE_SLIPPAGE.expectedAmount")
+        _action_word(action_args, 3, field="POSITIVE_SLIPPAGE.maxPpm")
+    else:  # pragma: no cover - guarded by the selector table
+        raise EnvelopeValidationError(f"unknown Settler action selector {selector}")
+
+    if ppm_index is not None:
+        _assert_action_ppm(action_args, ppm_index, field=f"{selector}.ppm")
+    if recipient_index is not None and expected_taker_address is not None:
+        if _action_address(action_args, recipient_index, field=f"{selector}.recipient") != expected_taker_address:
+            raise EnvelopeValidationError(f"calldata {selector} names a different recipient")
+    if sell_index is not None and expected_sell_token is not None:
+        if _action_address(action_args, sell_index, field=f"{selector}.sellToken") != expected_sell_token:
+            raise EnvelopeValidationError(f"calldata {selector} sells a different token")
+    if buy_index is not None and expected_buy_token is not None:
+        if _action_address(action_args, buy_index, field=f"{selector}.buyToken") != expected_buy_token:
+            raise EnvelopeValidationError(f"calldata {selector} buys a different token")
+    if minimum_index is not None:
+        _assert_action_minimum(
+            action_args,
+            minimum_index,
+            expected_min_output_atomic,
+            field=f"{selector}.minimumOutput",
+        )
+
+
+def _decode_actions(
+    data: bytes,
+    args_start: int,
+    offset: int,
+    *,
+    expected_sell_token: str | None,
+    expected_buy_token: str | None,
+    expected_taker_address: str | None,
+    expected_sell_amount_atomic: int | None,
+    expected_min_output_atomic: int | None,
+    transaction_value_atomic: int,
+) -> tuple[str, ...]:
+    if offset != 32 + 32 * 4:
         raise EnvelopeValidationError("calldata actions offset is not canonical")
     array_start = args_start + offset
     count = _calldata_word(data, array_start, field="actions.length")
     if count == 0 or count > 64:
         raise EnvelopeValidationError("calldata actions must contain 1..64 calls")
-    head_end = array_start + 32 + count * 32
+    # ABI offsets in a dynamic array are relative to the element-head start,
+    # immediately after the array length word. Interpreting them relative to
+    # ``array_start`` accepts malformed fixtures and rejects canonical 0x data.
+    array_body_start = array_start + 32
+    head_end = array_body_start + count * 32
     if head_end > len(data):
         raise EnvelopeValidationError("calldata actions head is truncated")
     starts: list[int] = []
     for index in range(count):
         relative = _calldata_word(data, array_start + 32 + index * 32, field="actions.offset")
-        if relative % 32 or relative < 32 + count * 32:
+        if relative % 32 or relative < count * 32:
             raise EnvelopeValidationError("calldata action offset is not canonical")
-        start = array_start + relative
+        start = array_body_start + relative
         length = _calldata_word(data, start, field="action.length")
         end = start + 32 + length
         padded_end = start + 32 + ((length + 31) // 32) * 32
-        if length < 4 or padded_end > len(data):
+        if length < 4 or padded_end > len(data) or any(data[end:padded_end]):
             raise EnvelopeValidationError("calldata action is truncated")
         starts.append(start)
         action_selector = "0x" + data[start + 32 : start + 36].hex()
@@ -1771,11 +1941,12 @@ def _decode_actions(data: bytes, args_start: int, offset: int) -> tuple[str, ...
         if not dynamic_indexes and len(action_args) != head_size:
             raise EnvelopeValidationError("Settler action has unexpected trailing bytes")
         dynamic_starts: list[int] = []
+        dynamic_values: dict[int, bytes] = {}
         for dynamic_index in dynamic_indexes:
             dynamic_offset = int.from_bytes(
                 action_args[dynamic_index * 32 : (dynamic_index + 1) * 32], "big"
             )
-            if dynamic_offset % 32 or dynamic_offset < head_size:
+            if dynamic_offset != head_size:
                 raise EnvelopeValidationError("Settler action dynamic offset is not canonical")
             if dynamic_offset + 32 > len(action_args):
                 raise EnvelopeValidationError("Settler action dynamic value is truncated")
@@ -1789,6 +1960,7 @@ def _decode_actions(data: bytes, args_start: int, offset: int) -> tuple[str, ...
             ):
                 raise EnvelopeValidationError("Settler action dynamic value is malformed")
             dynamic_starts.append(dynamic_offset)
+            dynamic_values[dynamic_index] = action_args[dynamic_offset + 32 : dynamic_end]
         if dynamic_starts:
             if dynamic_starts != sorted(dynamic_starts) or dynamic_starts[0] != head_size:
                 raise EnvelopeValidationError("Settler action dynamic values are not canonical")
@@ -1799,10 +1971,17 @@ def _decode_actions(data: bytes, args_start: int, offset: int) -> tuple[str, ...
             final_end = final_offset + 32 + ((final_length + 31) // 32) * 32
             if final_end != len(action_args):
                 raise EnvelopeValidationError("Settler action has trailing bytes")
-        if action_selector == _selector("CHECK_SLIPPAGE(bool)") and int.from_bytes(action_args, "big") not in (0, 1):
-            raise EnvelopeValidationError("CHECK_SLIPPAGE action is malformed")
-        if action_selector == _selector("NATIVE_CHECK(uint256,uint256)") and len(action_args) != 64:
-            raise EnvelopeValidationError("NATIVE_CHECK action is malformed")
+        _validate_action_semantics(
+            action_selector,
+            action_args,
+            dynamic_values,
+            expected_sell_token=expected_sell_token,
+            expected_buy_token=expected_buy_token,
+            expected_taker_address=expected_taker_address,
+            expected_sell_amount_atomic=expected_sell_amount_atomic,
+            expected_min_output_atomic=expected_min_output_atomic,
+            transaction_value_atomic=transaction_value_atomic,
+        )
     if starts != sorted(starts) or len(set(starts)) != len(starts) or starts[0] != head_end:
         raise EnvelopeValidationError("calldata actions are not densely ordered")
     for index, start in enumerate(starts[:-1]):
@@ -1867,7 +2046,15 @@ def decode_allowance_holder_calldata(
     if min_output <= 0 or min_output > MAX_UINT256:
         raise EnvelopeValidationError("calldata minimum output is not positive")
     actions = _decode_actions(
-        inner, inner_args, _calldata_word(inner, inner_args + 96, field="actions offset")
+        inner,
+        inner_args,
+        _calldata_word(inner, inner_args + 96, field="actions offset"),
+        expected_sell_token=expected_sell_token,
+        expected_buy_token=expected_buy_token,
+        expected_taker_address=expected_taker_address,
+        expected_sell_amount_atomic=expected_sell_amount_atomic,
+        expected_min_output_atomic=expected_min_output_atomic,
+        transaction_value_atomic=transaction_value_atomic,
     )
     if not any(selector not in _NON_SETTLEMENT_ACTION_SELECTORS for selector in actions):
         raise EnvelopeValidationError("calldata contains no supported settlement action")

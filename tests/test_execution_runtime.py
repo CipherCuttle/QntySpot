@@ -77,13 +77,16 @@ def allowance_holder_calldata(*, sell_token: str, buy_token: str, sell_amount: i
         _address(sell_token)
         + _word(1_000_000)
         + _address(POOL)
+        + _word(0)
         + _word(160)
-        + _word(160)
+        + _word(32)
         + _word(0)
     )
     action_value = basic + basic_args
     action = _word(len(action_value)) + action_value + b"\0" * ((-len(action_value)) % 32)
-    actions = _word(1) + _word(64) + action
+    # ABI offsets in bytes[] are relative to the element-head start, after the
+    # array length word. With one element the canonical offset is 32.
+    actions = _word(1) + _word(32) + action
     settler_selector = bytes.fromhex(
         keccak256_hex(b"execute((address,address,uint256),bytes[],bytes32)")[:8]
     )
@@ -311,6 +314,46 @@ def test_calldata_decoder_binds_nested_economic_fields() -> None:
     assert decoded.sell_amount_atomic == MAX_INPUT
     assert decoded.min_output_atomic == MIN_OUTPUT
     assert decoded.settler_target == SETTLER
+
+
+def test_calldata_decoder_rejects_noncanonical_array_offsets_and_nested_token_mutation() -> None:
+    sell = "0x00000000000000000000000000000000000000bb"
+    buy = "0x00000000000000000000000000000000000000cc"
+    data = allowance_holder_calldata(
+        sell_token=sell,
+        buy_token=buy,
+        sell_amount=MAX_INPUT,
+        min_output=MIN_OUTPUT,
+        taker=TAKER,
+    )
+
+    # The old fixture encoding used an offset relative to the array length
+    # word. Canonical ABI bytes[] offsets are relative to the element head.
+    malformed = bytearray(data)
+    inner_start = 4 + 160 + 32
+    actions_start = inner_start + 4 + 160
+    malformed[actions_start + 32 : actions_start + 64] = _word(64)
+    with pytest.raises(EnvelopeValidationError, match="action"):
+        decode_allowance_holder_calldata(bytes(malformed))
+
+    # Keep the public/API fields unchanged while changing the nested BASIC
+    # sell token. Selector-only validation must not admit this transaction.
+    mutated = bytearray(data)
+    nested_token = _address(sell)
+    token_offset = mutated.find(nested_token, inner_start)
+    assert token_offset >= 0
+    mutated[token_offset : token_offset + 32] = _address(
+        "0x00000000000000000000000000000000000000dd"
+    )
+    with pytest.raises(EnvelopeValidationError, match="sells a different token"):
+        decode_allowance_holder_calldata(
+            bytes(mutated),
+            expected_sell_token=sell,
+            expected_buy_token=buy,
+            expected_sell_amount_atomic=MAX_INPUT,
+            expected_taker_address=TAKER,
+            expected_min_output_atomic=MIN_OUTPUT,
+        )
 
 
 def test_calldata_decoder_keeps_allowance_holder_distinct_from_settler() -> None:
