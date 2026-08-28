@@ -8,9 +8,9 @@ the effective level is the intersection of the source ceiling and a
 successfully verified receipt.
 
 Ed25519 verification is delegated to the mature ``cryptography`` package when
-the verifier is called.  The package is intentionally optional for the
-offline core: an unavailable verifier fails closed rather than silently
-accepting a receipt.
+the verifier is called; it is declared as the sole narrow runtime dependency.
+The import guard remains defense-in-depth: an unavailable verifier fails
+closed rather than silently accepting a receipt.
 """
 
 from __future__ import annotations
