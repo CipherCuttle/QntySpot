@@ -282,6 +282,27 @@ def test_hostile_receipt_variants_fail_closed(
         )
 
 
+def test_repository_and_implementation_bindings_remain_independent(
+    trusted_root: TrustedAuthorityRootV0,
+    shadow_receipt: AuthorityGrantReceiptV0,
+) -> None:
+    session = _session(shadow_receipt)
+    with pytest.raises(AuthorityVerificationError, match="repository commit"):
+        verify_authority_grant(
+            receipt=shadow_receipt,
+            trusted_root=trusted_root,
+            session=replace(session, repository_commit="b" * 40),
+            now_epoch_s=NOW,
+        )
+    with pytest.raises(AuthorityVerificationError, match="implementation digest"):
+        verify_authority_grant(
+            receipt=shadow_receipt,
+            trusted_root=trusted_root,
+            session=replace(session, implementation_digest="00" * 32),
+            now_epoch_s=NOW,
+        )
+
+
 def test_old_epoch_is_rejected_even_when_the_signature_is_valid(
     trusted_root: TrustedAuthorityRootV0, shadow_receipt: AuthorityGrantReceiptV0
 ) -> None:
