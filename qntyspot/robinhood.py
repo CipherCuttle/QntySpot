@@ -1202,7 +1202,7 @@ class RobinhoodShadowDecisionV0:
 class RobinhoodShadowAdapter(QuoteSource):
     """The one bounded Robinhood Stock Token / USDG shadow adapter."""
 
-    venue_id = "0x-swap-v2-robinhood-chain"
+    venue_id = "zero-x-swap-v2-robinhood-chain"
 
     def __init__(
         self,

@@ -219,6 +219,13 @@ def make_adapter(tmp_path: Path, **kwargs: Any) -> tuple[RobinhoodShadowAdapter,
     return adapter, robinhood_policy(), rpc_transport, store
 
 
+def test_robinhood_producer_venue_id_is_the_canonical_portable_identity(tmp_path: Path) -> None:
+    adapter, _policy, _rpc, _store = make_adapter(tmp_path)
+
+    assert adapter.venue_id == "zero-x-swap-v2-robinhood-chain"
+    assert adapter.venue_id[0].isalpha()
+
+
 @pytest.mark.parametrize(
     "taker",
     [None, "", "not-an-address", "0x" + "0" * 40, HISTORICAL_SYNTHETIC_TAKER],
