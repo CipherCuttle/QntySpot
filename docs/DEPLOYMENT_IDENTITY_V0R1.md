@@ -68,3 +68,11 @@ exactly to `ExecutionSessionV0.implementation_digest`. The two bindings remain
 mechanically independent. The source phase ceiling remains `SHADOW`, and this
 candidate is not a production first-grant binding until the repair is merged
 and re-derived from canonical main.
+
+For the Robinhood V0R1 venue repair, the branch provenance parent
+`46ab538de59c67a8af8f230bb7e494378392b614` is not interchangeable with the
+repaired source commit `742870f915588309053ac21298ce22ee2b6540c4`. The latter
+is the exact source identity witness for implementation digest
+`d06b6eb98c5a33ae9ef7a12af7ef2626d9a176894ef13dad97fafe99481812de`; the final
+`permitted_repository_commit` must remain deferred until PR #15 produces its
+canonical merge SHA.
