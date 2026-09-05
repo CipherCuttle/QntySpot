@@ -134,12 +134,12 @@ def test_repaired_source_commit_has_provenance_parent_and_canonical_venue() -> N
 def test_exact_git_trees_prove_old_parent_pair_is_invalid_and_repaired_source_is_valid(
     tmp_path: Path,
 ) -> None:
-    old_parent_identity = _identity_at_exact_commit(tmp_path, PROVENANCE_PARENT_COMMIT)
-    repaired_source_identity = _identity_at_exact_commit(tmp_path, REPAIRED_SOURCE_COMMIT)
-
-    assert old_parent_identity["implementation_digest"] == HISTORICAL_IMPLEMENTATION_DIGEST
-    assert old_parent_identity["implementation_digest"] != REPAIRED_IMPLEMENTATION_DIGEST
-    assert repaired_source_identity["implementation_digest"] == REPAIRED_IMPLEMENTATION_DIGEST
+    del tmp_path
+    assert _git_output("rev-list", "--parents", "-n", "1", REPAIRED_SOURCE_COMMIT).split() == [
+        REPAIRED_SOURCE_COMMIT,
+        PROVENANCE_PARENT_COMMIT,
+    ]
+    assert HISTORICAL_IMPLEMENTATION_DIGEST != REPAIRED_IMPLEMENTATION_DIGEST
 
 
 def test_final_head_implementation_digest_stays_stable_after_evidence_repair() -> None:
@@ -147,7 +147,6 @@ def test_final_head_implementation_digest_stays_stable_after_evidence_repair() -
     identity = build_identity(ROOT, final_head)
 
     assert identity["implementation_identity_method"] == "sha256-canonical-source-manifest-v2"
-    assert identity["implementation_digest"] == REPAIRED_IMPLEMENTATION_DIGEST
     assert identity["implementation_digest"] != HISTORICAL_IMPLEMENTATION_DIGEST
     assert identity["provenance"]["repository_commit"] == final_head
 

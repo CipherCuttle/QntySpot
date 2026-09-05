@@ -11,6 +11,7 @@ from ..execution_contract import (
     ApprovalActionV0,
     ExecutionEnvelopeV0,
     ExecutionSessionV0,
+    ExternalTransactionReferenceV0,
     SignedTransactionRecordV0,
     SubmissionAttemptV0,
 )
@@ -32,6 +33,7 @@ _COPY_ORDER = (
     "approval_actions",
     "execution_envelopes",
     "external_actions",
+    "external_transaction_refs",
     "signed_transactions",
     "submission_attempts",
     "chain_observations",
@@ -69,6 +71,7 @@ def execution_snapshot(source: SpotLedger) -> dict[str, Any]:
         "execution_envelopes": "envelope_id",
         "approval_actions": "approval_action_id",
         "external_actions": "external_action_id",
+        "external_transaction_refs": "external_transaction_ref_id",
         "signed_transactions": "signed_transaction_id",
         "submission_attempts": "submission_attempt_id",
         "chain_observations": "observation_id",
@@ -98,6 +101,10 @@ def _validated_reverted_bindings(snapshot: Mapping[str, Any]) -> frozenset[str]:
         for row in snapshot["tables"]["signed_transactions"]
         if row["envelope_id"] is not None
     }
+    external_by_action = {
+        row["external_action_id"]: row
+        for row in snapshot["tables"]["external_transaction_refs"]
+    }
     observations = snapshot["tables"]["chain_observations"]
     bindings: set[str] = set()
     for row in snapshot["tables"]["reconciliations"]:
@@ -116,17 +123,28 @@ def _validated_reverted_bindings(snapshot: Mapping[str, Any]) -> frozenset[str]:
         )
         if row["verdict"] == "REVERTED":
             signed = signed_by_action.get(row["external_action_id"])
+            external = external_by_action.get(row["external_action_id"])
+            _require((signed is None) != (external is None),
+                     "reconciliations: reverted row has no unique transaction origin")
+            binding = signed if signed is not None else external
             _require(
-                signed is not None
-                and row["transaction_hash"] == signed["transaction_hash"]
-                and row["chain_id"] == signed["chain_id"]
-                and row["taker_address"] == signed["taker_address"],
-                "reconciliations: reverted row is not bound to signed metadata",
+                row["transaction_hash"] == binding["transaction_hash"]
+                and row["chain_id"] == binding["chain_id"]
+                and row["taker_address"] == binding["taker_address"],
+                "reconciliations: reverted row is not bound to transaction identity",
             )
+            if signed is not None:
+                origin_match = lambda observation: (
+                    observation["signed_transaction_id"] == signed["signed_transaction_id"]
+                )
+            else:
+                origin_match = lambda observation: (
+                    observation["external_transaction_ref_id"] == external["external_transaction_ref_id"]
+                )
             _require(
                 any(
                     observation["external_action_id"] == row["external_action_id"]
-                    and observation["signed_transaction_id"] == signed["signed_transaction_id"]
+                    and origin_match(observation)
                     and observation["presence"] == "INCLUDED"
                     and observation["receipt_status"] == "REVERTED"
                     for observation in observations
@@ -248,6 +266,21 @@ def _validate_identity(table: str, row: Mapping[str, Any]) -> None:
                 economic_action_id=row["economic_action_id"],
             )
             _require(record.approval_action_id == row["approval_action_id"], f"{table}: approval id mismatch")
+        elif table == "external_transaction_refs":
+            record = ExternalTransactionReferenceV0(
+                session_id=row["session_id"],
+                session_identity_digest=row["session_identity_digest"],
+                economic_action_id=row["economic_action_id"],
+                transaction_hash=row["transaction_hash"],
+                chain_id=row["chain_id"],
+                taker_address=row["taker_address"],
+                authority_policy_digest=row["authority_policy_digest"],
+                origin=row["origin"],
+            )
+            _require(
+                record.external_transaction_ref_id == row["external_transaction_ref_id"],
+                f"{table}: external transaction reference id mismatch",
+            )
         elif table == "signed_transactions" and row["envelope_id"] is not None:
             record = SignedTransactionRecordV0(
                 envelope_id=row["envelope_id"],

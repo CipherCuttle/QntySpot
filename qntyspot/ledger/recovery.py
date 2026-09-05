@@ -62,11 +62,21 @@ class RecoveryAction:
 
 def recover(ledger: SpotLedger, *, now_epoch_s: int) -> tuple[RecoveryAction, ...]:
     """Bring every non-terminal intent to a state that is safe to restart from."""
+    has_external_refs = ledger.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = 'external_transaction_refs'"
+    ).fetchone() is not None
+    external_ref_clause = (
+        ", (SELECT COUNT(*) FROM external_transaction_refs r "
+        "WHERE r.economic_action_id = i.economic_action_id) AS external_refs"
+        if has_external_refs
+        else ", 0 AS external_refs"
+    )
     rows = ledger.connection.execute(
         """
         SELECT i.economic_action_id, i.state,
                (SELECT COUNT(*) FROM fill_receipts f
                  WHERE f.economic_action_id = i.economic_action_id) AS receipts
+               """ + external_ref_clause + """
         FROM intents i
         ORDER BY i.economic_action_id ASC
         """
@@ -79,7 +89,18 @@ def recover(ledger: SpotLedger, *, now_epoch_s: int) -> tuple[RecoveryAction, ..
             continue
         receipts = int(row["receipts"])
 
-        if state in PRE_COMMITMENT_STATES:
+        if state is IntentState.RESERVED and int(row["external_refs"]) > 0:
+            action = RecoveryAction(
+                economic_action_id=row["economic_action_id"],
+                from_state=state,
+                to_state=IntentState.SAFE_HALT,
+                disposition=RecoveryDisposition.RECONCILIATION_REQUIRED,
+                reason=(
+                    "a reserved action has an externally created transaction reference; "
+                    "restart must reconcile chain truth and may not release its hold"
+                ),
+            )
+        elif state in PRE_COMMITMENT_STATES:
             action = RecoveryAction(
                 economic_action_id=row["economic_action_id"],
                 from_state=state,

@@ -4,7 +4,8 @@ These are typing protocols that describe where adapters attach. There is no
 default implementation, no registry, and no discovery. Importing this module
 cannot cause a request, a signature, or a key read. The merged V0B Ink and
 current V0C Solana implementations attach only read-only ``QuoteSource``
-adapters.
+adapters; the reconcile-only Robinhood testnet source is an explicitly
+configured injected-transport observation adapter.
 
 THE RULE THESE PROTOCOLS EXIST TO ENCODE
 ----------------------------------------
@@ -39,6 +40,7 @@ from __future__ import annotations
 from typing import Protocol, Sequence, runtime_checkable
 
 from .domain import EconomicBounds, ExecutionPlanV0, FillReceiptV0, QuoteV0
+from .execution_contract import ChainObservationV0
 
 __all__ = [
     "QuoteSource",
@@ -73,9 +75,17 @@ class ExecutionVenueAdapter(Protocol):
 
 @runtime_checkable
 class ChainTruthSource(Protocol):
-    """Reads settled facts from a chain or venue. NOT IMPLEMENTED IN V0A."""
+    """Reads one explicitly scoped chain observation."""
 
-    def settlements(self, external_ref: str) -> Sequence[FillReceiptV0]:
+    def observe(
+        self,
+        transaction_hash: str,
+        *,
+        expected_taker: str,
+        input_token: str,
+        output_token: str,
+        observed_at_epoch_s: int,
+    ) -> ChainObservationV0:
         ...
 
 

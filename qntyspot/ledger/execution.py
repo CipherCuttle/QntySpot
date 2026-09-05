@@ -30,10 +30,13 @@ from ..execution_contract import (
     ChainObservationV0,
     ChainPresence,
     ChainTruthVerdict,
+    Capability,
     EconomicActionIDV0,
     ExecutionEnvelopeV0,
     ExecutionSessionV0,
+    ExternalTransactionReferenceV0,
     FinalityPolicyV0,
+    PHASE_GRANTED_AUTHORITY_LEVEL,
     ROBINHOOD_V0_FINALITY,
     SignedTransactionRecordV0,
     SubmissionAcknowledgment,
@@ -48,12 +51,18 @@ from ..execution_contract import (
     reconcile_to_receipt,
     derive_transaction_hash,
 )
-from ..authority_root import VerifiedAuthorityGrantV0
+from ..authority_root import (
+    VerifiedAuthorityGrantV0,
+    assert_effective_capital_within,
+    require_effective_capability,
+)
 from ..states import EXTERNALLY_AMBIGUOUS_STATES, IntentState
 from .execution_schema import (
     EXECUTION_SCHEMA_VERSION,
+    EXECUTION_TABLES_V1,
     EXECUTION_TABLES,
     apply_execution_schema,
+    migrate_execution_schema_v1_to_v2,
     read_execution_schema_version,
 )
 from .store import SpotLedger
@@ -179,10 +188,13 @@ class ExecutionRuntime:
         if self._conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
             raise LedgerError("execution runtime requires SQLite foreign_keys=ON")
         existing_tables = {
-            table for table in EXECUTION_TABLES if self._table_exists(table)
+            table for table in (*EXECUTION_TABLES_V1, *EXECUTION_TABLES)
+            if self._table_exists(table)
         }
         if not existing_tables:
             apply_execution_schema(self._conn)
+        elif existing_tables == set(EXECUTION_TABLES_V1):
+            migrate_execution_schema_v1_to_v2(self._conn)
         elif existing_tables != set(EXECUTION_TABLES):
             raise LedgerError("execution schema is partially applied")
         if read_execution_schema_version(self._conn) != EXECUTION_SCHEMA_VERSION:
@@ -249,18 +261,50 @@ class ExecutionRuntime:
         )
         return True
 
+    def _authorize(
+        self,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        capability: Capability,
+        *,
+        now_epoch_s: int,
+        safe_halt: bool = False,
+    ) -> AuthorityLevel:
+        level = require_effective_capability(
+            capability=capability,
+            source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+            verified_grant=verified_grant,
+            session=session,
+            now_epoch_s=now_epoch_s,
+            kill_switch=self._kill_engaged(),
+            safe_halt=safe_halt,
+        )
+        row = self._conn.execute(
+            "SELECT identity_digest, authority_level FROM execution_sessions "
+            "WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        if row is not None:
+            if row["identity_digest"] != session.identity_digest:
+                raise AuthorityVerificationError("stored session identity disagrees")
+            if int(row["authority_level"]) != int(level):
+                raise AuthorityVerificationError("stored effective authority disagrees")
+        return level
+
     def create_execution_session(
-        self, session: ExecutionSessionV0, authority: AuthorityPolicyRefV0
+        self,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        *,
+        now_epoch_s: int,
     ) -> bool:
-        if session.authority_policy_digest != authority.authority_policy_digest:
-            raise AuthorityCeilingError("session and authority policy digest disagree")
-        authority.assert_valid_at(session.started_at_epoch_s)
-        if authority.granted_level > AuthorityLevel.SHADOW:
-            raise AuthorityCeilingError("B1 runtime cannot grant authority above SHADOW")
-        if authority.authority_root_id != B1_SHADOW_AUTHORITY_ROOT_ID:
-            raise AuthorityCeilingError(
-                "B1 accepts only the frozen shadow authority-root reference"
-            )
+        level = self._authorize(
+            session,
+            verified_grant,
+            Capability.DECIDE_OFFLINE,
+            now_epoch_s=now_epoch_s,
+        )
+        authority = verified_grant.authority_policy
         policy_row = self._conn.execute(
             "SELECT per_order_cap_atomic, global_cap_atomic FROM policies WHERE policy_id = ?",
             (session.policy_id,),
@@ -275,14 +319,6 @@ class ExecutionRuntime:
             raise AuthorityCeilingError(
                 "authority cumulative ceiling exceeds the persisted policy global cap"
             )
-        if (
-            authority.permitted_repository_commit != session.repository_commit
-            or authority.permitted_implementation_digest != session.implementation_digest
-            or authority.permitted_network_id != session.network_id
-            or authority.permitted_taker_address != session.taker_address
-            or authority.permitted_venue_id != session.venue_id
-        ):
-            raise AuthorityCeilingError("session is outside the supplied authority reference")
         values = {
             "session_id": session.session_id,
             "identity_digest": session.identity_digest,
@@ -291,9 +327,9 @@ class ExecutionRuntime:
             "runtime_identity": session.runtime_identity,
             "db_schema_version": session.db_schema_version,
             "policy_id": session.policy_id,
-            "authority_root_id": authority.authority_root_id,
+            "authority_root_id": verified_grant.root_id,
             "authority_policy_digest": session.authority_policy_digest,
-            "authority_level": int(authority.granted_level),
+            "authority_level": int(level),
             "taker_address": session.taker_address,
             "network_id": session.network_id,
             "venue_id": session.venue_id,
@@ -386,14 +422,52 @@ class ExecutionRuntime:
             )
             return True
 
-    def reserve_action(self, economic_action_id: str, *, now_epoch_s: int) -> bool:
-        with self._transaction("reservation"):
-            self._reject_if_killed("reservations")
+    def reserve_action(
+        self,
+        economic_action_id: str,
+        *,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        now_epoch_s: int,
+    ) -> bool:
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.RESERVE_CAPITAL,
+            now_epoch_s=now_epoch_s,
+        )
+        with self._transaction("reservation") as conn:
             state = self.ledger.intent_state(economic_action_id)
             if state is IntentState.RESERVED:
+                existing = conn.execute(
+                    "SELECT session_id FROM external_actions "
+                    "WHERE external_action_id = ?",
+                    (economic_action_id,),
+                ).fetchone()
+                if existing is not None and existing["session_id"] not in (None, session.session_id):
+                    raise AuthorityVerificationError("reservation is bound to a different session")
                 return False
             if state is not IntentState.SIMULATED:
                 raise LedgerError(f"reservation requires SIMULATED intent, got {state.value}")
+            action_row = self._require_economic_intent(economic_action_id, conn)
+            policy_row = conn.execute(
+                "SELECT per_order_cap_atomic, global_cap_atomic FROM policies "
+                "WHERE policy_id = ?",
+                (action_row["policy_id"],),
+            ).fetchone()
+            if policy_row is None:
+                raise LedgerError("the reservation policy is not admitted in this ledger")
+            assert_effective_capital_within(
+                requested_atomic=int(action_row["quote_exposure_atomic"]),
+                held_atomic=self.ledger.held_atomic(),
+                local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
+                local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
+                verified_grant=verified_grant,
+                now_epoch_s=now_epoch_s,
+            )
+            self._economic_external_action(
+                conn, economic_action_id, session_id=session.session_id
+            )
             self.ledger.transition(
                 economic_action_id, IntentState.RESERVED, now_epoch_s=now_epoch_s
             )
@@ -415,22 +489,95 @@ class ExecutionRuntime:
             raise LedgerError(f"unknown economic action {action_id}")
         return row
 
-    def _economic_external_action(self, conn: sqlite3.Connection, action_id: str) -> None:
+    def _economic_external_action(
+        self,
+        conn: sqlite3.Connection,
+        action_id: str,
+        *,
+        session_id: str | None = None,
+    ) -> None:
         values = {
             "external_action_id": action_id,
             "kind": "ECONOMIC",
             "economic_action_id": action_id,
             "approval_action_id": None,
         }
+        if session_id is not None:
+            values["session_id"] = session_id
         self._insert_or_match(
             conn, "external_actions", "external_action_id", action_id, values
         )
+
+    def record_external_transaction_reference(
+        self,
+        reference: ExternalTransactionReferenceV0,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        *,
+        now_epoch_s: int,
+    ) -> bool:
+        """Record one externally created transaction identity, without bytes."""
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.OBSERVE_CHAIN,
+            now_epoch_s=now_epoch_s,
+            safe_halt=self.ledger.intent_state(reference.economic_action_id)
+            is IntentState.SAFE_HALT,
+        )
+        if reference.session_id != session.session_id:
+            raise AuthorityVerificationError("external transaction reference names another session")
+        if reference.session_identity_digest != session.identity_digest:
+            raise AuthorityVerificationError("external transaction reference session identity disagrees")
+        if reference.authority_policy_digest != session.authority_policy_digest:
+            raise AuthorityVerificationError("external transaction reference authority disagrees")
+        if reference.chain_id != session.chain_id or reference.taker_address != session.taker_address:
+            raise AuthorityVerificationError("external transaction reference session scope disagrees")
+        with self._transaction("external_transaction_reference") as conn:
+            action = self._require_economic_intent(reference.economic_action_id, conn)
+            if IntentState(action["state"]) not in {
+                IntentState.RESERVED,
+                IntentState.INCLUDED,
+                IntentState.CONFIRMED,
+                IntentState.RECONCILED,
+                IntentState.SAFE_HALT,
+            }:
+                raise LedgerError(
+                    "an external transaction reference requires an admitted reservation"
+                )
+            external = conn.execute(
+                "SELECT * FROM external_actions WHERE external_action_id = ?",
+                (reference.economic_action_id,),
+            ).fetchone()
+            if external is None or external["kind"] != "ECONOMIC":
+                raise LedgerError("external transaction reference requires an economic action")
+            if external["session_id"] not in (None, session.session_id):
+                raise AuthorityVerificationError("economic action is bound to another session")
+            values = {
+                "external_transaction_ref_id": reference.external_transaction_ref_id,
+                "external_action_id": reference.economic_action_id,
+                "session_id": reference.session_id,
+                "session_identity_digest": reference.session_identity_digest,
+                "economic_action_id": reference.economic_action_id,
+                "transaction_hash": reference.transaction_hash,
+                "chain_id": reference.chain_id,
+                "taker_address": reference.taker_address,
+                "authority_policy_digest": reference.authority_policy_digest,
+                "origin": reference.origin,
+            }
+            return self._insert_or_match(
+                conn,
+                "external_transaction_refs",
+                "external_transaction_ref_id",
+                reference.external_transaction_ref_id,
+                values,
+            )
 
     def record_execution_envelope(
         self,
         envelope: ExecutionEnvelopeV0,
         session: ExecutionSessionV0,
-        authority: AuthorityPolicyRefV0,
+        verified_grant: VerifiedAuthorityGrantV0,
         bounds: EconomicBounds,
         expectation: ZeroXExecutionExpectationV0,
         venue_response: VenueQuoteResponseV0,
@@ -440,6 +587,12 @@ class ExecutionRuntime:
         now_epoch_s: int,
         lifecycle: str = "AUTHORIZED",
     ) -> bool:
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.CONSTRUCT_ENVELOPE,
+            now_epoch_s=now_epoch_s,
+        )
         if lifecycle not in {"DRAFT", "AUTHORIZED", "SUPERSEDED", "VOID"}:
             raise EnvelopeValidationError(f"unknown envelope lifecycle {lifecycle!r}")
         values = {
@@ -505,7 +658,7 @@ class ExecutionRuntime:
             assert_envelope_admissible(
                 envelope,
                 session,
-                authority,
+                verified_grant.authority_policy,
                 bounds,
                 economic_action_id=envelope.economic_action_id,
                 expectation=expectation,
@@ -526,19 +679,25 @@ class ExecutionRuntime:
         self,
         approval: ApprovalActionV0,
         session: ExecutionSessionV0,
-        authority: AuthorityPolicyRefV0,
+        verified_grant: VerifiedAuthorityGrantV0,
         expectation: ZeroXExecutionExpectationV0,
         venue_response: VenueQuoteResponseV0,
         *,
         now_epoch_s: int,
         lifecycle: str = "AUTHORIZED",
     ) -> bool:
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.AUTHORIZE_APPROVAL,
+            now_epoch_s=now_epoch_s,
+        )
         if lifecycle not in {"DRAFT", "AUTHORIZED", "SUPERSEDED", "VOID", "SETTLED"}:
             raise LedgerError(f"unknown approval lifecycle {lifecycle!r}")
         assert_approval_admissible(
             approval,
             session,
-            authority,
+            verified_grant.authority_policy,
             expectation,
             venue_response,
             now_epoch_s=now_epoch_s,
@@ -601,6 +760,12 @@ class ExecutionRuntime:
         *,
         frozen_at_epoch_s: int,
     ) -> bool:
+        raise AuthorityCeilingError(
+            "signed transaction metadata is unavailable at the RECONCILE_ONLY source ceiling"
+        )
+        # The historical implementation below is intentionally unreachable;
+        # old rows remain readable and replayable, but this phase cannot create
+        # new signed-transaction facts.
         if sha256_hex(raw_signed_transaction) != record.raw_signed_sha256:
             raise EnvelopeValidationError("signed metadata digest does not match supplied bytes")
         if len(raw_signed_transaction) != record.raw_signed_length:
@@ -659,6 +824,9 @@ class ExecutionRuntime:
             return inserted
 
     def record_submission_attempt(self, attempt: SubmissionAttemptV0) -> bool:
+        raise AuthorityCeilingError(
+            "submission metadata is unavailable at the RECONCILE_ONLY source ceiling"
+        )
         with self._transaction("submission_attempt") as conn:
             self._reject_if_killed("submission attempts")
             signed = conn.execute(
@@ -710,12 +878,17 @@ class ExecutionRuntime:
 
     @staticmethod
     def _observation_values(
-        observation: ChainObservationV0, action_id: str, signed_id: str
+        observation: ChainObservationV0,
+        action_id: str,
+        *,
+        signed_id: str | None,
+        external_ref_id: str | None,
     ) -> dict[str, Any]:
         return {
             "observation_id": observation.observation_id,
             "external_action_id": action_id,
             "signed_transaction_id": signed_id,
+            "external_transaction_ref_id": external_ref_id,
             "provider_id": observation.provider_id,
             "transaction_hash": observation.transaction_hash,
             "observed_at_epoch_s": observation.observed_at_epoch_s,
@@ -767,78 +940,138 @@ class ExecutionRuntime:
         self,
         conn: sqlite3.Connection,
         action_id: str,
-        signed_id: str,
+        *,
+        signed_id: str | None,
+        external_ref_id: str | None,
         finality: FinalityPolicyV0,
-    ) -> tuple[Any, Mapping[str, Any], Mapping[str, Any]]:
-        signed = conn.execute(
-            "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?", (signed_id,)
-        ).fetchone()
-        if signed is None or signed["external_action_id"] != action_id:
-            raise LedgerError("signed transaction is not bound to the external action")
-        envelope = conn.execute(
-            "SELECT * FROM execution_envelopes WHERE envelope_id = ?", (signed["envelope_id"],)
-        ).fetchone()
-        if envelope is None:
-            raise LedgerError("economic signed transaction has no envelope")
-        acknowledged = conn.execute(
-            """SELECT 1 FROM submission_attempts
-               WHERE signed_transaction_id = ? AND acknowledgment = 'ACCEPTED' LIMIT 1""",
-            (signed_id,),
-        ).fetchone() is not None
+    ) -> tuple[Any, Mapping[str, Any], Mapping[str, Any] | None, Any]:
+        if (signed_id is None) == (external_ref_id is None):
+            raise LedgerError("exactly one transaction origin is required")
+        envelope: Mapping[str, Any] | None = None
+        if signed_id is not None:
+            binding = conn.execute(
+                "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
+                (signed_id,),
+            ).fetchone()
+            if binding is None or binding["external_action_id"] != action_id:
+                raise LedgerError("signed transaction is not bound to the external action")
+            envelope = conn.execute(
+                "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
+                (binding["envelope_id"],),
+            ).fetchone()
+            if envelope is None:
+                raise LedgerError("economic signed transaction has no envelope")
+            acknowledged = conn.execute(
+                """SELECT 1 FROM submission_attempts
+                   WHERE signed_transaction_id = ? AND acknowledgment = 'ACCEPTED' LIMIT 1""",
+                (signed_id,),
+            ).fetchone() is not None
+            observation_filter = "signed_transaction_id = ?"
+            filter_value = signed_id
+        else:
+            binding = conn.execute(
+                "SELECT * FROM external_transaction_refs "
+                "WHERE external_transaction_ref_id = ?",
+                (external_ref_id,),
+            ).fetchone()
+            if binding is None or binding["external_action_id"] != action_id:
+                raise LedgerError("external transaction reference is not bound to the action")
+            acknowledged = False
+            observation_filter = "external_transaction_ref_id = ?"
+            filter_value = external_ref_id
         expectation = __import__(
             "qntyspot.execution_contract", fromlist=["SettlementExpectationV0"]
         ).SettlementExpectationV0(
             economic_action_id=EconomicActionIDV0(action_id),
-            transaction_hash=signed["transaction_hash"],
-            chain_id=signed["chain_id"],
-            taker_address=signed["taker_address"],
+            transaction_hash=binding["transaction_hash"],
+            chain_id=binding["chain_id"],
+            taker_address=binding["taker_address"],
             submission_acknowledged=acknowledged,
         )
         rows = conn.execute(
             "SELECT * FROM chain_observations "
-            "WHERE external_action_id = ? AND signed_transaction_id = ? "
+            "WHERE external_action_id = ? AND " + observation_filter + " "
             "ORDER BY observed_at_epoch_s ASC, observation_id ASC",
-            (action_id, signed_id),
+            (action_id, filter_value),
         ).fetchall()
         truth = evaluate_chain_truth(
             expectation,
             tuple(self._observation_from_row(row) for row in rows),
             finality,
         )
-        return truth, signed, envelope
+        return truth, binding, envelope, expectation
 
     def record_chain_observation(
         self,
         observation: ChainObservationV0,
         *,
         external_action_id: str,
-        signed_transaction_id: str,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        now_epoch_s: int,
+        signed_transaction_id: str | None = None,
+        external_transaction_ref_id: str | None = None,
         finality: FinalityPolicyV0 = ROBINHOOD_V0_FINALITY,
     ) -> bool:
+        if (signed_transaction_id is None) == (external_transaction_ref_id is None):
+            raise LedgerError("exactly one transaction origin is required")
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.OBSERVE_CHAIN,
+            now_epoch_s=now_epoch_s,
+            safe_halt=self.ledger.intent_state(external_action_id) is IntentState.SAFE_HALT,
+        )
         with self._transaction("chain_observation") as conn:
-            signed = conn.execute(
-                "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
-                (signed_transaction_id,),
-            ).fetchone()
-            if signed is None:
-                raise LedgerError(f"unknown signed transaction {signed_transaction_id}")
-            if signed["external_action_id"] != external_action_id:
-                raise ChainTruthError("observation external action disagrees with signed metadata")
-            if observation.transaction_hash != signed["transaction_hash"]:
-                raise ChainTruthError("observation hash disagrees with signed metadata")
+            if signed_transaction_id is not None:
+                binding = conn.execute(
+                    "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
+                    (signed_transaction_id,),
+                ).fetchone()
+                if binding is None:
+                    raise LedgerError(f"unknown signed transaction {signed_transaction_id}")
+                if binding["external_action_id"] != external_action_id:
+                    raise ChainTruthError("observation action disagrees with signed metadata")
+                if binding["session_id"] != session.session_id:
+                    raise AuthorityVerificationError("observation session disagrees with signed metadata")
+            else:
+                binding = conn.execute(
+                    "SELECT * FROM external_transaction_refs "
+                    "WHERE external_transaction_ref_id = ?",
+                    (external_transaction_ref_id,),
+                ).fetchone()
+                if binding is None:
+                    raise LedgerError(
+                        f"unknown external transaction reference {external_transaction_ref_id}"
+                    )
+                if binding["external_action_id"] != external_action_id:
+                    raise ChainTruthError("observation action disagrees with external reference")
+                if binding["session_id"] != session.session_id:
+                    raise AuthorityVerificationError("observation session disagrees with external reference")
+            if observation.transaction_hash != binding["transaction_hash"]:
+                raise ChainTruthError("observation hash disagrees with transaction identity")
             inserted = self._insert_or_match(
                 conn,
                 "chain_observations",
                 "observation_id",
                 observation.observation_id,
-                self._observation_values(observation, external_action_id, signed_transaction_id),
+                self._observation_values(
+                    observation,
+                    external_action_id,
+                    signed_id=signed_transaction_id,
+                    external_ref_id=external_transaction_ref_id,
+                ),
             )
-            if external_action_id == signed["external_action_id"] and conn.execute(
+            if conn.execute(
                 "SELECT kind FROM external_actions WHERE external_action_id = ?",
                 (external_action_id,),
             ).fetchone()[0] == "ECONOMIC":
-                truth, _signed, _envelope = self._truth_for_action(
-                    conn, external_action_id, signed_transaction_id, finality
+                truth, _binding, _envelope, _expectation = self._truth_for_action(
+                    conn,
+                    external_action_id,
+                    signed_id=signed_transaction_id,
+                    external_ref_id=external_transaction_ref_id,
+                    finality=finality,
                 )
                 state = self.ledger.intent_state(external_action_id)
                 if truth.verdict is ChainTruthVerdict.AMBIGUOUS:
@@ -860,6 +1093,7 @@ class ExecutionRuntime:
                         if truth.verdict is ChainTruthVerdict.CONFIRMED
                         else IntentState.INCLUDED,
                         now_epoch_s=observation.observed_at_epoch_s,
+                        external_reference=external_transaction_ref_id is not None,
                     )
             return inserted
 
@@ -870,16 +1104,15 @@ class ExecutionRuntime:
         target: IntentState,
         *,
         now_epoch_s: int,
+        external_reference: bool = False,
     ) -> None:
-        path = {
-            IntentState.SIGNED: (IntentState.SUBMITTED, IntentState.INCLUDED),
-            IntentState.SUBMITTED: (IntentState.INCLUDED,),
-            IntentState.INCLUDED: (),
-            IntentState.CONFIRMED: (),
-        }
         if target is IntentState.CONFIRMED:
             self._advance_to_chain_state(
-                action_id, state, IntentState.INCLUDED, now_epoch_s=now_epoch_s
+                action_id,
+                state,
+                IntentState.INCLUDED,
+                now_epoch_s=now_epoch_s,
+                external_reference=external_reference,
             )
             state = self.ledger.intent_state(action_id)
             if state is IntentState.INCLUDED:
@@ -896,6 +1129,14 @@ class ExecutionRuntime:
                 payload={"execution": "included_chain_observation"},
             )
             state = IntentState.SUBMITTED
+        elif external_reference and state is IntentState.RESERVED:
+            self.ledger.transition(
+                action_id,
+                IntentState.INCLUDED,
+                now_epoch_s=now_epoch_s,
+                payload={"execution": "included_external_transaction_observation"},
+            )
+            return
         if state is IntentState.SUBMITTED:
             self.ledger.transition(
                 action_id, IntentState.INCLUDED, now_epoch_s=now_epoch_s,
@@ -922,6 +1163,8 @@ class ExecutionRuntime:
         self,
         economic_action_id: str,
         *,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
         now_epoch_s: int,
         finality: FinalityPolicyV0 = ROBINHOOD_V0_FINALITY,
         bounds: EconomicBounds | None = None,
@@ -930,6 +1173,13 @@ class ExecutionRuntime:
         source: str = "external-chain-observation",
         observed_at_epoch_s: int | None = None,
     ) -> Any:
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.RECONCILE,
+            now_epoch_s=now_epoch_s,
+            safe_halt=self.ledger.intent_state(economic_action_id) is IntentState.SAFE_HALT,
+        )
         with self._transaction("reconciliation") as conn:
             external = conn.execute(
                 "SELECT kind FROM external_actions WHERE external_action_id = ?",
@@ -945,13 +1195,35 @@ class ExecutionRuntime:
                 )
             bounds = persisted_bounds
             signed = conn.execute(
-                "SELECT signed_transaction_id FROM signed_transactions "
+                "SELECT signed_transaction_id, session_id FROM signed_transactions "
                 "WHERE external_action_id = ?", (economic_action_id,)
             ).fetchone()
-            if signed is None:
-                raise LedgerError("economic action has no signed transaction metadata")
-            truth, signed_row, _envelope = self._truth_for_action(
-                conn, economic_action_id, signed["signed_transaction_id"], finality
+            external_ref = conn.execute(
+                "SELECT external_transaction_ref_id, session_id, session_identity_digest, "
+                "authority_policy_digest, chain_id, taker_address "
+                "FROM external_transaction_refs "
+                "WHERE external_action_id = ?", (economic_action_id,)
+            ).fetchone()
+            if (signed is None) == (external_ref is None):
+                raise LedgerError("economic action must have exactly one transaction origin")
+            signed_id = None if signed is None else signed["signed_transaction_id"]
+            external_ref_id = None if external_ref is None else external_ref["external_transaction_ref_id"]
+            binding_row = signed if signed is not None else external_ref
+            if binding_row["session_id"] != session.session_id:
+                raise AuthorityVerificationError("reconciliation session disagrees with transaction origin")
+            if external_ref is not None and (
+                external_ref["session_identity_digest"] != session.identity_digest
+                or external_ref["authority_policy_digest"] != session.authority_policy_digest
+                or external_ref["chain_id"] != session.chain_id
+                or external_ref["taker_address"] != session.taker_address
+            ):
+                raise AuthorityVerificationError("reconciliation external reference scope disagrees")
+            truth, binding, _envelope, expectation = self._truth_for_action(
+                conn,
+                economic_action_id,
+                signed_id=signed_id,
+                external_ref_id=external_ref_id,
+                finality=finality,
             )
             existing = conn.execute(
                 "SELECT * FROM reconciliations WHERE external_action_id = ?",
@@ -995,7 +1267,9 @@ class ExecutionRuntime:
                 self._insert_reconciliation(
                     conn, economic_action_id, truth, now_epoch_s, receipt_id=None,
                 )
-                if state in EXTERNALLY_AMBIGUOUS_STATES:
+                if state in EXTERNALLY_AMBIGUOUS_STATES or (
+                    external_ref_id is not None and state is IntentState.RESERVED
+                ):
                     self.ledger.transition(
                         economic_action_id, IntentState.REJECTED,
                         now_epoch_s=now_epoch_s,
@@ -1007,20 +1281,12 @@ class ExecutionRuntime:
                 raise LedgerError("a confirmed economic action requires a receipt id")
             validated_action = _validated_economic_action_from_database(
                 EconomicActionIDV0(economic_action_id),
-                signed_row["transaction_hash"],
-                signed_row["chain_id"],
-                signed_row["taker_address"],
+                binding["transaction_hash"],
+                binding["chain_id"],
+                binding["taker_address"],
             )
             receipt = reconcile_to_receipt(
-                __import__(
-                    "qntyspot.execution_contract", fromlist=["SettlementExpectationV0"]
-                ).SettlementExpectationV0(
-                    economic_action_id=EconomicActionIDV0(economic_action_id),
-                    transaction_hash=signed_row["transaction_hash"],
-                    chain_id=signed_row["chain_id"],
-                    taker_address=signed_row["taker_address"],
-                    submission_acknowledged=True,
-                ),
+                expectation,
                 truth,
                 bounds,
                 validated_action=validated_action,
@@ -1029,7 +1295,13 @@ class ExecutionRuntime:
                 observed_at_epoch_s=now_epoch_s if observed_at_epoch_s is None else observed_at_epoch_s,
                 source=source,
             )
-            if state not in {IntentState.CONFIRMED, IntentState.INCLUDED, IntentState.SUBMITTED, IntentState.SIGNED}:
+            if state not in {
+                IntentState.RESERVED,
+                IntentState.CONFIRMED,
+                IntentState.INCLUDED,
+                IntentState.SUBMITTED,
+                IntentState.SIGNED,
+            }:
                 raise SafeHaltError(f"confirmed settlement cannot be accounted from {state.value}")
             self.ledger.append_execution_fill_receipt(
                 receipt,
@@ -1041,7 +1313,9 @@ class ExecutionRuntime:
             )
             self._advance_to_chain_state(
                 economic_action_id, self.ledger.intent_state(economic_action_id),
-                IntentState.CONFIRMED, now_epoch_s=now_epoch_s,
+                IntentState.CONFIRMED,
+                now_epoch_s=now_epoch_s,
+                external_reference=external_ref_id is not None,
             )
             if self.ledger.intent_state(economic_action_id) is IntentState.CONFIRMED:
                 self.ledger.transition(
@@ -1139,6 +1413,7 @@ class ExecutionRuntime:
             "execution_envelopes": "envelope_id",
             "approval_actions": "approval_action_id",
             "external_actions": "external_action_id",
+            "external_transaction_refs": "external_transaction_ref_id",
             "signed_transactions": "signed_transaction_id",
             "submission_attempts": "submission_attempt_id",
             "chain_observations": "observation_id",

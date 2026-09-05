@@ -701,7 +701,7 @@ def test_chain_observation_must_match_signed_action(signed) -> None:
         economic_action_id=None,
         approval_action_id="20" * 32,
     )
-    with pytest.raises(sqlite3.IntegrityError, match="bound to the signed transaction action"):
+    with pytest.raises(sqlite3.IntegrityError, match="bound to one transaction origin"):
         insert(
             conn,
             "chain_observations",

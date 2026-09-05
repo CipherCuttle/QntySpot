@@ -49,6 +49,7 @@ SOURCE_PATHS = (
     "qntyspot/raw_evidence.py",
     "qntyspot/redaction.py",
     "qntyspot/robinhood.py",
+    "qntyspot/robinhood_chain_truth.py",
     "qntyspot/solana.py",
     "qntyspot/states.py",
     "qntyspot/status.py",

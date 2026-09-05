@@ -91,7 +91,10 @@ TRANSITIONS: Mapping[IntentState, frozenset[IntentState]] = MappingProxyType(
         S.TRIGGERED: frozenset({S.QUOTE_PINNED, *_ABANDON, S.REJECTED, S.SAFE_HALT}),
         S.QUOTE_PINNED: frozenset({S.SIMULATED, *_ABANDON, S.REJECTED, S.SAFE_HALT}),
         S.SIMULATED: frozenset({S.RESERVED, *_ABANDON, S.REJECTED, S.SAFE_HALT}),
-        S.RESERVED: frozenset({S.SIGNED, *_ABANDON, S.REJECTED, S.SAFE_HALT}),
+        # An externally created transaction may already be included when the
+        # local reference is first admitted. This transition records chain
+        # truth without asserting that QntySpot signed or submitted it.
+        S.RESERVED: frozenset({S.SIGNED, S.INCLUDED, *_ABANDON, S.REJECTED, S.SAFE_HALT}),
         # From here on the action may already exist outside this process.
         S.SIGNED: frozenset({S.SUBMITTED, S.REJECTED, S.SAFE_HALT}),
         S.SUBMITTED: frozenset({S.INCLUDED, S.REJECTED, S.SAFE_HALT}),

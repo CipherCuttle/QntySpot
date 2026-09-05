@@ -11,7 +11,9 @@ from .execution_schema import (
     EXECUTION_SCHEMA_SQL,
     EXECUTION_SCHEMA_VERSION,
     EXECUTION_TABLES,
+    EXECUTION_TABLES_V1,
     apply_execution_schema,
+    migrate_execution_schema_v1_to_v2,
     read_execution_schema_version,
 )
 from .store import SpotLedger, open_ledger
@@ -37,7 +39,9 @@ __all__ = [
     "EXECUTION_SCHEMA_SQL",
     "EXECUTION_SCHEMA_VERSION",
     "EXECUTION_TABLES",
+    "EXECUTION_TABLES_V1",
     "apply_execution_schema",
+    "migrate_execution_schema_v1_to_v2",
     "read_execution_schema_version",
     "EventType",
     "apply_schema",

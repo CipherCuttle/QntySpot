@@ -1,6 +1,6 @@
-"""QntySpot -- deterministic policy-bound spot shadow runtime.
+"""QntySpot -- deterministic policy-bound spot runtime.
 
-PHASE: PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION -- ROBINHOOD_SHADOW_READ_ONLY
+PHASE: RECONCILE-ONLY SOURCE CEILING IMPLEMENTATION -- READ ONLY
 --------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
 one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no
@@ -11,9 +11,9 @@ no live-capital authority from any other repository.
 pre-live execution contract. ``ledger.execution`` is the offline B1 runtime;
 ``authority_root`` is the external-root contract consumer. Together they
 provide immutable records, deterministic validators, and a SQLite authority
-surface with no network, signer, or capital capability. They authorize
-nothing above ``AuthorityLevel.SHADOW`` and the capability gate refuses
-everything above it.
+surface with no network, signer, or capital capability. They authorize no
+runtime Level-1 behavior without a current external grant, and the runtime
+denies every capability above Level 1.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger
@@ -29,9 +29,9 @@ from __future__ import annotations
 
 __version__ = "0.0.1a0"
 
-#: Machine-readable phase marker. Anything that reads this and proceeds to a
-#: network or signing operation is violating the phase contract.
-AUTHORITY = "ROBINHOOD_SHADOW_READ_ONLY"
+#: Machine-readable phase marker. The source ceiling is reconcile-only, but a
+#: current independently verified external grant remains required at runtime.
+AUTHORITY = "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
 NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False
@@ -125,6 +125,7 @@ from .execution_contract import (  # noqa: E402
     ExecutionEnvelopeV0,
     ExecutionReadiness,
     ExecutionSessionV0,
+    ExternalTransactionReferenceV0,
     FinalityPolicyV0,
     SignedTransactionRecordV0,
     SubmissionAttemptV0,
@@ -234,6 +235,7 @@ __all__ = [
     "Capability",
     "AuthorityPolicyRefV0",
     "ExecutionSessionV0",
+    "ExternalTransactionReferenceV0",
     "ExecutionEnvelopeV0",
     "ApprovalActionV0",
     "SignedTransactionRecordV0",
