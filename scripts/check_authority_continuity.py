@@ -302,11 +302,14 @@ def _program_b_report() -> dict[str, Any]:
         Capability,
         require_capability,
     )
-    from qntyspot.errors import AuthorityCeilingError
+    from qntyspot.errors import AuthorityCeilingError, AuthorityVerificationError
     from qntyspot.ledger.execution_schema import EXECUTION_SCHEMA_VERSION, EXECUTION_TABLES
 
-    if PHASE_GRANTED_AUTHORITY_LEVEL is not AuthorityLevel.SHADOW:
-        raise SystemExit("authority continuity failed: Program B phase ceiling moved")
+    if PHASE_GRANTED_AUTHORITY_LEVEL not in {
+        AuthorityLevel.SHADOW,
+        AuthorityLevel.RECONCILE_ONLY,
+    }:
+        raise SystemExit("authority continuity failed: unsupported source phase ceiling")
     ordered = sorted(AuthorityLevel)
     if any(LADDER[lower] >= LADDER[higher] for lower, higher in zip(ordered, ordered[1:])):
         raise SystemExit("authority continuity failed: authority ladder is not monotone")
@@ -317,14 +320,28 @@ def _program_b_report() -> dict[str, Any]:
         Capability.PRODUCE_SIGNATURE,
         Capability.SUBMIT_EXACT_BYTES,
     )
-    for capability in escalating:
-        for level in AuthorityLevel:
+    if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SHADOW:
+        for capability in escalating:
+            for level in AuthorityLevel:
+                try:
+                    require_capability(capability, level)
+                except AuthorityCeilingError:
+                    continue
+                raise SystemExit(
+                    f"authority continuity failed: {capability.value} reachable at {level.name}"
+                )
+    else:
+        for capability in Capability:
             try:
-                require_capability(capability, level)
-            except AuthorityCeilingError:
+                require_capability(capability, AuthorityLevel.RECONCILE_ONLY)
+            except AuthorityVerificationError:
                 continue
+            except AuthorityCeilingError:
+                raise SystemExit(
+                    f"authority continuity failed: {capability.value} bypassed external grant gate"
+                )
             raise SystemExit(
-                f"authority continuity failed: {capability.value} reachable at {level.name}"
+                f"authority continuity failed: {capability.value} reachable without external grant"
             )
         if capability in KILL_SWITCH_PRESERVED_CAPABILITIES:
             raise SystemExit(
@@ -401,10 +418,16 @@ def _workflow_report() -> dict[str, Any]:
 
 
 def build_report() -> dict[str, Any]:
+    from qntyspot.execution_contract import PHASE_GRANTED_AUTHORITY_LEVEL, AuthorityLevel
+
     static = _static_authority_report()
     report = {
         "authority": {
-            "authority": "ROBINHOOD_SHADOW_READ_ONLY",
+            "authority": (
+                "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
+                if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+                else "ROBINHOOD_SHADOW_READ_ONLY"
+            ),
             "live_capital_authorized": False,
             "network_authorized": True,
             "signing_authorized": False,
