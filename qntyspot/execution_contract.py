@@ -15,10 +15,11 @@ broadcast surface, and no daemon here. Nothing in this module performs I/O,
 reads the environment, reads a clock, or reaches a network. Every temporal
 input is an explicit argument.
 
-The phase ceiling is ``PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.SHADOW``.
-``require_capability`` refuses every capability above that ceiling regardless of
-what any authority document claims, so this module cannot be used to authorize
-signing, approval, submission, or capital deployment.
+The source ceiling is ``PHASE_GRANTED_AUTHORITY_LEVEL =
+AuthorityLevel.RECONCILE_ONLY``. Runtime Level-1 behavior additionally requires
+the independently rooted consumer gate in ``qntyspot.authority_root``; this
+module cannot be used to authorize signing, approval, submission, or capital
+deployment.
 
 NAMING NOTE
 -----------
@@ -78,6 +79,7 @@ from .domain import EconomicBounds, FillReceiptV0
 from .errors import (
     ApprovalContractError,
     AuthorityCeilingError,
+    AuthorityVerificationError,
     ChainTruthError,
     EnvelopeValidationError,
     SafeHaltError,
@@ -98,6 +100,8 @@ __all__ = [
     "assert_phase_ceiling",
     "AuthorityPolicyRefV0",
     "ExecutionSessionV0",
+    "ExternalTransactionReferenceV0",
+    "EXTERNAL_TRANSACTION_ORIGIN",
     "ExecutionEnvelopeV0",
     "ApprovalActionV0",
     "SignedTransactionRecordV0",
@@ -344,9 +348,10 @@ KILL_SWITCH_PRESERVED_CAPABILITIES: frozenset[Capability] = frozenset(
     }
 )
 
-#: The ceiling this phase grants at runtime. Program B is a contract freeze; it
-#: grants none of levels 1 through 4.
-PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.SHADOW
+#: The reviewed source ceiling for the reconcile-only implementation phase.
+#: This is only one half of authority; runtime actions also require a current,
+#: independently verified external grant.
+PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.RECONCILE_ONLY
 
 assert set(LADDER) == set(AuthorityLevel), "the ladder must cover every level"
 assert all(
@@ -356,16 +361,40 @@ assert all(
 
 
 def granted_capabilities(
-    level: AuthorityLevel, *, kill_switch_engaged: bool = False, safe_halted: bool = False
+    level: AuthorityLevel,
+    *,
+    kill_switch_engaged: bool = False,
+    safe_halted: bool = False,
+    verified_grant: Any | None = None,
+    session: ExecutionSessionV0 | None = None,
+    now_epoch_s: int | None = None,
 ) -> frozenset[Capability]:
     """What this phase actually permits under the current halt state.
 
     ``LADDER`` is the design-time description of future levels. This public
     helper is an authorization result, so it applies the phase ceiling too.
+    Level 1 and above additionally require the independently verified grant
+    and exact session binding; callers that only need the design-time ladder
+    must read ``LADDER`` directly.
     """
     if not isinstance(level, AuthorityLevel):
         raise AuthorityCeilingError(f"unknown authority level {level!r}")
     assert_phase_ceiling(level)
+    if level >= AuthorityLevel.RECONCILE_ONLY:
+        if verified_grant is None or session is None or now_epoch_s is None:
+            raise AuthorityVerificationError(
+                "Level-1 capability queries require a verified external grant, "
+                "exact session, and explicit time"
+            )
+        from .authority_root import effective_capabilities
+
+        return effective_capabilities(
+            source_phase_ceiling=level,
+            verified_grant=verified_grant,
+            now_epoch_s=now_epoch_s,
+            kill_switch=kill_switch_engaged,
+            safe_halt=safe_halted,
+        )
     capabilities = LADDER[level]
     if kill_switch_engaged or safe_halted:
         capabilities = capabilities & KILL_SWITCH_PRESERVED_CAPABILITIES
@@ -380,7 +409,7 @@ def assert_phase_ceiling(level: AuthorityLevel) -> None:
         raise AuthorityCeilingError(
             f"{level.name} exceeds the granted phase ceiling "
             f"{PHASE_GRANTED_AUTHORITY_LEVEL.name}; "
-            f"{CONTRACT_VERSION} grants no runtime authority above SHADOW"
+            f"{CONTRACT_VERSION} grants no runtime authority above RECONCILE_ONLY"
         )
 
 
@@ -390,16 +419,38 @@ def require_capability(
     *,
     kill_switch_engaged: bool = False,
     safe_halted: bool = False,
+    verified_grant: Any | None = None,
+    session: ExecutionSessionV0 | None = None,
+    now_epoch_s: int | None = None,
 ) -> None:
-    """The single gate. It applies the phase ceiling before anything else.
+    """The compatibility gate, with external authority required at Level 1.
 
-    A caller cannot reach a signing, approval, or submission capability in this
-    phase by supplying a higher ``level``: the phase ceiling is checked first
-    and it is a constant in this source tree, not an input.
+    A caller cannot reach any Level-1 behavior by supplying only a ``level``:
+    the phase ceiling is checked first and Level 1 delegates to the
+    independently rooted consumer gate. Runtime entrypoints should call
+    ``require_effective_capability`` directly.
     """
     if not isinstance(capability, Capability):
         raise AuthorityCeilingError(f"unknown capability {capability!r}")
     assert_phase_ceiling(level)
+    if level >= AuthorityLevel.RECONCILE_ONLY:
+        if verified_grant is None or session is None or now_epoch_s is None:
+            raise AuthorityVerificationError(
+                "Level-1 capability checks require a verified external grant, "
+                "exact session, and explicit time"
+            )
+        from .authority_root import require_effective_capability
+
+        require_effective_capability(
+            capability=capability,
+            source_phase_ceiling=level,
+            verified_grant=verified_grant,
+            session=session,
+            now_epoch_s=now_epoch_s,
+            kill_switch=kill_switch_engaged,
+            safe_halt=safe_halted,
+        )
+        return
     permitted = granted_capabilities(
         level, kill_switch_engaged=kill_switch_engaged, safe_halted=safe_halted
     )
@@ -622,6 +673,59 @@ class ExecutionSessionV0:
                 f"network_id {self.network_id!r} is not an EVM network scope"
             )
         return int(match.group(1))
+
+
+EXTERNAL_TRANSACTION_ORIGIN = "EXTERNAL_TO_QNTYSPOT"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalTransactionReferenceV0:
+    """A reference to a transaction created outside QntySpot.
+
+    This record carries only the stable identity required to reconcile chain
+    truth to one existing economic action. It intentionally has no payload,
+    signature, credential, construction, or approval material.
+    """
+
+    session_id: str
+    session_identity_digest: str
+    economic_action_id: str
+    transaction_hash: str
+    chain_id: int
+    taker_address: str
+    authority_policy_digest: str
+    origin: str = EXTERNAL_TRANSACTION_ORIGIN
+    schema: str = CONTRACT_SCHEMA + ".external_transaction_reference"
+
+    def __post_init__(self) -> None:
+        _digest(self.session_id, field="session_id", error=ChainTruthError)
+        _digest(self.session_identity_digest, field="session_identity_digest", error=ChainTruthError)
+        _digest(self.economic_action_id, field="economic_action_id", error=ChainTruthError)
+        _text(self.transaction_hash, field="transaction_hash", pattern=_TX_HASH_RE, error=ChainTruthError)
+        _positive_int(self.chain_id, field="chain_id", error=ChainTruthError)
+        _address(self.taker_address, field="taker_address", error=ChainTruthError)
+        _digest(self.authority_policy_digest, field="authority_policy_digest", error=ChainTruthError)
+        if self.origin != EXTERNAL_TRANSACTION_ORIGIN:
+            raise ChainTruthError("external transaction origin is fixed to EXTERNAL_TO_QNTYSPOT")
+        if self.schema != CONTRACT_SCHEMA + ".external_transaction_reference":
+            raise ChainTruthError("unknown external transaction reference schema")
+
+    def canonical_object(self) -> dict[str, Any]:
+        return {
+            "authority_policy_digest": self.authority_policy_digest,
+            "chain_id": self.chain_id,
+            "economic_action_id": self.economic_action_id,
+            "origin": self.origin,
+            "schema": self.schema,
+            "session_id": self.session_id,
+            "session_identity_digest": self.session_identity_digest,
+            "taker_address": self.taker_address,
+            "transaction_hash": self.transaction_hash,
+        }
+
+    @property
+    def external_transaction_ref_id(self) -> str:
+        return digest_object(self.canonical_object())
 
 
 def _assert_authority_session_binding(

@@ -27,7 +27,7 @@ def design() -> dict[str, object]:
 def test_current_source_ceiling_and_design_target_are_distinct() -> None:
     document = design()
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SHADOW
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
     assert document["input_qntyspot"]["current_source_phase_ceiling"] == "SHADOW"
     assert document["source_ceiling_design"]["target"] == "RECONCILE_ONLY"
     assert document["source_ceiling_design"]["runtime_change_in_this_phase"] == "NO"
@@ -37,9 +37,9 @@ def test_current_source_ceiling_and_design_target_are_distinct() -> None:
     assert document["network_and_qualification"]["target"] == "ROBINHOOD_TESTNET_RECONCILE_ONLY"
 
 
-def test_design_does_not_change_current_runtime_authority() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SHADOW
-    assert "RECONCILE_ONLY" not in {cap.name for cap in Capability if cap in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]}
+def test_implementation_source_now_matches_the_frozen_design_target() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert "RECONCILE_ONLY" not in {cap.name for cap in Capability if cap in LADDER[AuthorityLevel.RECONCILE_ONLY]}
 
 
 def test_level_1_capabilities_match_frozen_program_b() -> None:

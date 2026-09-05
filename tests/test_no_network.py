@@ -152,15 +152,15 @@ def test_the_declared_dependency_set_preserves_the_boundary() -> None:
         assert f'"{forbidden}' not in pyproject, f"{forbidden} must not be a dependency"
 
 
-def test_the_package_declares_its_phase_as_read_only_shadow() -> None:
-    assert qntyspot.AUTHORITY == "ROBINHOOD_SHADOW_READ_ONLY"
+def test_the_package_declares_its_phase_as_read_only_reconcile_only() -> None:
+    assert qntyspot.AUTHORITY == "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
     assert qntyspot.NETWORK_AUTHORIZED is True
     assert qntyspot.SIGNING_AUTHORIZED is False
     assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False
 
 
-def test_the_boundary_protocols_have_no_implementations() -> None:
-    """The venue and chain-truth seams are types, not code."""
+def test_the_boundary_protocols_remain_protocols() -> None:
+    """The boundary remains a protocol even with one injected adapter."""
     import qntyspot.boundary as boundary
 
     for name in ("QuoteSource", "ExecutionVenueAdapter", "ChainTruthSource", "Reconciler"):

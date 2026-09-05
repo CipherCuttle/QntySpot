@@ -7,8 +7,10 @@ scope of `qntyspot/`.
 
 ```
 PROJECT                 = QntySpot
-ACTIVE_PHASE            = QNTY_SPOT_EXTERNAL_AUTHORITY_ROOT_CONTRACT_V0
-AUTHORITY               = ROBINHOOD_SHADOW_READ_ONLY
+ACTIVE_PHASE            = QNTY_SPOT_RECONCILE_ONLY_SOURCE_CEILING_IMPLEMENTATION_V0
+AUTHORITY               = ROBINHOOD_RECONCILE_ONLY_READ_ONLY
+SOURCE_PHASE_CEILING    = RECONCILE_ONLY
+EFFECTIVE_LEVEL_1_AUTHORITY_REQUIRES_CURRENT_EXTERNAL_GRANT = YES
 NETWORK_AUTHORIZED      = YES (bounded public Robinhood REST/RPC, Chainlink, and 0x reads only)
 SIGNING_AUTHORIZED      = NO
 LIVE_CAPITAL_AUTHORIZED = NO
@@ -19,13 +21,14 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 `qntyspot.NETWORK_AUTHORIZED`, `qntyspot.SIGNING_AUTHORIZED`, and
 `qntyspot.LIVE_CAPITAL_AUTHORIZED`.
 
-The external authority-root contract is the active *offline contract* phase.
-Naming it here changes no flag: `AUTHORITY` is still
-`ROBINHOOD_SHADOW_READ_ONLY`, signing and live capital are still `NO`, and
-capital authority is still `NONE`. The `NETWORK_AUTHORIZED = YES` flag remains
-the historical bounded-public-read ceiling; this phase performs zero execution
-or venue network activity. Program B architecture, B1 implementation, and
-this external-root contract do not create live execution authority — see
+The reconcile-only source ceiling is only one half of authority. A current,
+independently verified AuthorityRoot grant bound to the exact implementation,
+network, taker, and venue is required for effective Level 1 behavior. No such
+grant is present during this implementation phase, so effective Level 1
+authority remains denied. The `NETWORK_AUTHORIZED = YES` flag remains the
+historical bounded-public-read ceiling; this phase performs zero network
+activity. Program B architecture, B1 implementation, and this external-root
+contract do not create live execution authority — see
 [docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
 
 The frozen external-root consumer contract is documented in
@@ -36,7 +39,7 @@ self-issue, and does not treat a verified receipt as sufficient to escape the
 source phase ceiling. The external root is not implemented or deployed in this
 phase.
 
-## The read-only shadow authority authorizes
+## The read-only reconcile-only source ceiling authorizes
 
 - Deterministic, immutable domain models (`qntyspot/domain.py`,
   `qntyspot/identity.py`)
@@ -45,8 +48,8 @@ phase.
   (`qntyspot/ledger/`)
 - The offline Program B1 execution runtime over the existing SQLite core and
   execution schema (`qntyspot/ledger/execution.py`), including durable
-  session, reservation, envelope, signed-metadata, submission, observation,
-  reconciliation, kill-switch, and deterministic replay facts
+  session, accounting-only reservation, external transaction references,
+  observation, reconciliation, kill-switch, and deterministic replay facts
 - Deterministic replay from an empty database plus canonical policies and the
   event log (`qntyspot/ledger/replay.py`)
 - Accounting primitives: atomic budget reservation, commit, release, and
@@ -56,8 +59,8 @@ phase.
   historical V0B code; this phase does not change it
 - The already-merged bounded Solana shadow implementation remains available as
   historical V0C code; this phase does not change it
-- One bounded Robinhood REST/RPC, Chainlink, and 0x Swap API quote read for an
-  explicit Stock Token / USDG pair
+- One bounded read-only Robinhood testnet chain-truth observation for an
+  explicitly supplied transaction, taker, and token pair on `evm:46630`
 - Bounded finalized Solana RPC reads for exactly two policy-supplied mint
   accounts on one frozen cluster
 - Current official Jupiter Swap V2 `GET /swap/v2/build` read-only quotes for
@@ -68,7 +71,7 @@ phase.
 - Deterministic policy-bound shadow decisions with canonical SHA-256 evidence
   and offline replay from frozen live evidence
 
-## The read-only shadow authority forbids
+## The read-only reconcile-only source ceiling forbids
 
 - private-key access
 - wallet signing
@@ -85,7 +88,8 @@ phase.
 - live capital
 
 The public-read implementations are limited to `qntyspot/ink.py`,
-`qntyspot/solana.py`, and `qntyspot/robinhood.py`. The Solana path validates Jupiter's raw instruction
+`qntyspot/solana.py`, `qntyspot/robinhood.py`, and the injected-transport
+`qntyspot/robinhood_chain_truth.py`. The Solana path validates Jupiter's raw instruction
 evidence but does not assemble or serialize a transaction, trust any
 third-party serialized payload, read a secret, or expose a submission method.
 Offline unit tests disable sockets for the entire session; the one live
@@ -135,14 +139,16 @@ LEVEL 4  AUTONOMOUS_BOUNDED_SIGNER   a future, separately authorized signer
 ```
 
 ```
-PHASE_GRANTED_AUTHORITY_LEVEL = LEVEL 0 (SHADOW)
+PHASE_GRANTED_AUTHORITY_LEVEL = LEVEL 1 (RECONCILE_ONLY)
+SOURCE_CEILING_ALONE_SUFFICIENT = NO
+EFFECTIVE_AUTHORITY = MIN(SOURCE_PHASE_CEILING, VERIFIED_EXTERNAL_GRANT_LEVEL)
 ```
 
-`qntyspot/execution_contract.py` refuses every capability above `SHADOW` at
-runtime, whatever level a caller passes and whatever any authority document
-claims, because the ceiling is a constant in this source tree rather than an
-input. Levels 1 through 4 are semantics only; each requires its own explicit
-later phase.
+`qntyspot/authority_root.py` intersects the source ceiling with a current
+`VerifiedAuthorityGrantV0` at every runtime consumption point. Without a valid
+matching grant, Level 1 is denied. Level 1 reservation is durable local
+accounting only and is not live-capital authority. Construction, approval,
+signing, and submission remain denied.
 
 `qntyspot/ledger/execution_schema.py` defines the execution authority tables.
 The B1 runtime writes only explicit offline records supplied by its caller; it
@@ -184,12 +190,13 @@ for the reconciliation record.
 
 `qntyspot/boundary.py` defines the typing `Protocol`s for the chain/venue
 boundary. V0B implements the Ink `QuoteSource`; V0C adds the Solana/Jupiter
-`QuoteSource`; V0D adds the Robinhood shadow `QuoteSource`. The B1 runtime
-  implements the chain-truth and reconciliation rules over caller-supplied
-  persisted records; it does not implement a `ChainTruthSource` or reach a
-  chain. It records an accepted-but-absent or contradictory outcome as
-  `SAFE_HALT`, and releases a post-submission reservation only after an exact
-  database-bound `REVERTED` reconciliation.
+`QuoteSource`; V0D adds the Robinhood shadow `QuoteSource`; this phase adds a
+bounded injected-transport Robinhood testnet `ChainTruthSource`. The B1
+runtime uses the existing chain-truth and reconciliation rules over either a
+historical signed record or an explicit externally created transaction
+reference. It records an accepted-but-absent or contradictory outcome as
+`SAFE_HALT`, and releases a reservation only after an exact database-bound
+`REVERTED` reconciliation.
 
 Program B gives that rule an evidence contract:
 `qntyspot.execution_contract.evaluate_chain_truth` decides what a set of

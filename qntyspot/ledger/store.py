@@ -80,6 +80,7 @@ _HELD_CLAUSE = "status <> 'RELEASED'"
 #: States in which an external fill may legitimately be observed.
 _RECEIPT_STATES = frozenset(
     {
+        IntentState.RESERVED,
         IntentState.SUBMITTED,
         IntentState.INCLUDED,
         IntentState.CONFIRMED,
@@ -672,36 +673,53 @@ class SpotLedger:
                 raise LedgerError("B1 execution receipt requires the execution schema")
             row = conn.execute(
                 """
-                SELECT ea.kind, st.transaction_hash, st.chain_id, st.taker_address,
-                       st.signed_transaction_id
+                SELECT ea.kind,
+                       st.transaction_hash AS signed_hash,
+                       st.chain_id AS signed_chain,
+                       st.taker_address AS signed_taker,
+                       st.signed_transaction_id,
+                       etr.transaction_hash AS external_hash,
+                       etr.chain_id AS external_chain,
+                       etr.taker_address AS external_taker,
+                       etr.external_transaction_ref_id
                   FROM external_actions AS ea
-                  JOIN signed_transactions AS st
+                  LEFT JOIN signed_transactions AS st
                     ON st.external_action_id = ea.external_action_id
+                  LEFT JOIN external_transaction_refs AS etr
+                    ON etr.external_action_id = ea.external_action_id
                  WHERE ea.external_action_id = ?
                    AND ea.kind = 'ECONOMIC'
+                   AND ((st.external_action_id IS NOT NULL) <>
+                        (etr.external_action_id IS NOT NULL))
                 """,
                 (receipt.economic_action_id,),
             ).fetchone()
             if row is None:
                 raise LedgerError(
-                    "B1 receipt requires a database-bound economic signed transaction"
+                    "B1 receipt requires a database-bound economic transaction origin"
                 )
+            signed_origin = row["signed_transaction_id"] is not None
+            transaction_hash = row["signed_hash"] if signed_origin else row["external_hash"]
+            chain_id = row["signed_chain"] if signed_origin else row["external_chain"]
+            taker_address = row["signed_taker"] if signed_origin else row["external_taker"]
             expectation = SettlementExpectationV0(
                 economic_action_id=EconomicActionIDV0(receipt.economic_action_id),
-                transaction_hash=row["transaction_hash"],
-                chain_id=row["chain_id"],
-                taker_address=row["taker_address"],
-                submission_acknowledged=True,
+                transaction_hash=transaction_hash,
+                chain_id=chain_id,
+                taker_address=taker_address,
+                submission_acknowledged=signed_origin,
             )
             validated_action.assert_matches(expectation)
-            if receipt.external_ref != row["transaction_hash"]:
-                raise LedgerError("B1 receipt external reference is not the signed transaction hash")
+            if receipt.external_ref != transaction_hash:
+                raise LedgerError("B1 receipt external reference is not the bound transaction hash")
+            origin_column = "signed_transaction_id" if signed_origin else "external_transaction_ref_id"
+            origin_id = row[origin_column]
             observation = conn.execute(
-                """
+                f"""
                 SELECT 1
                   FROM chain_observations
                  WHERE external_action_id = ?
-                   AND signed_transaction_id = ?
+                   AND {origin_column} = ?
                    AND presence = 'INCLUDED'
                    AND receipt_status = 'SUCCESS'
                    AND effective_input_atomic = ?
@@ -710,7 +728,7 @@ class SpotLedger:
                 """,
                 (
                     receipt.economic_action_id,
-                    row["signed_transaction_id"],
+                    origin_id,
                     encode_atomic(receipt.input_atomic_filled, field="input_filled"),
                     encode_atomic(receipt.output_atomic_filled, field="output_filled"),
                 ),

@@ -51,6 +51,7 @@ __all__ = [
     "assert_issuance_request_admissible",
     "effective_authority_level",
     "effective_capabilities",
+    "require_effective_capability",
     "effective_capital_ceilings",
     "assert_effective_capital_within",
 ]
@@ -667,6 +668,52 @@ def effective_capabilities(
     if kill_switch or safe_halt:
         capabilities &= KILL_SWITCH_PRESERVED_CAPABILITIES
     return frozenset(capabilities)
+
+
+def require_effective_capability(
+    *,
+    capability: Capability,
+    source_phase_ceiling: AuthorityLevel,
+    verified_grant: VerifiedAuthorityGrantV0,
+    session: ExecutionSessionV0,
+    now_epoch_s: int,
+    kill_switch: bool = False,
+    safe_halt: bool = False,
+) -> AuthorityLevel:
+    """Require one capability through both independent authority gates.
+
+    This is the runtime admission seam. The source ceiling is intersected with
+    the current verified grant on every call, and the grant is rebound to the
+    exact session identity before the capability is returned. No persisted
+    continuity row or caller-supplied level participates in authorization.
+    """
+    if not isinstance(capability, Capability):
+        raise AuthorityCeilingError(f"unknown capability {capability!r}")
+    if not isinstance(session, ExecutionSessionV0):
+        raise AuthorityVerificationError("session must be ExecutionSessionV0")
+    grant = _require_verified(verified_grant)
+    _assert_verified_grant_current(grant, now_epoch_s=now_epoch_s)
+    _assert_authority_session_binding(
+        session,
+        grant.authority_policy,
+        now_epoch_s=now_epoch_s,
+        error=AuthorityVerificationError,
+    )
+    level = effective_authority_level(
+        source_phase_ceiling=source_phase_ceiling,
+        verified_grant=grant,
+        now_epoch_s=now_epoch_s,
+    )
+    permitted = LADDER[level]
+    if kill_switch or safe_halt:
+        permitted &= KILL_SWITCH_PRESERVED_CAPABILITIES
+    if capability not in permitted:
+        raise AuthorityCeilingError(
+            f"{capability.value} is not permitted at effective level {level.name}"
+            + (" while the kill switch is engaged" if kill_switch else "")
+            + (" while halted" if safe_halt else "")
+        )
+    return level
 
 
 def effective_capital_ceilings(

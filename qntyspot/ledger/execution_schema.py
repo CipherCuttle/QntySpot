@@ -46,9 +46,10 @@ WHAT THIS MODULE IS NOT
 It creates tables. It writes no rows, opens no connection of its own, signs
 nothing, submits nothing, and stores no key material anywhere: a signed
 transaction is represented by a digest of its payload, its length, and its
-hash. ``EXECUTION_SCHEMA_VERSION`` remains independently versioned at 1; the
-B1 runtime applies it alongside the core ``SCHEMA_VERSION`` without changing
-the core schema version.
+hash. ``EXECUTION_SCHEMA_VERSION`` is independently versioned from the core
+``SCHEMA_VERSION``. Version 2 adds the append-only external transaction
+reference and alternate chain-observation binding while preserving the
+historical signed path.
 """
 
 from __future__ import annotations
@@ -60,15 +61,19 @@ from .atomics import non_negative_atomic_check, positive_atomic_check
 
 __all__ = [
     "EXECUTION_SCHEMA_VERSION",
+    "EXECUTION_SCHEMA_VERSION_V1",
     "EXECUTION_SCHEMA_SQL",
     "EXECUTION_TABLES",
+    "EXECUTION_TABLES_V1",
     "apply_execution_schema",
+    "migrate_execution_schema_v1_to_v2",
     "read_execution_schema_version",
 ]
 
-EXECUTION_SCHEMA_VERSION = 1
+EXECUTION_SCHEMA_VERSION_V1 = 1
+EXECUTION_SCHEMA_VERSION = 2
 
-EXECUTION_TABLES = (
+EXECUTION_TABLES_V1 = (
     "execution_sessions",
     "authority_root_state",
     "execution_envelopes",
@@ -81,9 +86,16 @@ EXECUTION_TABLES = (
     "operator_control_events",
 )
 
+EXECUTION_TABLES = (
+    *EXECUTION_TABLES_V1[:5],
+    "external_transaction_refs",
+    *EXECUTION_TABLES_V1[5:],
+)
+
 _APPEND_ONLY_TABLES = (
     "execution_sessions",
     "external_actions",
+    "external_transaction_refs",
     "signed_transactions",
     "submission_attempts",
     "chain_observations",
@@ -213,10 +225,28 @@ CREATE TABLE external_actions (
     kind               TEXT NOT NULL CHECK (kind IN ('ECONOMIC','APPROVAL')),
     economic_action_id TEXT UNIQUE REFERENCES intents(economic_action_id),
     approval_action_id TEXT UNIQUE REFERENCES approval_actions(approval_action_id),
+    session_id         TEXT REFERENCES execution_sessions(session_id),
     CHECK ((economic_action_id IS NULL) <> (approval_action_id IS NULL)),
     CHECK ((kind = 'ECONOMIC') = (economic_action_id IS NOT NULL)),
     -- The identity of an economic external action IS its EconomicActionID.
     CHECK (external_action_id = COALESCE(economic_action_id, approval_action_id))
+) STRICT;
+
+-- A transaction made outside QntySpot is represented by its stable public
+-- identity only. It has no payload, signature, or construction material.
+CREATE TABLE external_transaction_refs (
+    external_transaction_ref_id TEXT PRIMARY KEY,
+    external_action_id          TEXT NOT NULL UNIQUE
+                                REFERENCES external_actions(external_action_id),
+    session_id                  TEXT NOT NULL REFERENCES execution_sessions(session_id),
+    session_identity_digest     TEXT NOT NULL,
+    economic_action_id          TEXT NOT NULL UNIQUE REFERENCES intents(economic_action_id),
+    transaction_hash            TEXT NOT NULL UNIQUE,
+    chain_id                    INTEGER NOT NULL CHECK (chain_id > 0),
+    taker_address               TEXT NOT NULL,
+    authority_policy_digest     TEXT NOT NULL,
+    origin                      TEXT NOT NULL CHECK (origin = 'EXTERNAL_TO_QNTYSPOT'),
+    CHECK (external_action_id = economic_action_id)
 ) STRICT;
 
 CREATE TABLE signed_transactions (
@@ -257,8 +287,8 @@ CREATE INDEX idx_submissions_signed ON submission_attempts(signed_transaction_id
 CREATE TABLE chain_observations (
     observation_id        TEXT PRIMARY KEY,
     external_action_id    TEXT NOT NULL REFERENCES external_actions(external_action_id),
-    signed_transaction_id TEXT NOT NULL
-                          REFERENCES signed_transactions(signed_transaction_id),
+    signed_transaction_id TEXT REFERENCES signed_transactions(signed_transaction_id),
+    external_transaction_ref_id TEXT REFERENCES external_transaction_refs(external_transaction_ref_id),
     provider_id           TEXT NOT NULL,
     transaction_hash      TEXT NOT NULL,
     observed_at_epoch_s   INTEGER NOT NULL CHECK (observed_at_epoch_s >= 0),
@@ -289,7 +319,8 @@ CREATE TABLE chain_observations (
            head_block_number >= block_number),
     CHECK ((effective_input_atomic IS NULL) = (effective_output_atomic IS NULL)),
     CHECK (effective_input_atomic IS NULL OR
-           (presence = 'INCLUDED' AND receipt_status = 'SUCCESS'))
+           (presence = 'INCLUDED' AND receipt_status = 'SUCCESS')),
+    CHECK ((signed_transaction_id IS NULL) <> (external_transaction_ref_id IS NULL))
 ) STRICT;
 
 CREATE INDEX idx_observations_action ON chain_observations(external_action_id);
@@ -466,6 +497,18 @@ BEGIN
     SELECT RAISE(ABORT, 'chain_observations is append-only');
 END;
 
+CREATE TRIGGER external_transaction_refs_no_conflict_replace
+BEFORE INSERT ON external_transaction_refs
+WHEN EXISTS (SELECT 1 FROM external_transaction_refs
+             WHERE external_transaction_ref_id = NEW.external_transaction_ref_id)
+   OR EXISTS (SELECT 1 FROM external_transaction_refs
+             WHERE external_action_id = NEW.external_action_id)
+   OR EXISTS (SELECT 1 FROM external_transaction_refs
+             WHERE transaction_hash = NEW.transaction_hash)
+BEGIN
+    SELECT RAISE(ABORT, 'external_transaction_refs is append-only');
+END;
+
 CREATE TRIGGER reconciliations_no_conflict_replace
 BEFORE INSERT ON reconciliations
 WHEN EXISTS (SELECT 1 FROM reconciliations WHERE reconciliation_id = NEW.reconciliation_id)
@@ -481,10 +524,6 @@ BEGIN
     SELECT RAISE(ABORT, 'operator_control_events is append-only');
 END;
 """
-
-EXECUTION_SCHEMA_SQL = _SCHEMA_TEMPLATE.format(**_CHECKS) + "".join(
-    _APPEND_ONLY_TEMPLATE.format(table=table) for table in _APPEND_ONLY_TABLES
-)
 
 _IDENTITY_COLUMNS = {
     "approval_actions": (
@@ -598,6 +637,10 @@ END;
 CREATE TRIGGER signed_transactions_kind_guard
 BEFORE INSERT ON signed_transactions
 BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM external_transaction_refs
+         WHERE external_action_id = NEW.external_action_id
+    ) THEN RAISE(ABORT, 'economic action already has an external transaction reference') END;
     SELECT CASE WHEN NEW.envelope_id IS NOT NULL AND NOT EXISTS (
         SELECT 1
           FROM external_actions AS ea
@@ -623,6 +666,35 @@ BEGIN
     ) THEN RAISE(ABORT, 'approval signed transaction subtype does not match external action') END;
 END;
 
+CREATE TRIGGER external_transaction_refs_no_signed_origin
+BEFORE INSERT ON external_transaction_refs
+WHEN EXISTS (
+    SELECT 1 FROM signed_transactions
+     WHERE external_action_id = NEW.external_action_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'economic action already has a signed transaction origin');
+END;
+
+CREATE TRIGGER external_transaction_refs_binding_guard
+BEFORE INSERT ON external_transaction_refs
+WHEN NOT EXISTS (
+    SELECT 1
+      FROM external_actions AS ea
+      JOIN execution_sessions AS es ON es.session_id = NEW.session_id
+     WHERE ea.external_action_id = NEW.external_action_id
+       AND ea.kind = 'ECONOMIC'
+       AND ea.economic_action_id = NEW.economic_action_id
+       AND (ea.session_id IS NULL OR ea.session_id = NEW.session_id)
+       AND es.identity_digest = NEW.session_identity_digest
+       AND es.authority_policy_digest = NEW.authority_policy_digest
+       AND es.taker_address = NEW.taker_address
+       AND es.network_id = 'evm:' || NEW.chain_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'external transaction reference is not bound to its session/action');
+END;
+
 CREATE TRIGGER chain_observations_binding_guard
 BEFORE INSERT ON chain_observations
 WHEN NOT EXISTS (
@@ -631,8 +703,15 @@ WHEN NOT EXISTS (
      WHERE st.signed_transaction_id = NEW.signed_transaction_id
        AND st.external_action_id = NEW.external_action_id
 )
+AND NOT EXISTS (
+    SELECT 1
+      FROM external_transaction_refs AS etr
+     WHERE etr.external_transaction_ref_id = NEW.external_transaction_ref_id
+       AND etr.external_action_id = NEW.external_action_id
+       AND etr.transaction_hash = NEW.transaction_hash
+)
 BEGIN
-    SELECT RAISE(ABORT, 'chain observation is not bound to the signed transaction action');
+    SELECT RAISE(ABORT, 'chain observation is not bound to one transaction origin');
 END;
 
 CREATE TRIGGER reconciliations_receipt_kind_guard
@@ -683,17 +762,172 @@ WHEN NEW.verdict = 'REVERTED'
        AND co.presence = 'INCLUDED'
        AND co.receipt_status = 'REVERTED'
  )
+ AND NOT EXISTS (
+    SELECT 1
+      FROM external_transaction_refs AS etr
+      JOIN chain_observations AS co
+        ON co.external_transaction_ref_id = etr.external_transaction_ref_id
+       AND co.external_action_id = etr.external_action_id
+     WHERE etr.external_action_id = NEW.external_action_id
+       AND etr.transaction_hash = NEW.transaction_hash
+       AND etr.chain_id = NEW.chain_id
+       AND etr.taker_address = NEW.taker_address
+       AND co.presence = 'INCLUDED'
+       AND co.receipt_status = 'REVERTED'
+ )
 BEGIN
-    SELECT RAISE(ABORT, 'reverted reconciliation is not bound to the signed transaction');
+    SELECT RAISE(ABORT, 'reverted reconciliation is not bound to the transaction origin');
 END;
 """
 
-EXECUTION_SCHEMA_SQL += (
-    _AUTHORIZED_IMMUTABILITY_SQL
-    + _LIFECYCLE_GUARDS_SQL
-    + _CROSS_TABLE_GUARDS_SQL
-    + _CONFLICT_REPLACEMENT_SQL
-)
+_EXECUTION_TRIGGER_SQL = "".join(
+    _APPEND_ONLY_TEMPLATE.format(table=table) for table in _APPEND_ONLY_TABLES
+) + _AUTHORIZED_IMMUTABILITY_SQL + _LIFECYCLE_GUARDS_SQL + _CROSS_TABLE_GUARDS_SQL + _CONFLICT_REPLACEMENT_SQL
+
+EXECUTION_SCHEMA_SQL = _SCHEMA_TEMPLATE.format(**_CHECKS) + _EXECUTION_TRIGGER_SQL
+
+
+_V2_EXTERNAL_TRANSACTION_REFS_SQL = """
+CREATE TABLE external_transaction_refs (
+    external_transaction_ref_id TEXT PRIMARY KEY,
+    external_action_id          TEXT NOT NULL UNIQUE
+                                REFERENCES external_actions(external_action_id),
+    session_id                  TEXT NOT NULL REFERENCES execution_sessions(session_id),
+    session_identity_digest     TEXT NOT NULL,
+    economic_action_id          TEXT NOT NULL UNIQUE REFERENCES intents(economic_action_id),
+    transaction_hash            TEXT NOT NULL UNIQUE,
+    chain_id                    INTEGER NOT NULL CHECK (chain_id > 0),
+    taker_address               TEXT NOT NULL,
+    authority_policy_digest     TEXT NOT NULL,
+    origin                      TEXT NOT NULL CHECK (origin = 'EXTERNAL_TO_QNTYSPOT'),
+    CHECK (external_action_id = economic_action_id)
+) STRICT
+"""
+
+_V2_CHAIN_OBSERVATIONS_SQL = """
+CREATE TABLE chain_observations (
+    observation_id        TEXT PRIMARY KEY,
+    external_action_id    TEXT NOT NULL REFERENCES external_actions(external_action_id),
+    signed_transaction_id TEXT REFERENCES signed_transactions(signed_transaction_id),
+    external_transaction_ref_id TEXT REFERENCES external_transaction_refs(external_transaction_ref_id),
+    provider_id           TEXT NOT NULL,
+    transaction_hash      TEXT NOT NULL,
+    observed_at_epoch_s   INTEGER NOT NULL CHECK (observed_at_epoch_s >= 0),
+    presence              TEXT NOT NULL CHECK (presence IN ('ABSENT','PENDING','INCLUDED')),
+    block_number          INTEGER,
+    block_hash            TEXT,
+    block_parent_hash     TEXT,
+    head_block_number     INTEGER,
+    head_block_hash       TEXT,
+    receipt_status        TEXT CHECK (receipt_status IS NULL
+                                      OR receipt_status IN ('SUCCESS','REVERTED')),
+    effective_input_atomic  TEXT CHECK (effective_input_atomic IS NULL
+                                        OR {nn_effective_input}),
+    effective_output_atomic TEXT CHECK (effective_output_atomic IS NULL
+                                        OR {nn_effective_output}),
+    raw_evidence_sha256   TEXT NOT NULL,
+    CHECK ((presence = 'INCLUDED') = (block_hash IS NOT NULL)),
+    CHECK ((presence = 'INCLUDED') = (block_number IS NOT NULL)),
+    CHECK ((presence = 'INCLUDED') = (block_parent_hash IS NOT NULL)),
+    CHECK ((presence = 'INCLUDED') = (receipt_status IS NOT NULL)),
+    CHECK (block_number IS NULL OR block_number >= 0),
+    CHECK (head_block_number IS NULL OR head_block_number >= 0),
+    CHECK (presence = 'INCLUDED' OR
+           (block_number IS NULL AND block_hash IS NULL AND
+            block_parent_hash IS NULL AND receipt_status IS NULL)),
+    CHECK ((head_block_number IS NULL) = (head_block_hash IS NULL)),
+    CHECK (presence <> 'INCLUDED' OR head_block_number IS NULL OR
+           head_block_number >= block_number),
+    CHECK ((effective_input_atomic IS NULL) = (effective_output_atomic IS NULL)),
+    CHECK (effective_input_atomic IS NULL OR
+           (presence = 'INCLUDED' AND receipt_status = 'SUCCESS')),
+    CHECK ((signed_transaction_id IS NULL) <> (external_transaction_ref_id IS NULL))
+) STRICT
+""".format(**_CHECKS)
+
+
+def _execute_trigger_script(conn: sqlite3.Connection, script: str) -> None:
+    """Execute the internal trigger script without opening a second transaction."""
+    statement = ""
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            conn.execute(statement)
+            statement = ""
+    if statement.strip():
+        raise LedgerError("execution schema trigger migration ended with incomplete SQL")
+
+
+def migrate_execution_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Migrate valid B1 v1 facts without discarding any execution history."""
+    have = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        )
+    }
+    if set(EXECUTION_TABLES_V1) != have & set(EXECUTION_TABLES_V1):
+        raise LedgerError("execution schema v1 is incomplete")
+    if read_execution_schema_version(conn) != EXECUTION_SCHEMA_VERSION_V1:
+        raise SchemaVersionError("migration requires execution schema version 1")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        trigger_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ("
+            + ",".join("?" for _ in EXECUTION_TABLES_V1)
+            + ")",
+            EXECUTION_TABLES_V1,
+        ).fetchall()
+        for row in trigger_rows:
+            trigger_name = str(row[0]).replace('"', '""')
+            conn.execute(f'DROP TRIGGER "{trigger_name}"')
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(external_actions)")
+        }
+        if "session_id" not in columns:
+            conn.execute(
+                "ALTER TABLE external_actions ADD COLUMN session_id TEXT "
+                "REFERENCES execution_sessions(session_id)"
+            )
+        old_count = conn.execute("SELECT COUNT(*) FROM chain_observations").fetchone()[0]
+        conn.execute("DROP INDEX IF EXISTS idx_observations_action")
+        conn.execute("ALTER TABLE chain_observations RENAME TO chain_observations_v1")
+        conn.execute(_V2_EXTERNAL_TRANSACTION_REFS_SQL)
+        conn.execute(_V2_CHAIN_OBSERVATIONS_SQL)
+        conn.execute(
+            "CREATE INDEX idx_observations_action ON chain_observations(external_action_id)"
+        )
+        conn.execute(
+            "INSERT INTO chain_observations ("
+            "observation_id, external_action_id, signed_transaction_id, "
+            "external_transaction_ref_id, provider_id, transaction_hash, "
+            "observed_at_epoch_s, presence, block_number, block_hash, "
+            "block_parent_hash, head_block_number, head_block_hash, receipt_status, "
+            "effective_input_atomic, effective_output_atomic, raw_evidence_sha256) "
+            "SELECT observation_id, external_action_id, signed_transaction_id, NULL, "
+            "provider_id, transaction_hash, observed_at_epoch_s, presence, block_number, "
+            "block_hash, block_parent_hash, head_block_number, head_block_hash, "
+            "receipt_status, effective_input_atomic, effective_output_atomic, "
+            "raw_evidence_sha256 FROM chain_observations_v1"
+        )
+        copied_count = conn.execute("SELECT COUNT(*) FROM chain_observations").fetchone()[0]
+        if copied_count != old_count:
+            raise LedgerError("execution schema migration did not preserve observations")
+        conn.execute("DROP TABLE chain_observations_v1")
+        _execute_trigger_script(conn, _EXECUTION_TRIGGER_SQL)
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
+            (str(EXECUTION_SCHEMA_VERSION),),
+        )
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_authority'",
+            ("B1_RECONCILE_ONLY: no signer, no submission, no capital authority",),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def apply_execution_schema(conn: sqlite3.Connection) -> None:
@@ -717,6 +951,9 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
             f"the execution surface requires the core ledger first; missing {missing}"
         )
     if collisions := sorted(have & set(EXECUTION_TABLES)):
+        if set(collisions) == set(EXECUTION_TABLES_V1):
+            migrate_execution_schema_v1_to_v2(conn)
+            return
         raise LedgerError(f"execution schema already applied: {collisions}")
     conn.execute("PRAGMA recursive_triggers = ON")
     if not conn.execute("PRAGMA recursive_triggers").fetchone()[0]:
@@ -726,7 +963,7 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
     stamp = (
         "INSERT INTO schema_meta (key, value) VALUES\n"
         f"    ('execution_schema_version', '{EXECUTION_SCHEMA_VERSION}'),\n"
-        "    ('execution_authority', 'B1_OFFLINE_ONLY: no signer, no submission, "
+        "    ('execution_authority', 'B1_RECONCILE_ONLY: no signer, no submission, "
         "no capital authority');\n"
     )
     conn.executescript("BEGIN;\n" + EXECUTION_SCHEMA_SQL + "\n" + stamp + "COMMIT;\n")
