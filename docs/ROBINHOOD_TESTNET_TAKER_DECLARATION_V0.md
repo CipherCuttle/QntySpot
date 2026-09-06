@@ -87,3 +87,35 @@ external grant remains required, and live capital remains forbidden.
 The V0R2 venue identity is deliberately distinct from the historical Robinhood
 mainnet 0x SHADOW quote path on `evm:4663`. It does not imply 0x routing, a DEX,
 liquidity, or successful settlement.
+
+## V0R3 successor declaration — revert-observation selector minimality
+
+The current successor declaration is stored in
+`artifacts/ROBINHOOD_TESTNET_TAKER_DECLARATION_V0R3.json`, with its exact
+artifact digest in the adjacent `.sha256` sidecar. It succeeds V0R2 without
+rewriting that historical declaration.
+
+```text
+SCHEMA                    = qntyspot.robinhood_testnet_taker_declaration.v0r3
+BASE_QNTYSPOT_CANONICAL   = be3cdfb908851d498d37f0639ef3b6894155119f
+IMPLEMENTATION_METHOD     = sha256-canonical-source-manifest-v2
+IMPLEMENTATION_DIGEST     = bdb1f4025ee7c16130ea422bd21febd69de4759654da1710f1e41d6935f6bc81
+NETWORK_ID                = evm:46630
+TAKER_ADDRESS             = 0x1324d87e24e1657f6fe6805de814bb6873052106
+VENUE_ID                  = robinhood-chain-testnet-external-transaction
+TRANSACTION_ORIGIN        = EXTERNAL_TO_QNTYSPOT
+SOURCE_PHASE_CEILING      = RECONCILE_ONLY
+SUPERSEDES_SCHEMA          = qntyspot.robinhood_testnet_taker_declaration.v0r2
+SUPERSEDES_ARTIFACT        = 469a438528facd8fdacae1078a94c4cdb611dcb0f3c05de8b159ba0088745c20
+SIGNING_AUTHORIZED        = false
+CAPITAL_AUTHORIZED        = false
+ACCOUNT_CONTROL_PROVEN    = false
+PRIVATE_KEY_CONTROL_PROVEN = false
+```
+
+V0R3 differs from V0R2 because the observer now defers token-selector parsing
+until a successful receipt is established. ABSENT, PENDING, and REVERTED chain
+truth do not require or consume token selectors; successful observations still
+require two valid, distinct selectors and the existing exact transfer-log
+derivation. This is evidence only and creates no AuthorityRoot grant or new
+authority.

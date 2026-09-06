@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 
 from qntyspot.canon import canonical_json_bytes
@@ -35,6 +38,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT = ROOT / "artifacts/RECONCILE_ONLY_QUALIFICATION_INTENT_DESIGN_V0.json"
 SIDECAR = ARTIFACT.with_suffix(".sha256")
 BASE = "9b12c7d30873feeafdae0e7541516e3abe3ec41d"
+INTENT_DESIGN_HEAD = "5909228b97371a4fa4b52e09089de1606c1d999e"
 VENUE_REPAIR_HEAD = "53ec6061ae959a46b8f1da0240b0645ba785ac66"
 IMPLEMENTATION_DIGEST = "7fdd08cbb60de858d4eab7031a8463f29b62648be4b88104f6bd031c23a32826"
 TAKER = "0x1324d87e24e1657f6fe6805de814bb6873052106"
@@ -45,6 +49,11 @@ QUOTE_INSTRUMENT = "evm:46630:0xbf4479c07dc6fdc6daa764a0cca06969e894275f"
 TX_HASH = "0x" + "ab" * 32
 BLOCK_HASH = "0x" + "cd" * 32
 PARENT_HASH = "0x" + "ce" * 32
+DESIGN_ALLOWED_PATHS = (
+    "artifacts/RECONCILE_ONLY_QUALIFICATION_INTENT_DESIGN_V0.json",
+    "artifacts/RECONCILE_ONLY_QUALIFICATION_INTENT_DESIGN_V0.sha256",
+    "tests/test_reconcile_only_qualification_intent_design_v0.py",
+)
 
 
 def artifact() -> dict[str, object]:
@@ -57,6 +66,19 @@ def git(*args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=ROOT, check=True, capture_output=True, text=True
     ).stdout.rstrip("\n")
+
+
+def historical_identity(commit: str) -> dict[str, object]:
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", commit],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tempfile.TemporaryDirectory(prefix="qntyspot-historical-") as temporary_root:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+            tar.extractall(temporary_root)
+        return build_identity(temporary_root, commit)
 
 
 def reverted_observation(provider_id: str) -> ChainObservationV0:
@@ -89,7 +111,7 @@ def test_exact_canonical_inputs_and_repaired_source_digest() -> None:
     assert inputs["qntyspot_main_canonical"] == BASE
     assert inputs["venue_binding_repair_pr_head"] == VENUE_REPAIR_HEAD
     assert inputs["repaired_implementation_digest"] == IMPLEMENTATION_DIGEST
-    assert build_identity(ROOT, VENUE_REPAIR_HEAD)["implementation_digest"] == IMPLEMENTATION_DIGEST
+    assert historical_identity(VENUE_REPAIR_HEAD)["implementation_digest"] == IMPLEMENTATION_DIGEST
     assert inputs["feasibility_artifact_digest"] == "a50cc308ba7bedfa16789050182ae5e0c0bf0dfd02fea4798474b67e1dab6738"
     assert inputs["venue_binding_repair_artifact_digest"] == "04931e55b81276c7c7f101e44f106d6fd7c360057c0c64c53f29b9f5808481d0"
     assert inputs["v0r2_declaration_digest"] == "469a438528facd8fdacae1078a94c4cdb611dcb0f3c05de8b159ba0088745c20"
@@ -101,14 +123,24 @@ def test_exact_canonical_inputs_and_repaired_source_digest() -> None:
 def test_design_changes_only_the_three_permitted_files_and_not_runtime_source() -> None:
     document = artifact()
     assert document["change_boundary"]["runtime_source_changed"] is False
-    assert git("diff", "--name-only", "--", "qntyspot") == ""
-    assert git("diff", "--name-only", "--", "docs") == ""
-    assert git("diff", "--name-only", "--", "qntyspot/authority_root.py") == ""
-    assert document["change_boundary"]["allowed_changed_paths"] == [
-        "artifacts/RECONCILE_ONLY_QUALIFICATION_INTENT_DESIGN_V0.json",
-        "artifacts/RECONCILE_ONLY_QUALIFICATION_INTENT_DESIGN_V0.sha256",
-        "tests/test_reconcile_only_qualification_intent_design_v0.py",
-    ]
+    historical_changed_paths = git(
+        "diff", "--name-only", BASE, INTENT_DESIGN_HEAD
+    ).splitlines()
+    assert historical_changed_paths == list(DESIGN_ALLOWED_PATHS)
+    assert document["change_boundary"]["allowed_changed_paths"] == list(DESIGN_ALLOWED_PATHS)
+    assert git("diff", "--name-only", BASE, INTENT_DESIGN_HEAD, "--", "qntyspot") == ""
+    assert git("diff", "--name-only", BASE, INTENT_DESIGN_HEAD, "--", "docs") == ""
+    assert (
+        git(
+            "diff",
+            "--name-only",
+            BASE,
+            INTENT_DESIGN_HEAD,
+            "--",
+            "qntyspot/authority_root.py",
+        )
+        == ""
+    )
 
 
 def test_repaired_venue_is_testnet_only_and_mainnet_0x_is_not_rebound() -> None:
@@ -123,7 +155,10 @@ def test_repaired_venue_is_testnet_only_and_mainnet_0x_is_not_rebound() -> None:
     assert outcome["transaction_origin"] == "EXTERNAL_TO_QNTYSPOT"
     assert outcome["outcome"] == "REVERTED"
     assert document["accounting_instruments"]["mainnet_address_reuse"] == "NO"
-    assert git("diff", "--name-only", "--", "qntyspot/robinhood.py") == ""
+    assert (
+        git("diff", "--name-only", BASE, INTENT_DESIGN_HEAD, "--", "qntyspot/robinhood.py")
+        == ""
+    )
     assert document["forbidden_success_path_requirements"]
 
 
