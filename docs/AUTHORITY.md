@@ -7,7 +7,7 @@ scope of `qntyspot/`.
 
 ```
 PROJECT                 = QntySpot
-ACTIVE_PHASE            = QNTY_SPOT_RECONCILE_ONLY_SOURCE_CEILING_IMPLEMENTATION_V0
+ACTIVE_PHASE            = QNTY_SPOT_RECONCILE_ONLY_QUALIFICATION_VENUE_BINDING_REPAIR_V0
 AUTHORITY               = ROBINHOOD_RECONCILE_ONLY_READ_ONLY
 SOURCE_PHASE_CEILING    = RECONCILE_ONLY
 EFFECTIVE_LEVEL_1_AUTHORITY_REQUIRES_CURRENT_EXTERNAL_GRANT = YES
@@ -60,7 +60,10 @@ phase.
 - The already-merged bounded Solana shadow implementation remains available as
   historical V0C code; this phase does not change it
 - One bounded read-only Robinhood testnet chain-truth observation for an
-  explicitly supplied transaction, taker, and token pair on `evm:46630`
+  explicitly supplied transaction, taker, and token pair on `evm:46630` under
+  the current venue identity
+  `robinhood-chain-testnet-external-transaction`; this identity is not a 0x
+  route, DEX, liquidity claim, successful swap, or QntySpot-created transaction
 - Bounded finalized Solana RPC reads for exactly two policy-supplied mint
   accounts on one frozen cluster
 - Current official Jupiter Swap V2 `GET /swap/v2/build` read-only quotes for
@@ -110,8 +113,12 @@ capabilities. `/prices` is raw underlying pricing and is multiplied exactly
 once for the token reference price. Chainlink Stock Token answers already
 include the multiplier. A missing authoritative Chainlink Sequencer Uptime
 Feed is recorded as `UNAVAILABLE_NOT_PUBLISHED`, not as `SEQUENCER_DOWN`.
-The only venue read is one 0x Swap API v2 AllowanceHolder quote on chain 4663.
-Returned calldata is evidence only and is never submitted.
+The historical Robinhood mainnet SHADOW path reads one 0x Swap API v2
+AllowanceHolder quote on chain 4663. It remains separate from the current
+testnet chain-truth identity `robinhood-chain-testnet-external-transaction`,
+which does not imply 0x routing, a DEX, liquidity, a successful swap,
+transaction construction, approval creation, signing, submission, or live
+capital. Returned mainnet calldata is evidence only and is never submitted.
 
 For V0D shadow qualification, an observation records its explicit local
 observation timestamp, the RPC block timestamp, their signed difference, and
@@ -191,7 +198,8 @@ for the reconciliation record.
 `qntyspot/boundary.py` defines the typing `Protocol`s for the chain/venue
 boundary. V0B implements the Ink `QuoteSource`; V0C adds the Solana/Jupiter
 `QuoteSource`; V0D adds the Robinhood shadow `QuoteSource`; this phase adds a
-bounded injected-transport Robinhood testnet `ChainTruthSource`. The B1
+bounded injected-transport Robinhood testnet `ChainTruthSource` under the
+repaired external-transaction identity. The B1
 runtime uses the existing chain-truth and reconciliation rules over either a
 historical signed record or an explicit externally created transaction
 reference. It records an accepted-but-absent or contradictory outcome as
@@ -202,9 +210,9 @@ Program B gives that rule an evidence contract:
 `qntyspot.execution_contract.evaluate_chain_truth` decides what a set of
 provider observations may conclude, and `reconcile_to_receipt` is the only path
 from external truth to a `FillReceiptV0`. Both are pure functions over records
-the caller supplies; neither reads a chain. No venue adapter implements
-`ChainTruthSource` or `Reconciler` yet; the B1 runtime only consumes persisted
-records.
+the caller supplies; neither reads a chain. The bounded adapter implements only
+`ChainTruthSource`; the B1 runtime continues to consume persisted records and
+the existing reconciliation path.
 
 ## Changing this document
 
