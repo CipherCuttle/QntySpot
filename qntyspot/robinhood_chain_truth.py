@@ -154,16 +154,14 @@ class RobinhoodTestnetChainTruthSource:
         transaction_hash: str,
         *,
         expected_taker: str,
-        input_token: str,
-        output_token: str,
+        input_token: str | None = None,
+        output_token: str | None = None,
         observed_at_epoch_s: int,
     ) -> ChainObservationV0:
         tx_hash = _hash(transaction_hash, field="transaction_hash")
         taker = _address(expected_taker, field="expected_taker")
-        input_asset = _address(input_token, field="input_token")
-        output_asset = _address(output_token, field="output_token")
-        if input_asset == output_asset:
-            raise _protocol("input_token and output_token must be distinct")
+        if (input_token is None) != (output_token is None):
+            raise _protocol("input_token and output_token must be supplied together")
         if type(observed_at_epoch_s) is not int or observed_at_epoch_s < 0:
             raise _protocol("observed_at_epoch_s must be a non-negative integer")
 
@@ -189,8 +187,6 @@ class RobinhoodTestnetChainTruthSource:
             "chain_id": chain_result,
             "head": dict(head),
             "head_number": head_result,
-            "input_token": input_asset,
-            "output_token": output_asset,
             "provider_id": self.provider_id,
             "rpc_endpoint": self.rpc_endpoint,
             "taker": taker,
@@ -264,6 +260,14 @@ class RobinhoodTestnetChainTruthSource:
                 receipt_status=ReceiptStatus.REVERTED,
                 evidence=evidence,
             )
+        if input_token is None or output_token is None:
+            raise _protocol("successful observation requires both token selectors")
+        input_asset = _address(input_token, field="input_token")
+        output_asset = _address(output_token, field="output_token")
+        if input_asset == output_asset:
+            raise _protocol("input_token and output_token must be distinct")
+        evidence["input_token"] = input_asset
+        evidence["output_token"] = output_asset
         input_amount, output_amount = self._transfer_amounts(
             receipt.get("logs"),
             taker=taker,

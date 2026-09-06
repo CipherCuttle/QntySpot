@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 
 from qntyspot.canon import canonical_json_bytes, strict_json_loads
@@ -21,6 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "095572b0d94d7edf055246a3829de94467fc07d0"
 REPAIR_COMMIT = "0e977b5801e932101d31b4ca131df71e93634efb"
 REPAIRED_IMPLEMENTATION_DIGEST = "7fdd08cbb60de858d4eab7031a8463f29b62648be4b88104f6bd031c23a32826"
+CURRENT_IMPLEMENTATION_DIGEST = "bdb1f4025ee7c16130ea422bd21febd69de4759654da1710f1e41d6935f6bc81"
 OLD_IMPLEMENTATION_DIGEST = "3195730dcc9368847cab61d9250279c0ed1f13c9b93691360a2d01b109c5b9d6"
 TAKER = "0x1324d87e24e1657f6fe6805de814bb6873052106"
 OLD_VENUE = "zero-x-swap-v2-robinhood-chain"
@@ -49,6 +53,19 @@ def _git(*args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=ROOT, check=True, capture_output=True, text=True
     ).stdout.rstrip("\n")
+
+
+def _historical_identity(commit: str) -> dict[str, object]:
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", commit],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    ).stdout
+    with tempfile.TemporaryDirectory(prefix="qntyspot-historical-") as temporary_root:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tar:
+            tar.extractall(temporary_root)
+        return build_identity(temporary_root, commit)
 
 
 def test_repair_preserves_prior_commit_and_ends_on_canonical_base_lineage() -> None:
@@ -143,9 +160,13 @@ def test_repair_evidence_is_canonical_and_cross_binds_successor_artifacts() -> N
     assert evidence["testnet_transactions"] == 0
 
 
-def test_repaired_source_digest_is_current_and_not_historical() -> None:
-    identity = build_identity(ROOT, _git("rev-parse", "HEAD"))
+def test_historical_venue_binding_identity_is_distinct_from_current_successor() -> None:
+    historical_identity = _historical_identity(REPAIR_COMMIT)
+    current_identity = build_identity(ROOT, _git("rev-parse", "HEAD"))
 
-    assert identity["implementation_identity_method"] == "sha256-canonical-source-manifest-v2"
-    assert identity["implementation_digest"] == REPAIRED_IMPLEMENTATION_DIGEST
-    assert identity["implementation_digest"] != OLD_IMPLEMENTATION_DIGEST
+    assert historical_identity["implementation_identity_method"] == "sha256-canonical-source-manifest-v2"
+    assert historical_identity["implementation_digest"] == REPAIRED_IMPLEMENTATION_DIGEST
+    assert current_identity["implementation_identity_method"] == "sha256-canonical-source-manifest-v2"
+    assert current_identity["implementation_digest"] == CURRENT_IMPLEMENTATION_DIGEST
+    assert current_identity["implementation_digest"] != REPAIRED_IMPLEMENTATION_DIGEST
+    assert historical_identity["implementation_digest"] != OLD_IMPLEMENTATION_DIGEST
