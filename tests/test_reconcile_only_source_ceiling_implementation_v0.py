@@ -389,7 +389,8 @@ def test_artifact_binds_implementation_scope_and_future_identity() -> None:
     assert document["current_level_1_external_grant"] == "NONE"
     assert document["current_effective_level_1_authority"] == "DENIED"
     assert document["qualification_network"] == ROBINHOOD_TESTNET_NETWORK_ID
-    assert document["qualification_venue"] == ROBINHOOD_TESTNET_VENUE_ID
+    assert document["qualification_venue"] == "zero-x-swap-v2-robinhood-chain"
+    assert ROBINHOOD_TESTNET_VENUE_ID == "robinhood-chain-testnet-external-transaction"
     assert document["qualification_taker"] == TAKER
     assert document["old_implementation_digest"] != document["new_implementation_digest"]
     raw = IMPLEMENTATION_ARTIFACT.read_bytes()
