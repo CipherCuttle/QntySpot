@@ -29,7 +29,7 @@ __all__ = [
 
 ROBINHOOD_TESTNET_CHAIN_ID = 46630
 ROBINHOOD_TESTNET_NETWORK_ID = "evm:46630"
-ROBINHOOD_TESTNET_VENUE_ID = "zero-x-swap-v2-robinhood-chain"
+ROBINHOOD_TESTNET_VENUE_ID = "robinhood-chain-testnet-external-transaction"
 ROBINHOOD_MAINNET_CHAIN_ID = 4663
 
 READ_ONLY_RPC_METHODS = frozenset(
