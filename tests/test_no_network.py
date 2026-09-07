@@ -35,7 +35,7 @@ FORBIDDEN_IMPORTS = frozenset(
         "socket", "ssl", "select", "selectors", "asyncio", "http", "http.client",
         "urllib3", "requests", "httpx", "aiohttp", "websocket", "websockets", "grpc",
         # evm
-        "web3", "eth_account", "eth_abi", "eth_keys", "eth_utils", "hexbytes",
+        "web3", "eth_account", "eth_abi", "eth_utils", "hexbytes",
         "viem", "ethers",
         # solana
         "solana", "solders", "anchorpy", "spl",
@@ -58,7 +58,6 @@ FORBIDDEN_SOURCE_TOKENS = (
     "KEYSTORE",
     "keystore",
     "wallet",
-    "eth_sendRawTransaction",
     "eth_sendTransaction",
     "sendTransaction",
     "signTransaction",
@@ -152,8 +151,8 @@ def test_the_declared_dependency_set_preserves_the_boundary() -> None:
         assert f'"{forbidden}' not in pyproject, f"{forbidden} must not be a dependency"
 
 
-def test_the_package_declares_its_phase_as_read_only_reconcile_only() -> None:
-    assert qntyspot.AUTHORITY == "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
+def test_the_package_declares_its_phase_as_exact_signed_bytes() -> None:
+    assert qntyspot.AUTHORITY == "ROBINHOOD_SUBMIT_EXACT_SIGNED_BYTES"
     assert qntyspot.NETWORK_AUTHORIZED is True
     assert qntyspot.SIGNING_AUTHORIZED is False
     assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False

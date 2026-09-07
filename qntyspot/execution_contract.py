@@ -16,10 +16,11 @@ reads the environment, reads a clock, or reaches a network. Every temporal
 input is an explicit argument.
 
 The source ceiling is ``PHASE_GRANTED_AUTHORITY_LEVEL =
-AuthorityLevel.RECONCILE_ONLY``. Runtime Level-1 behavior additionally requires
+AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES``. Runtime submission additionally requires
 the independently rooted consumer gate in ``qntyspot.authority_root``; this
-module cannot be used to authorize signing, approval, submission, or capital
-deployment.
+module cannot be used to authorize signing, approval, transaction construction,
+or capital deployment; exact-byte submission is additionally gated by the
+runtime's verified grant and reservation path.
 
 NAMING NOTE
 -----------
@@ -348,10 +349,10 @@ KILL_SWITCH_PRESERVED_CAPABILITIES: frozenset[Capability] = frozenset(
     }
 )
 
-#: The reviewed source ceiling for the reconcile-only implementation phase.
+#: The reviewed source ceiling for the exact-signed-bytes implementation phase.
 #: This is only one half of authority; runtime actions also require a current,
 #: independently verified external grant.
-PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.RECONCILE_ONLY
+PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
 
 assert set(LADDER) == set(AuthorityLevel), "the ladder must cover every level"
 assert all(
@@ -409,7 +410,7 @@ def assert_phase_ceiling(level: AuthorityLevel) -> None:
         raise AuthorityCeilingError(
             f"{level.name} exceeds the granted phase ceiling "
             f"{PHASE_GRANTED_AUTHORITY_LEVEL.name}; "
-            f"{CONTRACT_VERSION} grants no runtime authority above RECONCILE_ONLY"
+            f"{CONTRACT_VERSION} grants no runtime authority above SUBMIT_EXACT_SIGNED_BYTES"
         )
 
 

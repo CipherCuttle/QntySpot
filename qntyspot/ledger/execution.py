@@ -51,6 +51,13 @@ from ..execution_contract import (
     reconcile_to_receipt,
     derive_transaction_hash,
 )
+from ..exact_signed_bytes import (
+    ExactSignedBytesAdmissionV0,
+    ExactSignedBytesScopeV0,
+    ExactSignedBytesTransport,
+    ExactSignedTransactionRecordV0,
+    validate_exact_signed_bytes,
+)
 from ..authority_root import (
     VerifiedAuthorityGrantV0,
     assert_effective_capital_within,
@@ -63,6 +70,7 @@ from .execution_schema import (
     EXECUTION_TABLES,
     apply_execution_schema,
     migrate_execution_schema_v1_to_v2,
+    migrate_execution_schema_v2_to_v3,
     read_execution_schema_version,
 )
 from .store import SpotLedger
@@ -197,6 +205,8 @@ class ExecutionRuntime:
             migrate_execution_schema_v1_to_v2(self._conn)
         elif existing_tables != set(EXECUTION_TABLES):
             raise LedgerError("execution schema is partially applied")
+        elif read_execution_schema_version(self._conn) == 2:
+            migrate_execution_schema_v2_to_v3(self._conn)
         if read_execution_schema_version(self._conn) != EXECUTION_SCHEMA_VERSION:
             raise LedgerError("unsupported execution schema version")
 
@@ -573,6 +583,187 @@ class ExecutionRuntime:
                 values,
             )
 
+    def admit_exact_signed_bytes(
+        self,
+        scope: ExactSignedBytesScopeV0,
+        signed_bytes: bytes,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        *,
+        frozen_at_epoch_s: int,
+    ) -> ExactSignedBytesAdmissionV0:
+        """Validate and durably admit a complete external byte string.
+
+        The durable row is written before any transport call.  The byte string
+        remains in the returned in-memory handle and is never written to the
+        ledger or reconstructed from decoded fields.
+        """
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.SUBMIT_EXACT_BYTES,
+            now_epoch_s=frozen_at_epoch_s,
+        )
+        if scope.session_id != session.session_id:
+            raise AuthorityVerificationError("signed-byte scope names another session")
+        if scope.session_identity_digest != session.identity_digest:
+            raise AuthorityVerificationError("signed-byte scope session identity disagrees")
+        if scope.authority_policy_digest != session.authority_policy_digest:
+            raise AuthorityVerificationError("signed-byte scope authority disagrees")
+        if scope.chain_id != session.chain_id or scope.taker_address != session.taker_address:
+            raise AuthorityVerificationError("signed-byte scope session chain or taker disagrees")
+        validated = validate_exact_signed_bytes(signed_bytes, scope)
+        record = ExactSignedTransactionRecordV0(
+            economic_action_id=scope.economic_action_id,
+            scope_digest=scope.scope_digest,
+            signed_bytes_sha256=validated.signed_bytes_sha256,
+            signed_bytes_length=validated.signed_bytes_length,
+            transaction_hash=validated.parsed.transaction_hash,
+            chain_id=validated.parsed.chain_id,
+            account_nonce=validated.parsed.account_nonce,
+            taker_address=validated.parsed.sender_address,
+            signer_identity="evm-recovered:" + validated.parsed.sender_address,
+        )
+        with self._transaction("signed_metadata") as conn:
+            self._reject_if_killed("exact signed-byte admission")
+            action = self._require_economic_intent(scope.economic_action_id, conn)
+            if IntentState(action["state"]) is not IntentState.RESERVED:
+                raise LedgerError("exact signed-byte admission requires a durable reservation")
+            external = conn.execute(
+                "SELECT * FROM external_actions WHERE external_action_id = ?",
+                (scope.economic_action_id,),
+            ).fetchone()
+            if external is None or external["kind"] != "ECONOMIC":
+                raise LedgerError("exact signed-byte admission requires an economic action")
+            existing = conn.execute(
+                "SELECT * FROM signed_transactions WHERE external_action_id = ?",
+                (scope.economic_action_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["origin"] != "EXTERNAL_SIGNED_BYTES"
+                    or existing["raw_signed_sha256"] != record.signed_bytes_sha256
+                    or existing["transaction_hash"] != record.transaction_hash
+                    or existing["scope_digest"] != record.scope_digest
+                ):
+                    raise LedgerError("one economic action cannot bind different signed bytes")
+                return ExactSignedBytesAdmissionV0(signed_bytes, record, validated)
+            values = {
+                "signed_transaction_id": record.signed_transaction_id,
+                "external_action_id": scope.economic_action_id,
+                "session_id": session.session_id,
+                "envelope_id": None,
+                "approval_action_id": None,
+                "origin": "EXTERNAL_SIGNED_BYTES",
+                "chain_id": record.chain_id,
+                "taker_address": record.taker_address,
+                "account_nonce": record.account_nonce,
+                "raw_signed_sha256": record.signed_bytes_sha256,
+                "raw_signed_length": record.signed_bytes_length,
+                "transaction_hash": record.transaction_hash,
+                "scope_digest": record.scope_digest,
+                "signer_identity": record.signer_identity,
+                "frozen_at_epoch_s": frozen_at_epoch_s,
+            }
+            inserted = self._insert_or_match(
+                conn, "signed_transactions", "signed_transaction_id", record.signed_transaction_id, values
+            )
+            if inserted:
+                self.ledger.transition(
+                    scope.economic_action_id,
+                    IntentState.SIGNED,
+                    now_epoch_s=frozen_at_epoch_s,
+                    payload={"execution": "exact_signed_bytes_admitted"},
+                )
+        return ExactSignedBytesAdmissionV0(signed_bytes, record, validated)
+
+    def submit_exact_signed_bytes(
+        self,
+        admission: ExactSignedBytesAdmissionV0,
+        transport: ExactSignedBytesTransport,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        *,
+        provider_id: str,
+        submitted_at_epoch_s: int,
+        allow_identical_retry: bool = False,
+    ) -> SubmissionAttemptV0:
+        """Submit only the admitted bytes through the fixed transport seam."""
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.SUBMIT_EXACT_BYTES,
+            now_epoch_s=submitted_at_epoch_s,
+        )
+        if not isinstance(admission, ExactSignedBytesAdmissionV0):
+            raise EnvelopeValidationError("submission requires an exact signed-byte admission")
+        if not isinstance(provider_id, str) or not provider_id or provider_id.strip() != provider_id:
+            raise EnvelopeValidationError("provider_id must be a non-empty label")
+        if type(allow_identical_retry) is not bool:
+            raise EnvelopeValidationError("allow_identical_retry must be boolean")
+        if admission.validated.scope.session_id != session.session_id:
+            raise AuthorityVerificationError("admission belongs to another session")
+        if sha256_hex(admission.signed_bytes) != admission.record.signed_bytes_sha256:
+            raise EnvelopeValidationError("admitted bytes were mutated")
+        signed_id = admission.record.signed_transaction_id
+        row = self._conn.execute(
+            "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?", (signed_id,)
+        ).fetchone()
+        if row is None:
+            raise LedgerError("signed-byte admission is not durable")
+        if row["raw_signed_sha256"] != admission.record.signed_bytes_sha256:
+            raise EnvelopeValidationError("durable signed-byte digest disagrees")
+        prior_attempt = self._conn.execute(
+            "SELECT 1 FROM submission_attempts WHERE signed_transaction_id = ? LIMIT 1",
+            (signed_id,),
+        ).fetchone()
+        if prior_attempt is not None and not allow_identical_retry:
+            raise SafeHaltError(
+                "identical signed-byte retransmission requires explicit idempotent retry admission"
+            )
+        try:
+            provider_hash = transport.submit_exact_signed_bytes(admission.signed_bytes)
+        except Exception as exc:
+            attempt = SubmissionAttemptV0(
+                signed_transaction_id=signed_id,
+                provider_id=provider_id,
+                attempt_ordinal=self._next_submission_ordinal(signed_id, provider_id),
+                submitted_at_epoch_s=submitted_at_epoch_s,
+                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+                error_class=exc.__class__.__name__,
+            )
+            self._record_submission_attempt(attempt)
+            return attempt
+        if provider_hash != admission.record.transaction_hash:
+            attempt = SubmissionAttemptV0(
+                signed_transaction_id=signed_id,
+                provider_id=provider_id,
+                attempt_ordinal=self._next_submission_ordinal(signed_id, provider_id),
+                submitted_at_epoch_s=submitted_at_epoch_s,
+                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+                error_class="ProviderHashMismatch",
+            )
+            self._record_submission_attempt(attempt)
+            return attempt
+        attempt = SubmissionAttemptV0(
+            signed_transaction_id=signed_id,
+            provider_id=provider_id,
+            attempt_ordinal=self._next_submission_ordinal(signed_id, provider_id),
+            submitted_at_epoch_s=submitted_at_epoch_s,
+            acknowledgment=SubmissionAcknowledgment.ACCEPTED,
+            provider_reported_hash=provider_hash,
+        )
+        self._record_submission_attempt(attempt)
+        return attempt
+
+    def _next_submission_ordinal(self, signed_transaction_id: str, provider_id: str) -> int:
+        row = self._conn.execute(
+            "SELECT COALESCE(MAX(attempt_ordinal), -1) + 1 AS next_ordinal "
+            "FROM submission_attempts WHERE signed_transaction_id = ? AND provider_id = ?",
+            (signed_transaction_id, provider_id),
+        ).fetchone()
+        return int(row["next_ordinal"])
+
     def record_execution_envelope(
         self,
         envelope: ExecutionEnvelopeV0,
@@ -796,6 +987,7 @@ class ExecutionRuntime:
                 "session_id": envelope["session_id"],
                 "envelope_id": record.envelope_id,
                 "approval_action_id": None,
+                "origin": "ENVELOPE",
                 "chain_id": record.chain_id,
                 "taker_address": record.taker_address,
                 "account_nonce": record.account_nonce,
@@ -823,10 +1015,20 @@ class ExecutionRuntime:
                 raise LedgerError(f"signed metadata requires RESERVED intent, got {state.value}")
             return inserted
 
-    def record_submission_attempt(self, attempt: SubmissionAttemptV0) -> bool:
+    def record_submission_attempt(
+        self,
+        attempt: SubmissionAttemptV0,
+        *,
+        session: ExecutionSessionV0 | None = None,
+        verified_grant: VerifiedAuthorityGrantV0 | None = None,
+        now_epoch_s: int | None = None,
+    ) -> bool:
         raise AuthorityCeilingError(
-            "submission metadata is unavailable at the RECONCILE_ONLY source ceiling"
+            "submission attempts require the exact signed-byte submission entrypoint"
         )
+        # The implementation is intentionally private to the bounded submitter.
+
+    def _record_submission_attempt(self, attempt: SubmissionAttemptV0) -> bool:
         with self._transaction("submission_attempt") as conn:
             self._reject_if_killed("submission attempts")
             signed = conn.execute(

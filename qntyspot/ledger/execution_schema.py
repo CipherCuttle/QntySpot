@@ -48,8 +48,9 @@ nothing, submits nothing, and stores no key material anywhere: a signed
 transaction is represented by a digest of its payload, its length, and its
 hash. ``EXECUTION_SCHEMA_VERSION`` is independently versioned from the core
 ``SCHEMA_VERSION``. Version 2 adds the append-only external transaction
-reference and alternate chain-observation binding while preserving the
-historical signed path.
+reference and alternate chain-observation binding. Version 3 adds an
+explicit external-signed origin for exact-byte admission while preserving
+historical envelope and approval rows.
 """
 
 from __future__ import annotations
@@ -62,16 +63,19 @@ from .atomics import non_negative_atomic_check, positive_atomic_check
 __all__ = [
     "EXECUTION_SCHEMA_VERSION",
     "EXECUTION_SCHEMA_VERSION_V1",
+    "EXECUTION_SCHEMA_VERSION_V2",
     "EXECUTION_SCHEMA_SQL",
     "EXECUTION_TABLES",
     "EXECUTION_TABLES_V1",
     "apply_execution_schema",
     "migrate_execution_schema_v1_to_v2",
+    "migrate_execution_schema_v2_to_v3",
     "read_execution_schema_version",
 ]
 
 EXECUTION_SCHEMA_VERSION_V1 = 1
-EXECUTION_SCHEMA_VERSION = 2
+EXECUTION_SCHEMA_VERSION_V2 = 2
+EXECUTION_SCHEMA_VERSION = 3
 
 EXECUTION_TABLES_V1 = (
     "execution_sessions",
@@ -256,15 +260,21 @@ CREATE TABLE signed_transactions (
     session_id            TEXT NOT NULL REFERENCES execution_sessions(session_id),
     envelope_id           TEXT REFERENCES execution_envelopes(envelope_id),
     approval_action_id    TEXT REFERENCES approval_actions(approval_action_id),
+    origin               TEXT NOT NULL DEFAULT 'ENVELOPE'
+                          CHECK (origin IN ('ENVELOPE','APPROVAL','EXTERNAL_SIGNED_BYTES')),
     chain_id              INTEGER NOT NULL CHECK (chain_id > 0),
     taker_address         TEXT NOT NULL,
     account_nonce         INTEGER NOT NULL CHECK (account_nonce >= 0),
     raw_signed_sha256     TEXT NOT NULL UNIQUE,
     raw_signed_length     INTEGER NOT NULL CHECK (raw_signed_length > 0),
     transaction_hash      TEXT NOT NULL UNIQUE,
+    scope_digest          TEXT NOT NULL DEFAULT '',
     signer_identity       TEXT NOT NULL,
     frozen_at_epoch_s     INTEGER NOT NULL CHECK (frozen_at_epoch_s >= 0),
-    CHECK ((envelope_id IS NULL) <> (approval_action_id IS NULL)),
+    CHECK (
+        origin IN ('ENVELOPE','APPROVAL')
+        OR (origin = 'EXTERNAL_SIGNED_BYTES' AND envelope_id IS NULL AND approval_action_id IS NULL)
+    ),
     UNIQUE (chain_id, taker_address, account_nonce)
 ) STRICT;
 
@@ -637,6 +647,12 @@ END;
 CREATE TRIGGER signed_transactions_kind_guard
 BEFORE INSERT ON signed_transactions
 BEGIN
+    SELECT CASE WHEN NEW.origin = 'EXTERNAL_SIGNED_BYTES' AND EXISTS (
+        SELECT 1 FROM execution_envelopes WHERE envelope_id = NEW.envelope_id
+    ) THEN RAISE(ABORT, 'external signed origin cannot name an envelope') END;
+    SELECT CASE WHEN NEW.origin = 'ENVELOPE'
+        AND NEW.envelope_id IS NULL AND NEW.approval_action_id IS NULL
+        THEN RAISE(ABORT, 'signed transaction subtype is missing') END;
     SELECT CASE WHEN EXISTS (
         SELECT 1 FROM external_transaction_refs
          WHERE external_action_id = NEW.external_action_id
@@ -918,11 +934,60 @@ def migrate_execution_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
         _execute_trigger_script(conn, _EXECUTION_TRIGGER_SQL)
         conn.execute(
             "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
-            (str(EXECUTION_SCHEMA_VERSION),),
+            (str(EXECUTION_SCHEMA_VERSION_V2),),
         )
         conn.execute(
             "UPDATE schema_meta SET value = ? WHERE key = 'execution_authority'",
             ("B1_RECONCILE_ONLY: no signer, no submission, no capital authority",),
+        )
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    migrate_execution_schema_v2_to_v3(conn)
+
+
+def migrate_execution_schema_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """Add the explicit origin discriminator without rewriting old facts."""
+    if read_execution_schema_version(conn) != EXECUTION_SCHEMA_VERSION_V2:
+        raise SchemaVersionError("migration requires execution schema version 2")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(signed_transactions)")}
+    if "origin" in columns:
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
+            (str(EXECUTION_SCHEMA_VERSION),),
+        )
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        trigger_rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ("
+            + ",".join("?" for _ in EXECUTION_TABLES)
+            + ")",
+            EXECUTION_TABLES,
+        ).fetchall()
+        for row in trigger_rows:
+            trigger_name = str(row[0]).replace('"', '""')
+            conn.execute(f'DROP TRIGGER "{trigger_name}"')
+        conn.execute(
+            "ALTER TABLE signed_transactions ADD COLUMN origin TEXT NOT NULL DEFAULT 'ENVELOPE' "
+            "CHECK (origin IN ('ENVELOPE','APPROVAL','EXTERNAL_SIGNED_BYTES'))"
+        )
+        conn.execute(
+            "ALTER TABLE signed_transactions ADD COLUMN scope_digest TEXT NOT NULL DEFAULT ''"
+        )
+        conn.execute(
+            "UPDATE signed_transactions SET origin = 'APPROVAL' "
+            "WHERE envelope_id IS NULL AND approval_action_id IS NOT NULL"
+        )
+        _execute_trigger_script(conn, _EXECUTION_TRIGGER_SQL)
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
+            (str(EXECUTION_SCHEMA_VERSION),),
+        )
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_authority'",
+            ("B2_SUBMIT_EXACT_SIGNED_BYTES: external bytes only; no construction or signing",),
         )
         conn.execute("COMMIT")
     except BaseException:
@@ -954,6 +1019,11 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
         if set(collisions) == set(EXECUTION_TABLES_V1):
             migrate_execution_schema_v1_to_v2(conn)
             return
+        if set(collisions) == set(EXECUTION_TABLES):
+            version = read_execution_schema_version(conn)
+            if version == EXECUTION_SCHEMA_VERSION_V2:
+                migrate_execution_schema_v2_to_v3(conn)
+                return
         raise LedgerError(f"execution schema already applied: {collisions}")
     conn.execute("PRAGMA recursive_triggers = ON")
     if not conn.execute("PRAGMA recursive_triggers").fetchone()[0]:

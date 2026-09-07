@@ -1,11 +1,13 @@
 """QntySpot -- deterministic policy-bound spot runtime.
 
-PHASE: RECONCILE-ONLY SOURCE CEILING IMPLEMENTATION -- READ ONLY
+PHASE: EXACT-SIGNED-BYTES SOURCE CEILING IMPLEMENTATION
 --------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
-one bounded public-read Robinhood/Chainlink/0x adapter. It has no signer, no
-key handling, no transaction encoder, no transaction broadcast surface, and
-no live-capital authority from any other repository.
+one bounded Robinhood/Chainlink/0x adapter. It has no signer, no key handling,
+no transaction encoder, and no live-capital authority from any other
+repository. The only new external-effect seam accepts a complete, externally
+signed EVM byte string, validates it read-only, and can submit that exact
+byte string under a verified Level-2 grant.
 
 ``execution_contract`` and ``ledger.execution_schema`` are the frozen Program B
 pre-live execution contract. ``ledger.execution`` is the offline B1 runtime;
@@ -31,7 +33,7 @@ __version__ = "0.0.1a0"
 
 #: Machine-readable phase marker. The source ceiling is reconcile-only, but a
 #: current independently verified external grant remains required at runtime.
-AUTHORITY = "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
+AUTHORITY = "ROBINHOOD_SUBMIT_EXACT_SIGNED_BYTES"
 NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False
@@ -129,6 +131,16 @@ from .execution_contract import (  # noqa: E402
     FinalityPolicyV0,
     SignedTransactionRecordV0,
     SubmissionAttemptV0,
+)
+from .exact_signed_bytes import (  # noqa: E402
+    ExactSignedBytesAdmissionV0,
+    ExactSignedBytesScopeV0,
+    ExactSignedBytesTransport,
+    ExactSignedTransactionRecordV0,
+    JsonRpcExactSignedBytesTransport,
+    ParsedExactSignedBytesV0,
+    ValidatedExactSignedBytesV0,
+    validate_exact_signed_bytes,
 )
 from .authority_root import (  # noqa: E402
     AUTHORITY_ROOT_CONTRACT_VERSION,
@@ -240,6 +252,14 @@ __all__ = [
     "ApprovalActionV0",
     "SignedTransactionRecordV0",
     "SubmissionAttemptV0",
+    "ExactSignedBytesAdmissionV0",
+    "ExactSignedBytesScopeV0",
+    "ExactSignedBytesTransport",
+    "ExactSignedTransactionRecordV0",
+    "JsonRpcExactSignedBytesTransport",
+    "ParsedExactSignedBytesV0",
+    "ValidatedExactSignedBytesV0",
+    "validate_exact_signed_bytes",
     "AUTHORITY_ROOT_CONTRACT_VERSION",
     "TrustedAuthorityRootV0",
     "AuthorityGrantReceiptV0",

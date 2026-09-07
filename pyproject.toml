@@ -10,12 +10,17 @@ requires-python = ">=3.11"
 license = { text = "UNLICENSED" }
 dependencies = [
     "cryptography>=41.0",
+    # Used only for read-only EVM RLP decoding and secp256k1 sender recovery.
+    # It never receives signing material and is not an RPC or wallet client.
+    "eth-keys>=0.7,<0.9",
+    "rlp>=4,<6",
 ]
 
 # V0A DEPENDENCY BOUNDARY (enforced by tests/test_no_network.py):
 #   no web3, no viem, no solana/solders, no HTTP client, no database server.
-#   Standard-library core plus the narrow cryptographic verification dependency
-#   for Ed25519 authority receipts. SQLite is the persistence substrate.
+#   Standard-library core plus narrow cryptographic dependencies for Ed25519
+#   authority receipts and read-only EVM signed-byte validation. SQLite is the
+#   persistence substrate.
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]

@@ -27,7 +27,7 @@ def design() -> dict[str, object]:
 def test_current_source_ceiling_and_design_target_are_distinct() -> None:
     document = design()
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
     assert document["input_qntyspot"]["current_source_phase_ceiling"] == "SHADOW"
     assert document["source_ceiling_design"]["target"] == "RECONCILE_ONLY"
     assert document["source_ceiling_design"]["runtime_change_in_this_phase"] == "NO"
@@ -38,8 +38,8 @@ def test_current_source_ceiling_and_design_target_are_distinct() -> None:
 
 
 def test_implementation_source_now_matches_the_frozen_design_target() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-    assert "RECONCILE_ONLY" not in {cap.name for cap in Capability if cap in LADDER[AuthorityLevel.RECONCILE_ONLY]}
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+    assert Capability.SUBMIT_EXACT_BYTES in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
 
 
 def test_level_1_capabilities_match_frozen_program_b() -> None:
