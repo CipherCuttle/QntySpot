@@ -38,7 +38,6 @@ FORBIDDEN_IMPORTS = frozenset(
         "web3",
         "eth_account",
         "eth_abi",
-        "eth_keys",
         "eth_utils",
         "hexbytes",
         "viem",
@@ -308,6 +307,7 @@ def _program_b_report() -> dict[str, Any]:
     if PHASE_GRANTED_AUTHORITY_LEVEL not in {
         AuthorityLevel.SHADOW,
         AuthorityLevel.RECONCILE_ONLY,
+        AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES,
     }:
         raise SystemExit("authority continuity failed: unsupported source phase ceiling")
     ordered = sorted(AuthorityLevel)
@@ -333,7 +333,7 @@ def _program_b_report() -> dict[str, Any]:
     else:
         for capability in Capability:
             try:
-                require_capability(capability, AuthorityLevel.RECONCILE_ONLY)
+                require_capability(capability, PHASE_GRANTED_AUTHORITY_LEVEL)
             except AuthorityVerificationError:
                 continue
             except AuthorityCeilingError:
@@ -426,7 +426,11 @@ def build_report() -> dict[str, Any]:
             "authority": (
                 "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
                 if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-                else "ROBINHOOD_SHADOW_READ_ONLY"
+                else (
+                    "ROBINHOOD_SUBMIT_EXACT_SIGNED_BYTES"
+                    if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+                    else "ROBINHOOD_SHADOW_READ_ONLY"
+                )
             ),
             "live_capital_authorized": False,
             "network_authorized": True,
