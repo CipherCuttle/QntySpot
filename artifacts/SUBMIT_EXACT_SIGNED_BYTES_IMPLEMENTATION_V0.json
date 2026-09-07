@@ -1,0 +1,67 @@
+{
+  "artifact_id": "QNTY_SPOT_SUBMIT_EXACT_SIGNED_BYTES_V0",
+  "canonical_parent_sha": "e71f3d698c449bbd7eb73bcd4547899b7f5f0594",
+  "authority_root_canonical": "b1ee3a005e7fe44f1484c096fcaeb62d3a05e234",
+  "historical_level_1_qualification": "QNTY_SPOT_RECONCILE_ONLY_REVERT_QUALIFICATION_V0_CLOSED_PASS",
+  "source_phase_ceiling": "SUBMIT_EXACT_SIGNED_BYTES",
+  "effective_authority_formula": "MIN(SOURCE_PHASE_CEILING, VERIFIED_EXTERNAL_GRANT_LEVEL)",
+  "level_2_grant_issued_in_this_phase": "NO",
+  "level_2_grant_required_at_runtime": "YES",
+  "permitted_capabilities": [
+    "OBSERVE_MARKET",
+    "DECIDE_OFFLINE",
+    "OBSERVE_CHAIN",
+    "RECONCILE",
+    "ACCOUNT_QUARANTINE",
+    "RESERVE_CAPITAL",
+    "SUBMIT_EXACT_BYTES"
+  ],
+  "forbidden_capabilities": [
+    "CONSTRUCT_ENVELOPE",
+    "AUTHORIZE_APPROVAL",
+    "PRODUCE_SIGNATURE",
+    "PRIVATE_KEY_ACCESS",
+    "TRANSACTION_MUTATION",
+    "AUTOMATIC_ECONOMIC_RETRY"
+  ],
+  "exact_byte_invariant": "QNTYSPOT_SUBMITTED_BYTES == EXACT_INPUT_BYTES",
+  "signed_bytes_durable_facts": [
+    "SIGNED_BYTES_SHA256",
+    "SIGNED_TX_HASH",
+    "LENGTH",
+    "CHAIN_ID",
+    "NONCE",
+    "RECOVERED_SENDER"
+  ],
+  "durable_ordering": [
+    "AUTHORITY_VERIFIED",
+    "INTENT_ADMITTED",
+    "RESERVATION_DURABLE",
+    "SIGNED_BYTES_ADMITTED",
+    "SIGNED_BYTES_HASH_AND_TX_HASH_DURABLE",
+    "EXACT_SUBMIT",
+    "PUBLIC_SUBMISSION_REFERENCE",
+    "TWO_PROVIDER_OBSERVATION",
+    "RECONCILIATION"
+  ],
+  "external_signer_boundary": "QntySpot receives complete signed bytes and immutable scope only",
+  "qntyspot_can_construct_transaction": "NO",
+  "qntyspot_can_sign_transaction": "NO",
+  "qntyspot_can_mutate_signed_transaction": "NO",
+  "qntyspot_can_submit_exact_signed_bytes": "YES",
+  "private_key_access": "NO",
+  "capital_authority": "NONE",
+  "blockchain_submission_in_this_phase": "NO",
+  "implementation_digest_at_candidate_freeze": "b74ccdd99b5a5de4f11310014cf29100a60d07d8e350a43cd1f2dc2b678936f7",
+  "new_dependency_justification": "eth-keys and rlp are used only for read-only EVM decoding and cryptographic sender recovery; no RPC, wallet, signing, or transaction-construction API is imported",
+  "focused_tests": "PASS",
+  "full_suite_failures": 0,
+  "hostile_review": {
+    "review_count": 1,
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "next_phase": "QNTY_AUTHORITY_ROOT_SUBMIT_EXACT_SIGNED_BYTES_GRANT_GOVERNANCE_V0"
+}

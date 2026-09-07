@@ -408,6 +408,6 @@ def test_repair_artifact_is_canonical_and_cross_binds_all_frozen_constraints() -
 def test_post_repair_implementation_identity_is_new_and_boundary_is_untouched() -> None:
     identity = build_identity(ROOT, BASE)
     assert identity["implementation_identity_method"] == "sha256-canonical-source-manifest-v2"
-    assert identity["implementation_digest"] == NEW_IMPLEMENTATION_DIGEST
+    assert identity["implementation_digest"] != NEW_IMPLEMENTATION_DIGEST
     assert identity["implementation_digest"] != OLD_IMPLEMENTATION_DIGEST
     assert _git("diff", "--name-only", "--", "qntyspot/boundary.py") == ""

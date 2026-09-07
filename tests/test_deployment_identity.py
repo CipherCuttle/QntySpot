@@ -27,7 +27,7 @@ def test_historical_deployment_identity_artifact_is_preserved() -> None:
     assert artifact["implementation_identity_method"] == METHOD
     assert artifact["implementation_identity"]["file_manifest"]
     assert [item["path"] for item in artifact["implementation_identity"]["file_manifest"]] == [
-        path for path in SOURCE_PATHS if path != "qntyspot/robinhood_chain_truth.py"
+        path for path in SOURCE_PATHS if path not in {"qntyspot/robinhood_chain_truth.py", "qntyspot/exact_signed_bytes.py"}
     ]
     assert artifact != build_identity(ROOT, CANONICAL_COMMIT)
 
@@ -153,4 +153,4 @@ def test_wrong_commit_shape_is_rejected() -> None:
 def test_identity_repair_does_not_change_the_current_implementation_phase() -> None:
     from qntyspot.execution_contract import AuthorityLevel, PHASE_GRANTED_AUTHORITY_LEVEL
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES

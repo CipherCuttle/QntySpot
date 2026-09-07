@@ -31,6 +31,7 @@ SOURCE_PATHS = (
     "qntyspot/domain.py",
     "qntyspot/economics.py",
     "qntyspot/errors.py",
+    "qntyspot/exact_signed_bytes.py",
     "qntyspot/execution_contract.py",
     "qntyspot/identity.py",
     "qntyspot/ink.py",
@@ -54,6 +55,7 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
+LEGACY_SOURCE_PATHS = tuple(path for path in SOURCE_PATHS if path != "qntyspot/exact_signed_bytes.py")
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -79,7 +81,8 @@ def _validate_commit(repository_commit: str) -> None:
 
 
 def _source_manifest(root: Path) -> list[dict[str, str]]:
-    expected_package_paths = {path for path in SOURCE_PATHS if path.startswith("qntyspot/")}
+    manifest_paths = SOURCE_PATHS if (root / "qntyspot/exact_signed_bytes.py").exists() else LEGACY_SOURCE_PATHS
+    expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
     package_root = root / "qntyspot"
     discovered_package_paths = sorted(
         path.relative_to(root).as_posix()
@@ -100,7 +103,7 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
             + (": " + ", ".join(details) if details else "")
         )
     manifest: list[dict[str, str]] = []
-    for relative_path in SOURCE_PATHS:
+    for relative_path in manifest_paths:
         path = root / relative_path
         if path.is_symlink() or not path.is_file():
             raise DeploymentIdentityError(f"identity input is not a regular file: {relative_path}")
