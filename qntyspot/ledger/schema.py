@@ -45,6 +45,12 @@ class EventType(str, Enum):
     INTENT_CREATED = "INTENT_CREATED"
     INTENT_TRANSITION = "INTENT_TRANSITION"
     FILL_RECEIPT_APPENDED = "FILL_RECEIPT_APPENDED"
+    # Explicit recovery primitive for one narrow SAFE_HALT shape: a
+    # zero-submission externally admitted byte string whose reservation was
+    # quarantined before any transport attempt. Written only by
+    # ExecutionRuntime.resume_quarantined_exact_signed_bytes; never by the
+    # ordinary transition table, where SAFE_HALT stays terminal.
+    EXACT_BYTES_RESUMED = "EXACT_BYTES_RESUMED"
 
 
 CYCLE_EVENT_TYPES = frozenset(

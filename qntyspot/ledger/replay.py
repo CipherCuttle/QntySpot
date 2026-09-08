@@ -116,6 +116,12 @@ def replay_into(
                     seq,
                     trusted_reverted_external_action_ids=trusted_reverted_external_action_ids,
                 )
+            elif etype == EventType.EXACT_BYTES_RESUMED.value:
+                _require(
+                    action_id in seen_actions,
+                    f"event {seq}: resume for unknown action {action_id}",
+                )
+                _apply_exact_bytes_resume(wconn, str(action_id), event, seq)
             elif etype == EventType.FILL_RECEIPT_APPENDED.value:
                 _require(
                     action_id in seen_actions,
@@ -297,6 +303,57 @@ def _apply_transition(
 
     conn.execute(
         "UPDATE intents SET state = ? WHERE economic_action_id = ?", (dst.value, action_id)
+    )
+
+
+def _apply_exact_bytes_resume(
+    conn: sqlite3.Connection,
+    action_id: str,
+    event: Mapping[str, Any],
+    seq: int,
+) -> None:
+    """Deterministically rebuild one zero-submission exact-bytes resume.
+
+    This event type exists because SAFE_HALT is terminal in the ordinary
+    transition table. Replay validates the recorded prior shape instead of the
+    transition table: the intent must be replayed to SAFE_HALT with a
+    QUARANTINED reservation, and the recovery type must match exactly.
+    """
+    payload = strict_json_loads(event["payload_json"])
+    _require(
+        str(event["from_state"]) == IntentState.SAFE_HALT.value
+        and str(event["to_state"]) == IntentState.SIGNED.value,
+        f"event {seq}: exact-bytes resume must record SAFE_HALT -> SIGNED",
+    )
+    _require(
+        payload.get("recovery_type") == "ZERO_SUBMISSION_EXACT_BYTES_RESUME",
+        f"event {seq}: unexpected recovery type for an exact-bytes resume",
+    )
+    row = conn.execute(
+        "SELECT state FROM intents WHERE economic_action_id = ?", (action_id,)
+    ).fetchone()
+    _require(row is not None, f"event {seq}: no intent {action_id}")
+    _require(
+        row["state"] == IntentState.SAFE_HALT.value,
+        f"event {seq}: exact-bytes resume requires a replayed SAFE_HALT intent",
+    )
+    reservation = conn.execute(
+        "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
+        (action_id,),
+    ).fetchone()
+    _require(
+        reservation is not None
+        and reservation["status"] == ReservationStatus.QUARANTINED.value,
+        f"event {seq}: exact-bytes resume requires a QUARANTINED reservation",
+    )
+    conn.execute(
+        "UPDATE intents SET state = ? WHERE economic_action_id = ?",
+        (IntentState.SIGNED.value, action_id),
+    )
+    conn.execute(
+        "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+        "WHERE economic_action_id = ? AND status = ?",
+        (ReservationStatus.ACTIVE.value, action_id, ReservationStatus.QUARANTINED.value),
     )
 
 

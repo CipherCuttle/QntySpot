@@ -21,6 +21,7 @@ from .replay import replay_into, reconstruct, assert_replay_equivalence
 from .recovery import RecoveryAction, recover
 from .execution import (
     B1_O04_EXTERNAL_ROOT_BLOCKED,
+    ExactBytesResumeResultV0,
     ExternalAuthorityProofV0,
     ExecutionRuntime,
     ExecutionStore,
@@ -54,6 +55,7 @@ __all__ = [
     "RecoveryAction",
     "recover",
     "B1_O04_EXTERNAL_ROOT_BLOCKED",
+    "ExactBytesResumeResultV0",
     "ExternalAuthorityProofV0",
     "ExecutionRuntime",
     "ExecutionStore",

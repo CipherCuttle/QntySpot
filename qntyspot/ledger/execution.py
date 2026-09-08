@@ -11,10 +11,10 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from ..canon import digest_object, parse_canonical_decimal, sha256_hex, strict_json_loads
-from ..domain import EconomicBounds, Side
+from ..domain import EconomicBounds, ReservationStatus, Side
 from ..errors import (
     AuthorityCeilingError,
     AuthorityVerificationError,
@@ -75,10 +75,12 @@ from .execution_schema import (
     read_execution_schema_version,
     validate_execution_schema_shape,
 )
+from .schema import EventType
 from .store import SpotLedger
 
 __all__ = [
     "B1_O04_EXTERNAL_ROOT_BLOCKED",
+    "ExactBytesResumeResultV0",
     "ExternalAuthorityProofV0",
     "verify_external_authority_proof",
     "ExecutionRuntime",
@@ -155,6 +157,22 @@ class ExternalAuthorityProofV0:
         return digest_object(self.canonical_object())
 
 
+#: Recovery type recorded in the durable audit event. Names the one narrow
+#: SAFE_HALT shape this primitive may lift: zero submission attempts were ever
+#: made, so the held bytes have provably never crossed the transport seam.
+ZERO_SUBMISSION_EXACT_BYTES_RESUME = "ZERO_SUBMISSION_EXACT_BYTES_RESUME"
+
+
+@dataclass(frozen=True, slots=True)
+class ExactBytesResumeResultV0:
+    """Classification of one :meth:`resume_quarantined_exact_signed_bytes` call."""
+
+    economic_action_id: str
+    signed_transaction_id: str
+    recovery_digest: str
+    already_resumed: bool
+
+
 def verify_external_authority_proof(
     proof: ExternalAuthorityProofV0,
     authority: AuthorityPolicyRefV0,
@@ -166,6 +184,23 @@ def verify_external_authority_proof(
     del proof, authority, repository_commit, implementation_digest
     raise AuthorityCeilingError(
         "B1 has no independently rooted authority verifier; authority proof is deferred"
+    )
+
+
+def _is_sha256_hex(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _is_tx_hash(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 66
+        and value.startswith("0x")
+        and _is_sha256_hex(value[2:])
     )
 
 
@@ -720,6 +755,12 @@ class ExecutionRuntime:
             raise LedgerError("signed-byte admission is not durable")
         if row["raw_signed_sha256"] != admission.record.signed_bytes_sha256:
             raise EnvelopeValidationError("durable signed-byte digest disagrees")
+        if row["transaction_hash"] != admission.record.transaction_hash:
+            raise EnvelopeValidationError("durable transaction hash disagrees with the admitted bytes")
+        # Durable economic-state gate. Every check below reads committed ledger
+        # facts and MUST pass before the transport seam is reached; a transport
+        # call from any other shape would create an unaccounted external effect.
+        self._assert_exact_bytes_submittable(admission)
         prior_attempt = self._conn.execute(
             "SELECT 1 FROM submission_attempts WHERE signed_transaction_id = ? LIMIT 1",
             (signed_id,),
@@ -770,6 +811,347 @@ class ExecutionRuntime:
             (signed_transaction_id, provider_id),
         ).fetchone()
         return int(row["next_ordinal"])
+
+    def _assert_exact_bytes_submittable(
+        self, admission: ExactSignedBytesAdmissionV0
+    ) -> None:
+        """Durable economic-state gate immediately before the transport seam.
+
+        Every fact is re-read from the ledger inside one transaction so the
+        decision is mechanical and durable, not a cached caller belief. If any
+        gate fails here the transport must never observe the bytes: an unknown
+        external outcome is resolved by ``SAFE_HALT``, never by retrying.
+        """
+        action_id = admission.validated.scope.economic_action_id
+        with self._transaction("submission_attempt") as conn:
+            row = conn.execute(
+                "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
+                (admission.record.signed_transaction_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerError("signed-byte admission is not durable")
+            if row["origin"] != "EXTERNAL_SIGNED_BYTES":
+                raise LedgerError(
+                    "exact-byte submission requires an EXTERNAL_SIGNED_BYTES origin"
+                )
+            if row["external_action_id"] != action_id:
+                raise AuthorityVerificationError(
+                    "signed transaction is not bound to the expected economic action"
+                )
+            intent = self._require_economic_intent(action_id, conn)
+            state = IntentState(intent["state"])
+            if state is not IntentState.SIGNED:
+                raise SafeHaltError(
+                    f"exact-byte submission requires SIGNED intent, got {state.value}"
+                )
+            reservation = conn.execute(
+                "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
+                (action_id,),
+            ).fetchone()
+            if reservation is None:
+                raise LedgerError("exact-byte submission requires a durable reservation")
+            if reservation["status"] != ReservationStatus.ACTIVE.value:
+                raise SafeHaltError(
+                    "exact-byte submission requires an ACTIVE reservation, got "
+                    f"{reservation['status']}"
+                )
+            contradictory = conn.execute(
+                "SELECT 1 FROM reconciliations WHERE external_action_id = ? LIMIT 1",
+                (action_id,),
+            ).fetchone()
+            if contradictory is not None:
+                raise SafeHaltError(
+                    "a recorded reconciliation contradicts a fresh exact-byte submission"
+                )
+
+    def resume_quarantined_exact_signed_bytes(
+        self,
+        economic_action_id: str,
+        *,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        signed_bytes_sha256: str,
+        transaction_hash: str,
+        chain_id: int,
+        taker_address: str,
+        account_nonce: int,
+        absence_observations: Sequence[ChainObservationV0],
+        evidence_max_age_s: int,
+        recovery_timestamp_epoch_s: int,
+    ) -> ExactBytesResumeResultV0:
+        """Lift one narrow SAFE_HALT shape back to SIGNED with an ACTIVE reservation.
+
+        Admissible only for an externally admitted byte string that was
+        quarantined before its first transport attempt. The effect is atomic and
+        restores the SAME episode: no new economic action, reservation, signed
+        transaction, session, hash, nonce, or bytes is ever created. The
+        transition is not in the ordinary ``TRANSITIONS`` table (``SAFE_HALT``
+        stays terminal there); it is recorded as an explicit
+        ``EXACT_BYTES_RESUMED`` audit event that replay rebuilds
+        deterministically.
+
+        Gates, all mechanical and durable, in one transaction: intent
+        ``SAFE_HALT``; reservation ``QUARANTINED``; signed transaction exists
+        with origin ``EXTERNAL_SIGNED_BYTES`` and exact digest/hash/chain/
+        taker/nonce; session, economic-action, and authority-policy bindings
+        exact; ``submission_attempts`` (including UNKNOWN),
+        ``reconciliations``, ``fill_receipts``, and
+        ``external_transaction_refs`` all zero; a fresh verified Level-2 grant
+        naming ``SUBMIT_EXACT_BYTES``; and at least two fresh ABSENT
+        observations of the exact transaction hash from distinct providers
+        (external-truth gate permitting the SAME held action to resume -- this
+        is not a claim the transaction can never appear).
+
+        FUTURE LIVE EXPIRY ORDERING (invariant): the live run must perform all
+        expensive preflight, then the two-provider absence check plus both
+        provider pending-nonce checks, then issue the fresh successor grant,
+        then immediately re-check remaining authority time (a >=300 s guard is
+        performed by the live run BEFORE invoking this primitive), then record
+        the fresh two-provider ABSENT evidence, then resume this SAME
+        SAFE_HALT episode, then re-check authority validity, then submit the
+        exact bytes immediately. An action must not be resumed when
+        insufficient authority time remains.
+
+        A second call after a successful resume is a canonical idempotent
+        no-op classified as already-resumed; it never duplicates effects.
+        """
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.SUBMIT_EXACT_BYTES,
+            now_epoch_s=recovery_timestamp_epoch_s,
+        )
+        if not isinstance(economic_action_id, str) or not economic_action_id:
+            raise LedgerError("economic_action_id must be a non-empty label")
+        if not _is_sha256_hex(signed_bytes_sha256):
+            raise LedgerError("expected byte digest must be sha256 hex text")
+        if not _is_tx_hash(transaction_hash):
+            raise LedgerError("expected transaction hash must be a 0x-prefixed 32-byte hash")
+        for name, value in (
+            ("recovery_timestamp_epoch_s", recovery_timestamp_epoch_s),
+            ("evidence_max_age_s", evidence_max_age_s),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise LedgerError(f"{name} must be a non-negative integer")
+        if evidence_max_age_s == 0:
+            raise LedgerError("evidence_max_age_s must leave a positive freshness window")
+        if isinstance(account_nonce, bool) or not isinstance(account_nonce, int) or account_nonce < 0:
+            raise LedgerError("account_nonce must be a non-negative integer")
+        if (
+            not isinstance(absence_observations, (tuple, list))
+            or len(absence_observations) < 2
+            or not all(
+                isinstance(observation, ChainObservationV0)
+                for observation in absence_observations
+            )
+        ):
+            raise ChainTruthError(
+                "recovery requires at least two distinct-provider ABSENT "
+                "ChainObservationV0 records of the exact transaction hash"
+            )
+
+        with self._transaction("recovery") as conn:
+            stored_session = self._require_session(session.session_id, conn)
+            if stored_session["authority_policy_digest"] != session.authority_policy_digest:
+                raise AuthorityVerificationError(
+                    "stored session authority-policy scope disagrees"
+                )
+            intent = self._require_economic_intent(economic_action_id, conn)
+            state = IntentState(intent["state"])
+            if state is IntentState.SIGNED:
+                prior = conn.execute(
+                    "SELECT payload_json FROM state_events "
+                    "WHERE event_type = ? AND economic_action_id = ? "
+                    "AND from_state = ? AND to_state = ? LIMIT 1",
+                    (
+                        EventType.EXACT_BYTES_RESUMED.value,
+                        economic_action_id,
+                        IntentState.SAFE_HALT.value,
+                        IntentState.SIGNED.value,
+                    ),
+                ).fetchone()
+                if prior is None:
+                    raise LedgerError("resume requires SAFE_HALT intent, got SIGNED")
+                return ExactBytesResumeResultV0(
+                    economic_action_id=economic_action_id,
+                    signed_transaction_id=self._exact_bytes_signed_id(
+                        conn, economic_action_id
+                    ),
+                    recovery_digest=digest_object(strict_json_loads(prior["payload_json"])),
+                    already_resumed=True,
+                )
+            if state is not IntentState.SAFE_HALT:
+                raise LedgerError(f"resume requires SAFE_HALT intent, got {state.value}")
+            reservation = conn.execute(
+                "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
+                (economic_action_id,),
+            ).fetchone()
+            if reservation is None:
+                raise LedgerError("resume requires a durable reservation")
+            if reservation["status"] != ReservationStatus.QUARANTINED.value:
+                raise LedgerError(
+                    "resume requires a QUARANTINED reservation, got "
+                    f"{reservation['status']}"
+                )
+            external = conn.execute(
+                "SELECT kind, session_id FROM external_actions WHERE external_action_id = ?",
+                (economic_action_id,),
+            ).fetchone()
+            if external is None or external["kind"] != "ECONOMIC":
+                raise LedgerError("resume requires an economic external action")
+            if external["session_id"] != session.session_id:
+                raise AuthorityVerificationError("economic action is bound to another session")
+            signed = conn.execute(
+                "SELECT * FROM signed_transactions WHERE external_action_id = ?",
+                (economic_action_id,),
+            ).fetchone()
+            if signed is None:
+                raise LedgerError("resume requires an existing signed transaction")
+            if signed["origin"] != "EXTERNAL_SIGNED_BYTES":
+                raise LedgerError("resume requires an EXTERNAL_SIGNED_BYTES origin")
+            if signed["session_id"] != session.session_id:
+                raise AuthorityVerificationError("signed transaction is bound to another session")
+            expected_facts = {
+                "raw_signed_sha256": signed_bytes_sha256,
+                "transaction_hash": transaction_hash,
+                "chain_id": chain_id,
+                "taker_address": taker_address,
+                "account_nonce": account_nonce,
+            }
+            mismatches = sorted(
+                name for name, value in expected_facts.items() if signed[name] != value
+            )
+            if mismatches:
+                raise LedgerError(
+                    "signed transaction identity disagrees with the resumed episode: "
+                    + ",".join(mismatches)
+                )
+            if chain_id != session.chain_id or taker_address != session.taker_address:
+                raise AuthorityVerificationError(
+                    "expected chain or taker disagrees with the session scope"
+                )
+            for label, count in (
+                ("submission_attempt", conn.execute(
+                    "SELECT COUNT(*) FROM submission_attempts WHERE signed_transaction_id = ?",
+                    (signed["signed_transaction_id"],),
+                ).fetchone()[0]),
+                ("reconciliation", conn.execute(
+                    "SELECT COUNT(*) FROM reconciliations WHERE external_action_id = ?",
+                    (economic_action_id,),
+                ).fetchone()[0]),
+                ("fill_receipt", conn.execute(
+                    "SELECT COUNT(*) FROM fill_receipts WHERE economic_action_id = ?",
+                    (economic_action_id,),
+                ).fetchone()[0]),
+                ("external_transaction_reference", conn.execute(
+                    "SELECT COUNT(*) FROM external_transaction_refs WHERE external_action_id = ?",
+                    (economic_action_id,),
+                ).fetchone()[0]),
+            ):
+                if int(count) != 0:
+                    raise SafeHaltError(
+                        f"resume forbids a prior {label} record (found {int(count)})"
+                    )
+            providers = [observation.provider_id for observation in absence_observations]
+            if len(set(providers)) != len(providers) or not all(providers):
+                raise ChainTruthError("absence observations must carry distinct provider identities")
+            for observation in absence_observations:
+                if observation.presence is not ChainPresence.ABSENT:
+                    raise ChainTruthError(
+                        "recovery evidence must be ABSENT; "
+                        f"{observation.presence.value} forbids resuming the episode"
+                    )
+                if observation.transaction_hash != transaction_hash:
+                    raise ChainTruthError(
+                        "absence observation hash disagrees with the held transaction hash"
+                    )
+                age = recovery_timestamp_epoch_s - observation.observed_at_epoch_s
+                if age < 0 or age >= evidence_max_age_s:
+                    raise ChainTruthError(
+                        "absence observation is not fresh for the supplied recovery timestamp"
+                    )
+            absence_evidence = [
+                {
+                    "observed_at_epoch_s": observation.observed_at_epoch_s,
+                    "provider_id": observation.provider_id,
+                    "raw_evidence_sha256": observation.raw_evidence_sha256,
+                }
+                for observation in sorted(
+                    absence_observations, key=lambda item: item.observation_id
+                )
+            ]
+            payload = {
+                "account_nonce": account_nonce,
+                "absence_evidence": absence_evidence,
+                "absence_evidence_digest": digest_object(
+                    {"observations": absence_evidence, "schema": (
+                        "qntyspot.program_b.v0.zero_submission_absence_evidence"
+                    )}
+                ),
+                "authority_policy_digest": session.authority_policy_digest,
+                "authority_receipt_id": verified_grant.receipt_id,
+                "authority_root_id": verified_grant.root_id,
+                "chain_id": chain_id,
+                "economic_action_id": economic_action_id,
+                "evidence_max_age_s": evidence_max_age_s,
+                "prior_intent_state": IntentState.SAFE_HALT.value,
+                "prior_reservation_status": ReservationStatus.QUARANTINED.value,
+                "recovered_at_epoch_s": recovery_timestamp_epoch_s,
+                "recovery_type": ZERO_SUBMISSION_EXACT_BYTES_RESUME,
+                "session_id": session.session_id,
+                "signed_bytes_sha256": signed_bytes_sha256,
+                "signed_transaction_id": signed["signed_transaction_id"],
+                "transaction_hash": transaction_hash,
+                "taker_address": taker_address,
+            }
+            self.ledger._append_event(  # noqa: SLF001 - one authority surface
+                conn,
+                event_type=EventType.EXACT_BYTES_RESUMED,
+                policy_id=intent["policy_id"],
+                cycle_id=intent["cycle_id"],
+                economic_action_id=economic_action_id,
+                from_state=IntentState.SAFE_HALT.value,
+                to_state=IntentState.SIGNED.value,
+                now_epoch_s=recovery_timestamp_epoch_s,
+                payload=payload,
+            )
+            conn.execute(
+                "UPDATE intents SET state = ? WHERE economic_action_id = ? "
+                "AND state = ?",
+                (
+                    IntentState.SIGNED.value,
+                    economic_action_id,
+                    IntentState.SAFE_HALT.value,
+                ),
+            )
+            cursor = conn.execute(
+                "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+                "WHERE economic_action_id = ? AND status = ?",
+                (
+                    ReservationStatus.ACTIVE.value,
+                    economic_action_id,
+                    ReservationStatus.QUARANTINED.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LedgerError("atomic resume failed to restore the reservation")
+            return ExactBytesResumeResultV0(
+                economic_action_id=economic_action_id,
+                signed_transaction_id=str(signed["signed_transaction_id"]),
+                recovery_digest=digest_object(payload),
+                already_resumed=False,
+            )
+
+    @staticmethod
+    def _exact_bytes_signed_id(conn: sqlite3.Connection, action_id: str) -> str:
+        row = conn.execute(
+            "SELECT signed_transaction_id FROM signed_transactions "
+            "WHERE external_action_id = ?",
+            (action_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerError("resumed episode has no signed transaction")
+        return str(row["signed_transaction_id"])
 
     def record_execution_envelope(
         self,
