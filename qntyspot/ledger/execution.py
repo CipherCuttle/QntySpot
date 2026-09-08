@@ -71,7 +71,9 @@ from .execution_schema import (
     apply_execution_schema,
     migrate_execution_schema_v1_to_v2,
     migrate_execution_schema_v2_to_v3,
+    migrate_execution_schema_v3_to_v4,
     read_execution_schema_version,
+    validate_execution_schema_shape,
 )
 from .store import SpotLedger
 
@@ -205,10 +207,15 @@ class ExecutionRuntime:
             migrate_execution_schema_v1_to_v2(self._conn)
         elif existing_tables != set(EXECUTION_TABLES):
             raise LedgerError("execution schema is partially applied")
-        elif read_execution_schema_version(self._conn) == 2:
-            migrate_execution_schema_v2_to_v3(self._conn)
+        else:
+            version = read_execution_schema_version(self._conn)
+            if version == 2:
+                migrate_execution_schema_v2_to_v3(self._conn)
+            elif version == 3:
+                migrate_execution_schema_v3_to_v4(self._conn)
         if read_execution_schema_version(self._conn) != EXECUTION_SCHEMA_VERSION:
             raise LedgerError("unsupported execution schema version")
+        validate_execution_schema_shape(self._conn)
 
     def _table_exists(self, table: str) -> bool:
         return (
