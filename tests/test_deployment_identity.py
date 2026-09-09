@@ -27,7 +27,14 @@ def test_historical_deployment_identity_artifact_is_preserved() -> None:
     assert artifact["implementation_identity_method"] == METHOD
     assert artifact["implementation_identity"]["file_manifest"]
     assert [item["path"] for item in artifact["implementation_identity"]["file_manifest"]] == [
-        path for path in SOURCE_PATHS if path not in {"qntyspot/robinhood_chain_truth.py", "qntyspot/exact_signed_bytes.py"}
+        path
+        for path in SOURCE_PATHS
+        if path
+        not in {
+            "qntyspot/accepted_execution_intent.py",
+            "qntyspot/robinhood_chain_truth.py",
+            "qntyspot/exact_signed_bytes.py",
+        }
     ]
     assert artifact != build_identity(ROOT, CANONICAL_COMMIT)
 
