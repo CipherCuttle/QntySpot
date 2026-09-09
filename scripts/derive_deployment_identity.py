@@ -25,6 +25,7 @@ STATUS = "SUPERSEDES_DEPLOYMENT_IDENTITY_V0_FOR_AUTHORITY_BINDING"
 SOURCE_PATHS = (
     "pyproject.toml",
     "qntyspot/__init__.py",
+    "qntyspot/accepted_execution_intent.py",
     "qntyspot/authority_root.py",
     "qntyspot/boundary.py",
     "qntyspot/canon.py",
@@ -56,6 +57,12 @@ SOURCE_PATHS = (
     "qntyspot/status.py",
 )
 LEGACY_SOURCE_PATHS = tuple(path for path in SOURCE_PATHS if path != "qntyspot/exact_signed_bytes.py")
+PRE_ACCEPTED_INTENT_SOURCE_PATHS = tuple(
+    path
+    for path in SOURCE_PATHS
+    if path
+    not in {"qntyspot/accepted_execution_intent.py", "qntyspot/exact_signed_bytes.py"}
+)
 
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -81,7 +88,14 @@ def _validate_commit(repository_commit: str) -> None:
 
 
 def _source_manifest(root: Path) -> list[dict[str, str]]:
-    manifest_paths = SOURCE_PATHS if (root / "qntyspot/exact_signed_bytes.py").exists() else LEGACY_SOURCE_PATHS
+    if not (root / "qntyspot/accepted_execution_intent.py").exists():
+        # Historical commits predate this consumer. Preserve their explicit
+        # identity inputs without requiring newer source files.
+        manifest_paths = PRE_ACCEPTED_INTENT_SOURCE_PATHS
+    elif not (root / "qntyspot/exact_signed_bytes.py").exists():
+        manifest_paths = LEGACY_SOURCE_PATHS
+    else:
+        manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
     package_root = root / "qntyspot"
     discovered_package_paths = sorted(
