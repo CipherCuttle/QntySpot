@@ -57,9 +57,9 @@ def test_published_v2_fixture_is_consumed_as_non_authoritative_no_action() -> No
     assert output["decision"] == {
         "current_target": "LONG",
         "effective_source_timestamp": "2026-09-08T20:00:00Z",
-        "execution_action_required": False,
         "previous_target": "LONG",
         "transition": "NO_ACTION",
+        "upstream_execution_action_required": False,
     }
     assert output["admission"] == {
         "schema_and_self_digest": "VERIFIED",
@@ -71,6 +71,7 @@ def test_published_v2_fixture_is_consumed_as_non_authoritative_no_action() -> No
         "consumer_result": "NO_ACTION",
         "network_required": "NO",
         "policy_evaluation_required": "NO",
+        "qntyspot_execution_action_authorized": "NO",
         "qntyspot_side": "NONE",
     }
     assert output["authority"] == {
@@ -111,10 +112,12 @@ def test_dynamic_target_change_is_observable_but_cannot_wake_policy() -> None:
     output = consume_accepted_execution_intent_v2(_encoded(intent), qntyspot_commit=QNTYSPOT_COMMIT)
 
     assert output["decision"]["transition"] == "TARGET_CHANGE"
-    assert output["decision"]["execution_action_required"] is True
+    assert output["decision"]["upstream_execution_action_required"] is True
+    assert "execution_action_required" not in output["decision"]
     assert output["projection"]["consumer_result"] == "TARGET_CHANGE_OBSERVED"
     assert output["projection"]["policy_evaluation_required"] == "NO"
     assert output["projection"]["network_required"] == "NO"
+    assert output["projection"]["qntyspot_execution_action_authorized"] == "NO"
     assert output["projection"]["qntyspot_side"] == "NONE"
     assert output["admission"]["schema_and_self_digest"] == "VERIFIED"
     assert output["admission"]["origin_authentication"] == "UNPROVEN_BY_V2_BYTES"
@@ -151,6 +154,7 @@ def test_multiple_dynamic_intents_need_no_event_digest_allowlist() -> None:
         )
         transitions.append(output["decision"]["transition"])
         assert output["admission"]["policy_admission_authorized"] == "NO"
+        assert output["projection"]["qntyspot_execution_action_authorized"] == "NO"
 
     assert transitions == ["NO_ACTION", "TARGET_CHANGE", "TARGET_CHANGE"]
 
