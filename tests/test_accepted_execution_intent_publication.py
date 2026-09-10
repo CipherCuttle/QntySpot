@@ -361,9 +361,9 @@ def test_repository_contains_only_public_verification_vectors_for_publication_au
         encoding="utf-8"
     )
     forbidden = (
-        "Ed25519PrivateKey",
-        "from_private_bytes",
-        ".sign(",
+        "Ed25519" + "PrivateKey",
+        "from_" + "private_bytes",
+        ".si" + "gn(",
     )
     for token in forbidden:
         assert token not in test_source
