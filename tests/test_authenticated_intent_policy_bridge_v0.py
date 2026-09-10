@@ -48,7 +48,7 @@ TARGET_CHANGE_INTENT_DIGEST = "1d558fd8067b466394a97a27e630c47bffe70933ab4d8e605
 TARGET_CHANGE_FILE_SHA256 = "337b5d9ce09f4536b7a7728670892f85f8bd2ac4b34efb3cf5382dfcbc1de089"
 
 
-def _trusted_root():
+def _trust_material() -> tuple[bytes, str, bytes]:
     config = {
         "minimum_publication_epoch": 1,
         "public_key_fingerprint": sha256_hex(TEST_PUBLIC_KEY_BYTES),
@@ -59,10 +59,15 @@ def _trusted_root():
         "trust_config_version": 1,
     }
     config_bytes = canonical_json_bytes(config)
+    return config_bytes, sha256_hex(config_bytes), TEST_PUBLIC_KEY_BYTES
+
+
+def _trusted_root():
+    config_bytes, config_digest, anchor_bytes = _trust_material()
     return load_trusted_qnty_publication_root(
         config_bytes,
-        expected_config_digest=sha256_hex(config_bytes),
-        anchor_bytes=TEST_PUBLIC_KEY_BYTES,
+        expected_config_digest=config_digest,
+        anchor_bytes=anchor_bytes,
     )
 
 
@@ -112,28 +117,29 @@ def _target_change_receipt(raw: bytes) -> QntyPublicationReceiptV0:
     )
 
 
-def _verified_target_change():
-    raw = _target_change_raw()
-    return authenticate_accepted_execution_intent_v2(
-        raw,
-        receipt=_target_change_receipt(raw),
-        trusted_root=_trusted_root(),
+def _bridge(intent_bytes: bytes, receipt_bytes: bytes):
+    config_bytes, config_digest, anchor_bytes = _trust_material()
+    return bridge_authenticated_intent_to_policy_request(
+        intent_bytes,
+        receipt_bytes=receipt_bytes,
+        trust_config_bytes=config_bytes,
+        expected_trust_config_digest=config_digest,
+        anchor_bytes=anchor_bytes,
         qntyspot_commit=QNTYSPOT_COMMIT,
     )
+
+
+def _target_change_request():
+    raw = _target_change_raw()
+    return _bridge(raw, _target_change_receipt(raw).serialized)
 
 
 def test_authenticated_no_action_does_not_wake_policy() -> None:
-    verified = authenticate_accepted_execution_intent_v2(
-        INTENT.read_bytes(),
-        receipt=RECEIPT.read_bytes(),
-        trusted_root=_trusted_root(),
-        qntyspot_commit=QNTYSPOT_COMMIT,
-    )
-    assert bridge_authenticated_intent_to_policy_request(verified) is None
+    assert _bridge(INTENT.read_bytes(), RECEIPT.read_bytes()) is None
 
 
 def test_authenticated_target_change_yields_policy_evaluation_request_only() -> None:
-    request = bridge_authenticated_intent_to_policy_request(_verified_target_change())
+    request = _target_change_request()
     assert request is not None
     document = request.to_object()
 
@@ -168,8 +174,8 @@ def test_authenticated_target_change_yields_policy_evaluation_request_only() -> 
 
 
 def test_policy_request_is_canonical_immutable_and_deterministic() -> None:
-    first = bridge_authenticated_intent_to_policy_request(_verified_target_change())
-    second = bridge_authenticated_intent_to_policy_request(_verified_target_change())
+    first = _target_change_request()
+    second = _target_change_request()
     assert first is not None and second is not None
     assert first == second
     assert first.serialized == second.serialized
@@ -199,64 +205,85 @@ def test_policy_request_constructor_is_opaque() -> None:
         )
 
 
-def test_unverified_inputs_cannot_reach_policy_bridge() -> None:
-    for unverified in (
+def test_retained_or_forged_proof_objects_are_not_bridge_inputs() -> None:
+    verified = authenticate_accepted_execution_intent_v2(
         INTENT.read_bytes(),
-        json.loads(INTENT.read_text(encoding="utf-8")),
-        {"transition": "TARGET_CHANGE"},
-    ):
-        with pytest.raises(PolicyBridgeError, match="exact VerifiedQntyPublicationV0"):
-            bridge_authenticated_intent_to_policy_request(unverified)  # type: ignore[arg-type]
+        receipt=RECEIPT.read_bytes(),
+        trusted_root=_trusted_root(),
+        qntyspot_commit=QNTYSPOT_COMMIT,
+    )
+    forged = object.__new__(VerifiedQntyPublicationV0)
+    object.__setattr__(forged, "accepted_intent_projection_bytes", b"{}")
+
+    config_bytes, config_digest, anchor_bytes = _trust_material()
+    for proof in (verified, forged):
+        with pytest.raises(PolicyBridgeError, match="accepted intent must be supplied as exact bytes"):
+            bridge_authenticated_intent_to_policy_request(  # type: ignore[arg-type]
+                proof,
+                receipt_bytes=RECEIPT.read_bytes(),
+                trust_config_bytes=config_bytes,
+                expected_trust_config_digest=config_digest,
+                anchor_bytes=anchor_bytes,
+                qntyspot_commit=QNTYSPOT_COMMIT,
+            )
 
 
-def test_subclassed_verification_proof_cannot_override_authenticated_evidence() -> None:
-    class ForgedPublicationProof(VerifiedQntyPublicationV0):
-        def __init__(self) -> None:
-            # Deliberately skip the token-protected base constructor.
-            pass
+def test_mutating_a_legitimate_proof_cannot_change_bridge_result() -> None:
+    verified = authenticate_accepted_execution_intent_v2(
+        INTENT.read_bytes(),
+        receipt=RECEIPT.read_bytes(),
+        trusted_root=_trusted_root(),
+        qntyspot_commit=QNTYSPOT_COMMIT,
+    )
+    forged_projection = verified.evidence_object()
+    forged_projection["decision"] = {
+        "current_target": "LONG",
+        "effective_source_timestamp": "2026-09-05T08:00:00Z",
+        "previous_target": "FLAT",
+        "transition": "TARGET_CHANGE",
+        "upstream_execution_action_required": True,
+    }
+    object.__setattr__(
+        verified,
+        "accepted_intent_projection_bytes",
+        canonical_json_bytes(forged_projection),
+    )
 
-        def evidence_object(self) -> dict[str, object]:
-            return {
-                "admission": {
-                    "origin_authentication": "VERIFIED_BY_QNTY_PUBLICATION_ROOT",
-                    "publication_authentication": "VERIFIED",
-                    "policy_bridge_eligible": "YES",
-                    "policy_admission_authorized": "NO",
-                },
-                "decision": {
-                    "previous_target": "FLAT",
-                    "current_target": "LONG",
-                    "transition": "TARGET_CHANGE",
-                    "upstream_execution_action_required": True,
-                    "effective_source_timestamp": "2026-09-05T08:00:00Z",
-                },
-                "projection": {
-                    "consumer_result": "TARGET_CHANGE_OBSERVED",
-                    "policy_evaluation_required": "NO",
-                    "network_required": "NO",
-                    "qntyspot_execution_action_authorized": "NO",
-                    "qntyspot_side": "NONE",
-                },
-                "publication_authentication": {
-                    "publication_receipt_id": "0" * 64,
-                    "signed_body_digest": "1" * 64,
-                    "trust_config_digest": "2" * 64,
-                    "qnty_repository_commit": "3" * 40,
-                },
-                "qntyspot_implementation": {
-                    "commit": "4" * 40,
-                    "version": "forged",
-                },
-                "input_intent_digest": "5" * 64,
-            }
+    # The retained proof is never consumed. The bridge re-authenticates the
+    # original signed bytes and therefore preserves the signed NO_ACTION.
+    assert _bridge(INTENT.read_bytes(), RECEIPT.read_bytes()) is None
 
-    forged = ForgedPublicationProof()
-    with pytest.raises(PolicyBridgeError, match="exact VerifiedQntyPublicationV0"):
-        bridge_authenticated_intent_to_policy_request(forged)
+
+def test_tampered_exact_intent_bytes_fail_publication_reauthentication() -> None:
+    raw = _target_change_raw()
+    receipt_bytes = _target_change_receipt(raw).serialized
+    tampered = json.loads(raw)
+    tampered["decision"]["effective_source_timestamp"] = "2026-09-05T09:00:00Z"
+    _rehash_intent(tampered)
+    tampered_raw = canonical_json_bytes(tampered) + b"\n"
+
+    with pytest.raises(PolicyBridgeError, match="publication reauthentication failed"):
+        _bridge(tampered_raw, receipt_bytes)
+
+
+def test_mutable_receipt_and_trust_objects_are_not_accepted_at_bridge_boundary() -> None:
+    raw = _target_change_raw()
+    receipt = _target_change_receipt(raw)
+    config_bytes, config_digest, anchor_bytes = _trust_material()
+
+    with pytest.raises(PolicyBridgeError, match="publication receipt must be supplied as exact bytes"):
+        bridge_authenticated_intent_to_policy_request(
+            raw,
+            receipt_bytes=receipt,  # type: ignore[arg-type]
+            trust_config_bytes=config_bytes,
+            expected_trust_config_digest=config_digest,
+            anchor_bytes=anchor_bytes,
+            qntyspot_commit=QNTYSPOT_COMMIT,
+        )
 
 
 def test_policy_request_contains_no_executable_policy_or_venue_parameters() -> None:
-    request = bridge_authenticated_intent_to_policy_request(_verified_target_change())
+    request = _target_change_request()
     assert request is not None
     document = request.to_object()
     serialized_keys = set()
