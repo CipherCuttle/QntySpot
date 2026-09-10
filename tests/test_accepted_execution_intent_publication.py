@@ -7,8 +7,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from qntyspot.accepted_execution_intent_publication import (
     ED25519_SIGNATURE_ALGORITHM,
@@ -34,26 +32,31 @@ FIXTURE = ROOT / "qualifications/h003_bridge_v0/QNTY_ACCEPTED_EXECUTION_INTENT_V
 QNTYSPOT_COMMIT = "f2680ffed1dd8fa3d288ca916226940210f371f9"
 QNTY_PUBLICATION_COMMIT = "2ebed2af94127f2e018de46069d1bbe27178ca8a"
 EXPECTED_FILE_SHA256 = "262f2eeea5c7fea979f1500538ffd146686e9c4ac8069a1ac5ae4d3ae7cd76db"
-TEST_PRIVATE_KEY_BYTES = bytes.fromhex("11" * 32)
-ALT_PRIVATE_KEY_BYTES = bytes.fromhex("22" * 32)
 
-
-def _private_key(raw: bytes = TEST_PRIVATE_KEY_BYTES) -> Ed25519PrivateKey:
-    return Ed25519PrivateKey.from_private_bytes(raw)
-
-
-def _public_key_bytes(private_key: Ed25519PrivateKey) -> bytes:
-    return private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.Raw,
-        format=serialization.PublicFormat.Raw,
-    )
+# Fixed verification vectors were generated outside QntySpot. The repository
+# contains public verification material and signatures only; it never creates
+# or handles signing-key material, including in tests.
+TEST_PUBLIC_KEY_BYTES = bytes.fromhex(
+    "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737"
+)
+ALT_PUBLIC_KEY_BYTES = bytes.fromhex(
+    "a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0"
+)
+FIXTURE_SIGNATURE_HEX = (
+    "138d0c26efd28d6634611ee3754fe0b51e82b01559f34efd5d41888028645f9f"
+    "051e8cecec4410ef79282012f339a9da9367c2974f2dfd0bbeae8068be6e8609"
+)
+TARGET_CHANGE_SIGNATURE_HEX = (
+    "ca97ac85c858a229d766e7587bc26eca811f834354edda9bf334c405dddfbc08"
+    "a764f8a7f7a118aa3fc2351157cd39534ea4515ac102a7e042fede4d8dc7ee0a"
+)
+TARGET_CHANGE_INTENT_DIGEST = "1d558fd8067b466394a97a27e630c47bffe70933ab4d8e605805b04200ef49e5"
+TARGET_CHANGE_FILE_SHA256 = "337b5d9ce09f4536b7a7728670892f85f8bd2ac4b34efb3cf5382dfcbc1de089"
 
 
 def _trusted_root(
-    private_key: Ed25519PrivateKey | None = None, *, minimum_publication_epoch: int = 1
+    public_key: bytes = TEST_PUBLIC_KEY_BYTES, *, minimum_publication_epoch: int = 1
 ):
-    key = private_key or _private_key()
-    public_key = _public_key_bytes(key)
     config = {
         "minimum_publication_epoch": minimum_publication_epoch,
         "public_key_fingerprint": sha256_hex(public_key),
@@ -74,17 +77,16 @@ def _trusted_root(
 def _receipt(
     raw_intent: bytes,
     *,
-    private_key: Ed25519PrivateKey | None = None,
+    signature_hex: str,
     publication_epoch: int = 1,
     serial: int = 1,
     qnty_commit: str = QNTY_PUBLICATION_COMMIT,
 ) -> QntyPublicationReceiptV0:
-    key = private_key or _private_key()
     intent = json.loads(raw_intent)
-    unsigned = QntyPublicationReceiptV0(
+    return QntyPublicationReceiptV0(
         root_id=PUBLICATION_ROOT_ID,
         purpose=PUBLICATION_PURPOSE,
-        public_key_fingerprint=sha256_hex(_public_key_bytes(key)),
+        public_key_fingerprint=sha256_hex(TEST_PUBLIC_KEY_BYTES),
         signature_algorithm=ED25519_SIGNATURE_ALGORITHM,
         publication_epoch=publication_epoch,
         serial=serial,
@@ -95,10 +97,13 @@ def _receipt(
         accepted_intent_schema_version=ACCEPTED_INTENT_SCHEMA_VERSION,
         intent_digest=intent["intent_digest"],
         artifact_sha256=hashlib.sha256(raw_intent).hexdigest(),
-        signature=b"\x00" * 64,
+        signature=bytes.fromhex(signature_hex),
         schema=PUBLICATION_RECEIPT_SCHEMA,
     )
-    return replace(unsigned, signature=key.sign(unsigned.signed_body_bytes))
+
+
+def _fixture_receipt(raw: bytes) -> QntyPublicationReceiptV0:
+    return _receipt(raw, signature_hex=FIXTURE_SIGNATURE_HEX)
 
 
 def _rehash_intent(intent: dict[str, object]) -> None:
@@ -107,11 +112,30 @@ def _rehash_intent(intent: dict[str, object]) -> None:
     intent["intent_digest"] = hashlib.sha256(canonical_json_bytes(probe)).hexdigest()
 
 
+def _target_change_raw() -> bytes:
+    intent = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    intent["decision"] = {
+        "current_target": "LONG",
+        "effective_source_timestamp": "2026-09-05T08:00:00Z",
+        "execution_action_required": True,
+        "previous_target": "FLAT",
+        "transition": "TARGET_CHANGE",
+    }
+    intent["provenance"]["upstream_handoff_digest"] = "3" * 64
+    intent["provenance"]["qnty_acceptance_record_id"] = "H003_ACCEPTANCE_V0:" + "3" * 64
+    intent["provenance"]["qnty_acceptance_receipt_digest"] = "4" * 64
+    _rehash_intent(intent)
+    raw = canonical_json_bytes(intent) + b"\n"
+    assert intent["intent_digest"] == TARGET_CHANGE_INTENT_DIGEST
+    assert hashlib.sha256(raw).hexdigest() == TARGET_CHANGE_FILE_SHA256
+    return raw
+
+
 def test_signed_publication_authenticates_exact_producer_fixture_without_policy_authority() -> None:
     raw = FIXTURE.read_bytes()
     verified = authenticate_accepted_execution_intent_v2(
         raw,
-        receipt=_receipt(raw).serialized,
+        receipt=_fixture_receipt(raw).serialized,
         trusted_root=_trusted_root(),
         qntyspot_commit=QNTYSPOT_COMMIT,
     )
@@ -144,23 +168,15 @@ def test_signed_publication_authenticates_exact_producer_fixture_without_policy_
 
 
 def test_authenticated_target_change_is_only_policy_bridge_eligible_not_policy_admitted() -> None:
-    intent = json.loads(FIXTURE.read_text(encoding="utf-8"))
-    intent["decision"] = {
-        "current_target": "LONG",
-        "effective_source_timestamp": "2026-09-05T08:00:00Z",
-        "execution_action_required": True,
-        "previous_target": "FLAT",
-        "transition": "TARGET_CHANGE",
-    }
-    intent["provenance"]["upstream_handoff_digest"] = "3" * 64
-    intent["provenance"]["qnty_acceptance_record_id"] = "H003_ACCEPTANCE_V0:" + "3" * 64
-    intent["provenance"]["qnty_acceptance_receipt_digest"] = "4" * 64
-    _rehash_intent(intent)
-    raw = canonical_json_bytes(intent) + b"\n"
-
+    raw = _target_change_raw()
+    receipt = _receipt(
+        raw,
+        signature_hex=TARGET_CHANGE_SIGNATURE_HEX,
+        serial=2,
+    )
     evidence = authenticate_accepted_execution_intent_v2(
         raw,
-        receipt=_receipt(raw, serial=2).serialized,
+        receipt=receipt.serialized,
         trusted_root=_trusted_root(),
         qntyspot_commit=QNTYSPOT_COMMIT,
     ).evidence_object()
@@ -179,7 +195,7 @@ def test_authenticated_target_change_is_only_policy_bridge_eligible_not_policy_a
 
 def test_semantically_identical_but_byte_different_artifact_is_rejected() -> None:
     raw = FIXTURE.read_bytes()
-    receipt = _receipt(raw)
+    receipt = _fixture_receipt(raw)
     without_trailing_newline = raw.rstrip(b"\n")
     with pytest.raises(PublicationAuthenticationError, match="exact received bytes"):
         authenticate_accepted_execution_intent_v2(
@@ -192,7 +208,7 @@ def test_semantically_identical_but_byte_different_artifact_is_rejected() -> Non
 
 def test_rehashed_intent_substitution_cannot_reuse_old_publication_receipt() -> None:
     original = FIXTURE.read_bytes()
-    receipt = _receipt(original)
+    receipt = _fixture_receipt(original)
     intent = json.loads(original)
     intent["decision"]["effective_source_timestamp"] = "2026-09-09T20:00:00Z"
     _rehash_intent(intent)
@@ -209,7 +225,7 @@ def test_rehashed_intent_substitution_cannot_reuse_old_publication_receipt() -> 
 
 def test_invalid_signature_fails_closed_even_with_self_consistent_receipt_object() -> None:
     raw = FIXTURE.read_bytes()
-    receipt = _receipt(raw)
+    receipt = _fixture_receipt(raw)
     forged_signature = bytes([receipt.signature[0] ^ 1]) + receipt.signature[1:]
     forged = replace(receipt, signature=forged_signature)
 
@@ -224,8 +240,8 @@ def test_invalid_signature_fails_closed_even_with_self_consistent_receipt_object
 
 def test_wrong_publication_root_fails_closed() -> None:
     raw = FIXTURE.read_bytes()
-    receipt = _receipt(raw)
-    other_root = _trusted_root(_private_key(ALT_PRIVATE_KEY_BYTES))
+    receipt = _fixture_receipt(raw)
+    other_root = _trusted_root(ALT_PUBLIC_KEY_BYTES)
 
     with pytest.raises(PublicationAuthenticationError, match="fingerprint differs"):
         authenticate_accepted_execution_intent_v2(
@@ -238,7 +254,7 @@ def test_wrong_publication_root_fails_closed() -> None:
 
 def test_publication_epoch_floor_is_external_and_fail_closed() -> None:
     raw = FIXTURE.read_bytes()
-    receipt = _receipt(raw, publication_epoch=1)
+    receipt = _fixture_receipt(raw)
     root = _trusted_root(minimum_publication_epoch=2)
 
     with pytest.raises(PublicationAuthenticationError, match="below the external minimum epoch"):
@@ -251,8 +267,7 @@ def test_publication_epoch_floor_is_external_and_fail_closed() -> None:
 
 
 def test_trust_configuration_is_canonical_digest_pinned_and_exact_schema() -> None:
-    key = _private_key()
-    public_key = _public_key_bytes(key)
+    public_key = TEST_PUBLIC_KEY_BYTES
     config = {
         "minimum_publication_epoch": 1,
         "public_key_fingerprint": sha256_hex(public_key),
@@ -291,7 +306,7 @@ def test_trust_configuration_is_canonical_digest_pinned_and_exact_schema() -> No
 
 def test_receipt_round_trip_is_canonical_and_rejects_unknown_fields() -> None:
     raw = FIXTURE.read_bytes()
-    receipt = _receipt(raw)
+    receipt = _fixture_receipt(raw)
     reparsed = QntyPublicationReceiptV0.from_bytes(receipt.serialized)
     assert reparsed == receipt
 
@@ -301,9 +316,9 @@ def test_receipt_round_trip_is_canonical_and_rejects_unknown_fields() -> None:
         QntyPublicationReceiptV0.from_bytes(canonical_json_bytes(document))
 
 
-def test_verified_publication_is_opaque_and_evidence_replay_is_deterministic() -> None:
+def test_verified_publication_is_opaque_immutable_and_deterministic() -> None:
     raw = FIXTURE.read_bytes()
-    receipt = _receipt(raw)
+    receipt = _fixture_receipt(raw)
     root = _trusted_root()
     first = authenticate_accepted_execution_intent_v2(
         raw,
@@ -317,7 +332,17 @@ def test_verified_publication_is_opaque_and_evidence_replay_is_deterministic() -
         trusted_root=root,
         qntyspot_commit=QNTYSPOT_COMMIT,
     )
-    assert first.evidence_object() == second.evidence_object()
+    baseline = first.evidence_object()
+    assert baseline == second.evidence_object()
+    assert isinstance(first.accepted_intent_projection_bytes, bytes)
+
+    detached = first.evidence_object()
+    detached["decision"]["current_target"] = "FLAT"
+    detached["admission"]["origin_authentication"] = "FORGED"
+    assert first.evidence_object() == baseline
+
+    with pytest.raises(AttributeError):
+        first.accepted_intent_projection_bytes = b"{}"
 
     with pytest.raises(TypeError, match="only constructed by authentication"):
         VerifiedQntyPublicationV0(
@@ -330,11 +355,25 @@ def test_verified_publication_is_opaque_and_evidence_replay_is_deterministic() -
         )
 
 
-def test_publication_verifier_has_no_issuer_private_key_or_economic_authority_dependency() -> None:
+def test_repository_contains_only_public_verification_vectors_for_publication_auth() -> None:
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    runtime_source = (ROOT / "qntyspot/accepted_execution_intent_publication.py").read_text(
+        encoding="utf-8"
+    )
+    forbidden = (
+        "Ed25519PrivateKey",
+        "from_private_bytes",
+        ".sign(",
+    )
+    for token in forbidden:
+        assert token not in test_source
+        assert token not in runtime_source
+
+
+def test_publication_verifier_has_no_issuer_or_economic_authority_dependency() -> None:
     source = (ROOT / "qntyspot/accepted_execution_intent_publication.py").read_text(
         encoding="utf-8"
     )
-    assert "Ed25519PrivateKey" not in source
     assert "from .authority_root" not in source
     assert "import authority_root" not in source
     assert "os.environ" not in source
