@@ -389,13 +389,18 @@ class QntyPublicationReceiptV0:
 
 @dataclass(frozen=True, slots=True, init=False)
 class VerifiedQntyPublicationV0:
-    """Opaque verified publication proof produced only by authentication."""
+    """Opaque verified publication proof produced only by authentication.
+
+    The accepted-intent projection is snapshotted as canonical immutable bytes
+    at construction so callers cannot mutate verified semantics after the
+    signature boundary has been crossed.
+    """
 
     receipt: QntyPublicationReceiptV0
     trust_config_digest: str
     public_key_fingerprint: str
     exact_artifact_sha256: str
-    accepted_intent_projection: dict[str, Any]
+    accepted_intent_projection_bytes: bytes = field(repr=False)
 
     def __init__(
         self,
@@ -411,16 +416,24 @@ class VerifiedQntyPublicationV0:
             raise TypeError(
                 "VerifiedQntyPublicationV0 is only constructed by authentication"
             )
+        if type(accepted_intent_projection) is not dict:
+            raise TypeError("accepted_intent_projection must be a dict")
         object.__setattr__(self, "receipt", receipt)
         object.__setattr__(self, "trust_config_digest", trust_config_digest)
         object.__setattr__(self, "public_key_fingerprint", public_key_fingerprint)
         object.__setattr__(self, "exact_artifact_sha256", exact_artifact_sha256)
         object.__setattr__(
-            self, "accepted_intent_projection", accepted_intent_projection
+            self,
+            "accepted_intent_projection_bytes",
+            canonical_json_bytes(accepted_intent_projection),
         )
 
     def evidence_object(self) -> dict[str, Any]:
-        projection = dict(self.accepted_intent_projection)
+        projection = strict_json_loads(self.accepted_intent_projection_bytes)
+        if type(projection) is not dict:  # pragma: no cover - construction invariant
+            raise PublicationAuthenticationError(
+                "verified accepted-intent projection snapshot is not an object"
+            )
         projection["admission"] = {
             **projection["admission"],
             "origin_authentication": "VERIFIED_BY_QNTY_PUBLICATION_ROOT",
