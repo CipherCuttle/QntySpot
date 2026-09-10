@@ -1,18 +1,19 @@
 """Bridge authenticated Qnty target changes into policy-evaluation requests only.
 
-This module is deliberately narrower than policy admission and execution.  Its
+This module is deliberately narrower than policy admission and execution. Its
 only admissible input is an opaque ``VerifiedQntyPublicationV0`` produced by
-the publication-authentication boundary.  A verified NO_ACTION remains inert.
+the publication-authentication boundary. A verified NO_ACTION remains inert.
 A verified TARGET_CHANGE may produce one deterministic, immutable request for
 an independently governed policy layer to evaluate.
 
 The request carries no instrument, venue, amount, price, slippage, transaction,
-network destination, signing, submission, or capital parameters.  It cannot
+network destination, signing, submission, or capital parameters. It cannot
 construct or parse PolicyV0 and it grants no economic authority.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,6 +32,8 @@ POLICY_BRIDGE_CONTRACT_VERSION = "QNTYSPOT_AUTHENTICATED_ACCEPTED_INTENT_POLICY_
 POLICY_EVALUATION_REQUEST_SCHEMA = "qntyspot.accepted_intent_policy_evaluation_request.v0"
 _POLICY_EVALUATION_REQUEST_ID_SCHEMA = POLICY_EVALUATION_REQUEST_SCHEMA + ".request_id"
 _REQUEST_TOKEN = object()
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 class PolicyBridgeError(ValueError):
@@ -45,8 +48,15 @@ def _required_text(value: Any, *, field: str) -> str:
 
 def _digest(value: Any, *, field: str) -> str:
     text = _required_text(value, field=field)
-    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+    if not _SHA256_RE.fullmatch(text):
         raise PolicyBridgeError(f"{field}: expected lowercase SHA-256 hex")
+    return text
+
+
+def _commit(value: Any, *, field: str) -> str:
+    text = _required_text(value, field=field)
+    if not _COMMIT_RE.fullmatch(text):
+        raise PolicyBridgeError(f"{field}: expected lowercase 40-character Git commit")
     return text
 
 
@@ -58,6 +68,9 @@ class AcceptedIntentPolicyEvaluationRequestV0:
     publication_signed_body_digest: str
     publication_trust_config_digest: str
     source_intent_digest: str
+    qnty_repository_commit: str
+    qntyspot_repository_commit: str
+    qntyspot_implementation_version: str
     effective_source_timestamp: str
     previous_target: str
     current_target: str
@@ -71,6 +84,9 @@ class AcceptedIntentPolicyEvaluationRequestV0:
         publication_signed_body_digest: str,
         publication_trust_config_digest: str,
         source_intent_digest: str,
+        qnty_repository_commit: str,
+        qntyspot_repository_commit: str,
+        qntyspot_implementation_version: str,
         effective_source_timestamp: str,
         previous_target: str,
         current_target: str,
@@ -90,6 +106,9 @@ class AcceptedIntentPolicyEvaluationRequestV0:
             ("request_id", request_id),
         ):
             _digest(value, field=field_name)
+        _commit(qnty_repository_commit, field="qnty_repository_commit")
+        _commit(qntyspot_repository_commit, field="qntyspot_repository_commit")
+        _required_text(qntyspot_implementation_version, field="qntyspot_implementation_version")
         _required_text(effective_source_timestamp, field="effective_source_timestamp")
         if previous_target not in {"FLAT", "LONG"} or current_target not in {"FLAT", "LONG"}:
             raise PolicyBridgeError("targets must be FLAT or LONG")
@@ -101,6 +120,9 @@ class AcceptedIntentPolicyEvaluationRequestV0:
         object.__setattr__(self, "publication_signed_body_digest", publication_signed_body_digest)
         object.__setattr__(self, "publication_trust_config_digest", publication_trust_config_digest)
         object.__setattr__(self, "source_intent_digest", source_intent_digest)
+        object.__setattr__(self, "qnty_repository_commit", qnty_repository_commit)
+        object.__setattr__(self, "qntyspot_repository_commit", qntyspot_repository_commit)
+        object.__setattr__(self, "qntyspot_implementation_version", qntyspot_implementation_version)
         object.__setattr__(self, "effective_source_timestamp", effective_source_timestamp)
         object.__setattr__(self, "previous_target", previous_target)
         object.__setattr__(self, "current_target", current_target)
@@ -133,6 +155,9 @@ class AcceptedIntentPolicyEvaluationRequestV0:
                 "publication_receipt_id": self.publication_receipt_id,
                 "publication_signed_body_digest": self.publication_signed_body_digest,
                 "publication_trust_config_digest": self.publication_trust_config_digest,
+                "qnty_repository_commit": self.qnty_repository_commit,
+                "qntyspot_implementation_version": self.qntyspot_implementation_version,
+                "qntyspot_repository_commit": self.qntyspot_repository_commit,
                 "source_intent_digest": self.source_intent_digest,
             },
             "request_id": self.request_id,
@@ -150,6 +175,9 @@ def _request_id(
     publication_signed_body_digest: str,
     publication_trust_config_digest: str,
     source_intent_digest: str,
+    qnty_repository_commit: str,
+    qntyspot_repository_commit: str,
+    qntyspot_implementation_version: str,
     effective_source_timestamp: str,
     previous_target: str,
     current_target: str,
@@ -163,6 +191,9 @@ def _request_id(
                 "publication_receipt_id": publication_receipt_id,
                 "publication_signed_body_digest": publication_signed_body_digest,
                 "publication_trust_config_digest": publication_trust_config_digest,
+                "qnty_repository_commit": qnty_repository_commit,
+                "qntyspot_implementation_version": qntyspot_implementation_version,
+                "qntyspot_repository_commit": qntyspot_repository_commit,
                 "schema": _POLICY_EVALUATION_REQUEST_ID_SCHEMA,
                 "source_intent_digest": source_intent_digest,
                 "transition": "TARGET_CHANGE",
@@ -185,7 +216,11 @@ def bridge_authenticated_intent_to_policy_request(
     decision = evidence.get("decision")
     projection = evidence.get("projection")
     publication = evidence.get("publication_authentication")
-    if not all(isinstance(value, dict) for value in (admission, decision, projection, publication)):
+    qntyspot_implementation = evidence.get("qntyspot_implementation")
+    if not all(
+        isinstance(value, dict)
+        for value in (admission, decision, projection, publication, qntyspot_implementation)
+    ):
         raise PolicyBridgeError("verified publication evidence has an unexpected shape")
     if admission.get("origin_authentication") != "VERIFIED_BY_QNTY_PUBLICATION_ROOT":
         raise PolicyBridgeError("publication origin is not authenticated")
@@ -219,12 +254,13 @@ def bridge_authenticated_intent_to_policy_request(
 
     previous_target = decision.get("previous_target")
     current_target = decision.get("current_target")
-    effective_source_timestamp = decision.get("effective_source_timestamp")
+    effective_source_timestamp = _required_text(
+        decision.get("effective_source_timestamp"), field="effective_source_timestamp"
+    )
     if previous_target not in {"FLAT", "LONG"} or current_target not in {"FLAT", "LONG"}:
         raise PolicyBridgeError("authenticated decision targets are invalid")
     if previous_target == current_target:
         raise PolicyBridgeError("TARGET_CHANGE did not change the target")
-    _required_text(effective_source_timestamp, field="effective_source_timestamp")
 
     publication_receipt_id = _digest(
         publication.get("publication_receipt_id"), field="publication_receipt_id"
@@ -238,11 +274,24 @@ def bridge_authenticated_intent_to_policy_request(
     source_intent_digest = _digest(
         evidence.get("input_intent_digest"), field="source_intent_digest"
     )
+    qnty_repository_commit = _commit(
+        publication.get("qnty_repository_commit"), field="qnty_repository_commit"
+    )
+    qntyspot_repository_commit = _commit(
+        qntyspot_implementation.get("commit"), field="qntyspot_repository_commit"
+    )
+    qntyspot_implementation_version = _required_text(
+        qntyspot_implementation.get("version"), field="qntyspot_implementation_version"
+    )
+
     request_id = _request_id(
         publication_receipt_id=publication_receipt_id,
         publication_signed_body_digest=publication_signed_body_digest,
         publication_trust_config_digest=publication_trust_config_digest,
         source_intent_digest=source_intent_digest,
+        qnty_repository_commit=qnty_repository_commit,
+        qntyspot_repository_commit=qntyspot_repository_commit,
+        qntyspot_implementation_version=qntyspot_implementation_version,
         effective_source_timestamp=effective_source_timestamp,
         previous_target=previous_target,
         current_target=current_target,
@@ -252,6 +301,9 @@ def bridge_authenticated_intent_to_policy_request(
         publication_signed_body_digest=publication_signed_body_digest,
         publication_trust_config_digest=publication_trust_config_digest,
         source_intent_digest=source_intent_digest,
+        qnty_repository_commit=qnty_repository_commit,
+        qntyspot_repository_commit=qntyspot_repository_commit,
+        qntyspot_implementation_version=qntyspot_implementation_version,
         effective_source_timestamp=effective_source_timestamp,
         previous_target=previous_target,
         current_target=current_target,
