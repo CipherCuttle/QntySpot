@@ -27,7 +27,7 @@ REPAIRED_IMPLEMENTATION_DIGEST = "7fdd08cbb60de858d4eab7031a8463f29b62648be4b881
 # Advanced by QNTYSPOT_AUTHENTICATED_ACCEPTED_INTENT_POLICY_BRIDGE_V0 from
 # the pre-bridge successor digest 5859ec4f…; the historical repaired digest
 # above remains immutable and distinct from current runtime identity.
-CURRENT_IMPLEMENTATION_DIGEST = "097c528ae4f65d95840aa73a074571d5ebe61519f8bdfa80c55ec1bf1f0e7226"
+CURRENT_IMPLEMENTATION_DIGEST = "0d9a53b1e27ddb7bd3073ec9555769e98f75c6dcb77e7c4f6c3cce0c3bff11f1"
 OLD_IMPLEMENTATION_DIGEST = "3195730dcc9368847cab61d9250279c0ed1f13c9b93691360a2d01b109c5b9d6"
 TAKER = "0x1324d87e24e1657f6fe6805de814bb6873052106"
 OLD_VENUE = "zero-x-swap-v2-robinhood-chain"
