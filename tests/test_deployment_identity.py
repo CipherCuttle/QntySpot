@@ -32,6 +32,7 @@ def test_historical_deployment_identity_artifact_is_preserved() -> None:
         if path
         not in {
             "qntyspot/accepted_execution_intent.py",
+            "qntyspot/accepted_execution_intent_v2.py",
             "qntyspot/robinhood_chain_truth.py",
             "qntyspot/exact_signed_bytes.py",
         }
@@ -44,6 +45,12 @@ def test_v1_historical_artifact_is_preserved() -> None:
     assert artifact["implementation_identity_method"] == "sha256-canonical-source-manifest-v1"
     assert artifact["implementation_digest"] == "a1803ecbb16b91cb66cacd811f997b170b4e8c2cebf43c05830d1d314825f96c"
     assert artifact["implementation_identity_inputs"]["repository_commit"] == "982a0b38d9226523679c8e59c6abc22ccb5242fd"
+
+
+def test_current_identity_includes_dynamic_accepted_intent_consumer() -> None:
+    identity = build_identity(ROOT, CANONICAL_COMMIT)
+    paths = [item["path"] for item in identity["implementation_identity"]["file_manifest"]]
+    assert "qntyspot/accepted_execution_intent_v2.py" in paths
 
 
 def test_identity_is_independent_of_host_path_and_timestamps(tmp_path: Path) -> None:
