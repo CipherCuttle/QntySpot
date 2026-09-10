@@ -240,9 +240,9 @@ def consume_accepted_execution_intent_v2(
         "decision": {
             "current_target": decision["current_target"],
             "effective_source_timestamp": decision["effective_source_timestamp"],
-            "execution_action_required": decision["execution_action_required"],
             "previous_target": decision["previous_target"],
             "transition": transition,
+            "upstream_execution_action_required": decision["execution_action_required"],
         },
         "decision_digest": "",
         "input_intent_digest": intent["intent_digest"],
@@ -250,6 +250,7 @@ def consume_accepted_execution_intent_v2(
             "consumer_result": "NO_ACTION" if transition == "NO_ACTION" else "TARGET_CHANGE_OBSERVED",
             "network_required": "NO",
             "policy_evaluation_required": "NO",
+            "qntyspot_execution_action_authorized": "NO",
             "qntyspot_side": "NONE",
         },
         "qnty_producer": {
