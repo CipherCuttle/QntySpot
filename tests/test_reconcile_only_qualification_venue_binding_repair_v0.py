@@ -24,10 +24,10 @@ ROOT = Path(__file__).resolve().parents[1]
 BASE = "095572b0d94d7edf055246a3829de94467fc07d0"
 REPAIR_COMMIT = "0e977b5801e932101d31b4ca131df71e93634efb"
 REPAIRED_IMPLEMENTATION_DIGEST = "7fdd08cbb60de858d4eab7031a8463f29b62648be4b88104f6bd031c23a32826"
-# Advanced by SUBMIT_EXACT_SIGNED_BYTES_SAFE_HALT_RESUME_REPAIR_V0 from the
-# canonical-parent digest d289031a…; prior/new digests are bound in the
-# repair artifact under artifacts/.
-CURRENT_IMPLEMENTATION_DIGEST = "9a8d4be086e4cbe0ef6fa2019dc6523adacab4b3e3a227a6faa54a74338e1745"
+# Advanced by QNTYSPOT_ACCEPTED_EXECUTION_INTENT_DYNAMIC_CONSUMER_V2 from the
+# pre-V2 successor digest 9a8d4be0…; the historical repaired digest above
+# remains immutable and distinct from the current runtime identity.
+CURRENT_IMPLEMENTATION_DIGEST = "8a285e73efccd378a0fd2f5ec40998ad9819e64acc01ed2ed00e5b3c4351d775"
 OLD_IMPLEMENTATION_DIGEST = "3195730dcc9368847cab61d9250279c0ed1f13c9b93691360a2d01b109c5b9d6"
 TAKER = "0x1324d87e24e1657f6fe6805de814bb6873052106"
 OLD_VENUE = "zero-x-swap-v2-robinhood-chain"
