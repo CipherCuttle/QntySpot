@@ -207,11 +207,16 @@ def bridge_authenticated_intent_to_policy_request(
 ) -> AcceptedIntentPolicyEvaluationRequestV0 | None:
     """Return a policy-evaluation request only for an authenticated target change."""
 
-    if not isinstance(verified, VerifiedQntyPublicationV0):
+    # The proof type is deliberately exact, not polymorphic. A subclass could
+    # bypass the token-protected constructor and override evidence_object(),
+    # turning a virtual method into an authentication bypass.
+    if type(verified) is not VerifiedQntyPublicationV0:
         raise PolicyBridgeError(
-            "policy bridge requires VerifiedQntyPublicationV0 from publication authentication"
+            "policy bridge requires the exact VerifiedQntyPublicationV0 authentication proof"
         )
-    evidence = verified.evidence_object()
+    # Call the sealed base implementation explicitly rather than virtual-dispatching
+    # through untrusted integration code.
+    evidence = VerifiedQntyPublicationV0.evidence_object(verified)
     admission = evidence.get("admission")
     decision = evidence.get("decision")
     projection = evidence.get("projection")
