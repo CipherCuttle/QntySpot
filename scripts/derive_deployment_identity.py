@@ -28,6 +28,7 @@ SOURCE_PATHS = (
     "qntyspot/accepted_execution_intent.py",
     "qntyspot/accepted_execution_intent_publication.py",
     "qntyspot/accepted_execution_intent_v2.py",
+    "qntyspot/accepted_intent_policy_bridge.py",
     "qntyspot/authority_root.py",
     "qntyspot/boundary.py",
     "qntyspot/canon.py",
@@ -58,9 +59,12 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
+PRE_POLICY_BRIDGE_SOURCE_PATHS = tuple(
+    path for path in SOURCE_PATHS if path != "qntyspot/accepted_intent_policy_bridge.py"
+)
 PRE_PUBLICATION_AUTH_SOURCE_PATHS = tuple(
     path
-    for path in SOURCE_PATHS
+    for path in PRE_POLICY_BRIDGE_SOURCE_PATHS
     if path != "qntyspot/accepted_execution_intent_publication.py"
 )
 PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS = tuple(
@@ -118,6 +122,10 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # Preserve the pre-publication-authentication runtime identity for
         # historical checkouts while binding the verifier into current identity.
         manifest_paths = PRE_PUBLICATION_AUTH_SOURCE_PATHS
+    elif not (root / "qntyspot/accepted_intent_policy_bridge.py").exists():
+        # Preserve the pre-policy-bridge runtime identity for historical
+        # checkouts while binding the bridge into current deployments.
+        manifest_paths = PRE_POLICY_BRIDGE_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
