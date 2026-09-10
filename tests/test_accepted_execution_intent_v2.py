@@ -62,7 +62,7 @@ def test_published_v2_fixture_is_consumed_as_non_authoritative_no_action() -> No
         "transition": "NO_ACTION",
     }
     assert output["admission"] == {
-        "content_integrity": "VERIFIED",
+        "schema_and_self_digest": "VERIFIED",
         "origin_authentication": "UNPROVEN_BY_V2_BYTES",
         "policy_admission_authorized": "NO",
         "trusted_transport_required": "YES",
@@ -116,6 +116,7 @@ def test_dynamic_target_change_is_observable_but_cannot_wake_policy() -> None:
     assert output["projection"]["policy_evaluation_required"] == "NO"
     assert output["projection"]["network_required"] == "NO"
     assert output["projection"]["qntyspot_side"] == "NONE"
+    assert output["admission"]["schema_and_self_digest"] == "VERIFIED"
     assert output["admission"]["origin_authentication"] == "UNPROVEN_BY_V2_BYTES"
     assert output["admission"]["policy_admission_authorized"] == "NO"
 
