@@ -1,6 +1,6 @@
 """Fail-closed, non-authoritative consumer for Qnty accepted-intent V2.
 
-The V2 bytes prove canonical content integrity, not Qnty origin authenticity.
+The V2 bytes carry a canonical self-digest, not Qnty origin authenticity.
 Accordingly this consumer may surface directional semantics but it cannot wake
 policy, quote, network, signing, submission, or capital machinery. A separate
 authenticated transport/publication boundary is required before any downstream
@@ -231,7 +231,7 @@ def consume_accepted_execution_intent_v2(
 
     output: dict[str, Any] = {
         "admission": {
-            "content_integrity": "VERIFIED",
+            "schema_and_self_digest": "VERIFIED",
             "origin_authentication": "UNPROVEN_BY_V2_BYTES",
             "policy_admission_authorized": "NO",
             "trusted_transport_required": "YES",
