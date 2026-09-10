@@ -37,6 +37,7 @@ SOURCE_PATHS = (
     "qntyspot/errors.py",
     "qntyspot/exact_signed_bytes.py",
     "qntyspot/execution_contract.py",
+    "qntyspot/h003_audited_policy_binding.py",
     "qntyspot/identity.py",
     "qntyspot/ink.py",
     "qntyspot/keccak.py",
@@ -59,8 +60,13 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
+PRE_H003_AUDITED_POLICY_BINDING_SOURCE_PATHS = tuple(
+    path for path in SOURCE_PATHS if path != "qntyspot/h003_audited_policy_binding.py"
+)
 PRE_POLICY_BRIDGE_SOURCE_PATHS = tuple(
-    path for path in SOURCE_PATHS if path != "qntyspot/accepted_intent_policy_bridge.py"
+    path
+    for path in PRE_H003_AUDITED_POLICY_BINDING_SOURCE_PATHS
+    if path != "qntyspot/accepted_intent_policy_bridge.py"
 )
 PRE_PUBLICATION_AUTH_SOURCE_PATHS = tuple(
     path
@@ -126,6 +132,10 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # Preserve the pre-policy-bridge runtime identity for historical
         # checkouts while binding the bridge into current deployments.
         manifest_paths = PRE_POLICY_BRIDGE_SOURCE_PATHS
+    elif not (root / "qntyspot/h003_audited_policy_binding.py").exists():
+        # Preserve the pre-H003-policy-binding runtime identity while making
+        # the audited binding contract part of current authority identity.
+        manifest_paths = PRE_H003_AUDITED_POLICY_BINDING_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
