@@ -14,6 +14,7 @@ from qntyspot.accepted_execution_intent_publication import (
     PUBLICATION_ROOT_ID,
     PUBLICATION_TRUST_CONFIG_SCHEMA,
     QntyPublicationReceiptV0,
+    VerifiedQntyPublicationV0,
     authenticate_accepted_execution_intent_v2,
     load_trusted_qnty_publication_root,
 )
@@ -204,8 +205,54 @@ def test_unverified_inputs_cannot_reach_policy_bridge() -> None:
         json.loads(INTENT.read_text(encoding="utf-8")),
         {"transition": "TARGET_CHANGE"},
     ):
-        with pytest.raises(PolicyBridgeError, match="requires VerifiedQntyPublicationV0"):
+        with pytest.raises(PolicyBridgeError, match="exact VerifiedQntyPublicationV0"):
             bridge_authenticated_intent_to_policy_request(unverified)  # type: ignore[arg-type]
+
+
+def test_subclassed_verification_proof_cannot_override_authenticated_evidence() -> None:
+    class ForgedPublicationProof(VerifiedQntyPublicationV0):
+        def __init__(self) -> None:
+            # Deliberately skip the token-protected base constructor.
+            pass
+
+        def evidence_object(self) -> dict[str, object]:
+            return {
+                "admission": {
+                    "origin_authentication": "VERIFIED_BY_QNTY_PUBLICATION_ROOT",
+                    "publication_authentication": "VERIFIED",
+                    "policy_bridge_eligible": "YES",
+                    "policy_admission_authorized": "NO",
+                },
+                "decision": {
+                    "previous_target": "FLAT",
+                    "current_target": "LONG",
+                    "transition": "TARGET_CHANGE",
+                    "upstream_execution_action_required": True,
+                    "effective_source_timestamp": "2026-09-05T08:00:00Z",
+                },
+                "projection": {
+                    "consumer_result": "TARGET_CHANGE_OBSERVED",
+                    "policy_evaluation_required": "NO",
+                    "network_required": "NO",
+                    "qntyspot_execution_action_authorized": "NO",
+                    "qntyspot_side": "NONE",
+                },
+                "publication_authentication": {
+                    "publication_receipt_id": "0" * 64,
+                    "signed_body_digest": "1" * 64,
+                    "trust_config_digest": "2" * 64,
+                    "qnty_repository_commit": "3" * 40,
+                },
+                "qntyspot_implementation": {
+                    "commit": "4" * 40,
+                    "version": "forged",
+                },
+                "input_intent_digest": "5" * 64,
+            }
+
+    forged = ForgedPublicationProof()
+    with pytest.raises(PolicyBridgeError, match="exact VerifiedQntyPublicationV0"):
+        bridge_authenticated_intent_to_policy_request(forged)
 
 
 def test_policy_request_contains_no_executable_policy_or_venue_parameters() -> None:
