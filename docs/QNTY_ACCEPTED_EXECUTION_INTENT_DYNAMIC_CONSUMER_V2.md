@@ -17,6 +17,8 @@ The consumer validates canonical JSON, V2 self-digest consistency, exact schema 
 
 A self-consistent V2 digest proves only that the supplied object agrees with its own declared digest. A malicious sender can modify the object and recompute that digest; the digest therefore does not authenticate Qnty as the origin. The V2 consumer explicitly returns `schema_and_self_digest = VERIFIED`, `origin_authentication = UNPROVEN_BY_V2_BYTES`, `trusted_transport_required = YES`, and `policy_admission_authorized = NO`.
 
+`execution_action_required` remains an upstream observation only and is emitted as `upstream_execution_action_required`; QntySpot does not emit a local affirmative execution-action field. `qntyspot_execution_action_authorized` is explicitly `NO`.
+
 Even a structurally valid `TARGET_CHANGE` remains observational only. It does not select a QntySpot side, evaluate policy, request a quote, access a network, sign, submit, or authorize capital.
 
 ## Next boundary
