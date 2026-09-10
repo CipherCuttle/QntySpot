@@ -26,6 +26,7 @@ SOURCE_PATHS = (
     "pyproject.toml",
     "qntyspot/__init__.py",
     "qntyspot/accepted_execution_intent.py",
+    "qntyspot/accepted_execution_intent_publication.py",
     "qntyspot/accepted_execution_intent_v2.py",
     "qntyspot/authority_root.py",
     "qntyspot/boundary.py",
@@ -57,11 +58,20 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
+PRE_PUBLICATION_AUTH_SOURCE_PATHS = tuple(
+    path
+    for path in SOURCE_PATHS
+    if path != "qntyspot/accepted_execution_intent_publication.py"
+)
 PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS = tuple(
-    path for path in SOURCE_PATHS if path != "qntyspot/accepted_execution_intent_v2.py"
+    path
+    for path in PRE_PUBLICATION_AUTH_SOURCE_PATHS
+    if path != "qntyspot/accepted_execution_intent_v2.py"
 )
 LEGACY_SOURCE_PATHS = tuple(
-    path for path in PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS if path != "qntyspot/exact_signed_bytes.py"
+    path
+    for path in PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS
+    if path != "qntyspot/exact_signed_bytes.py"
 )
 PRE_ACCEPTED_INTENT_SOURCE_PATHS = tuple(
     path
@@ -104,6 +114,10 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # Preserve the pre-V2 runtime identity for historical checkouts while
         # making V2 part of the explicit manifest for current deployments.
         manifest_paths = PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS
+    elif not (root / "qntyspot/accepted_execution_intent_publication.py").exists():
+        # Preserve the pre-publication-authentication runtime identity for
+        # historical checkouts while binding the verifier into current identity.
+        manifest_paths = PRE_PUBLICATION_AUTH_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
