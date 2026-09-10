@@ -13,9 +13,9 @@ The fixture digest is evidence only. Runtime admission does not pin this event-s
 
 ## Boundary
 
-The consumer validates canonical JSON, the V2 content digest, exact schema fields, the no-authority block, governed research identity, Qnty/QntyLab provenance claims, acceptance-record binding, and decision derivation for both `NO_ACTION` and `TARGET_CHANGE`.
+The consumer validates canonical JSON, V2 self-digest consistency, exact schema fields, the no-authority block, governed research identity, Qnty/QntyLab provenance claims, acceptance-record binding, and decision derivation for both `NO_ACTION` and `TARGET_CHANGE`.
 
-A V2 content digest proves integrity of the supplied bytes; it does not by itself authenticate that those bytes were actually transported from Qnty. Therefore the V2 consumer explicitly returns `origin_authentication = UNPROVEN_BY_V2_BYTES`, `trusted_transport_required = YES`, and `policy_admission_authorized = NO`.
+A self-consistent V2 digest proves only that the supplied object agrees with its own declared digest. A malicious sender can modify the object and recompute that digest; the digest therefore does not authenticate Qnty as the origin. The V2 consumer explicitly returns `schema_and_self_digest = VERIFIED`, `origin_authentication = UNPROVEN_BY_V2_BYTES`, `trusted_transport_required = YES`, and `policy_admission_authorized = NO`.
 
 Even a structurally valid `TARGET_CHANGE` remains observational only. It does not select a QntySpot side, evaluate policy, request a quote, access a network, sign, submit, or authorize capital.
 
