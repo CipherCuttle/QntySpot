@@ -1,10 +1,13 @@
 """Bridge authenticated Qnty target changes into policy-evaluation requests only.
 
-This module is deliberately narrower than policy admission and execution. Its
-only admissible input is an opaque ``VerifiedQntyPublicationV0`` produced by
-the publication-authentication boundary. A verified NO_ACTION remains inert.
-A verified TARGET_CHANGE may produce one deterministic, immutable request for
-an independently governed policy layer to evaluate.
+This module is deliberately narrower than policy admission and execution. The
+bridge re-authenticates exact accepted-intent and publication-receipt bytes at
+the point of consumption against an explicit external publication trust root.
+It therefore does not trust a caller-retained in-memory verification object.
+
+A verified NO_ACTION remains inert. A verified TARGET_CHANGE may produce one
+deterministic, immutable request for an independently governed policy layer to
+evaluate.
 
 The request carries no instrument, venue, amount, price, slippage, transaction,
 network destination, signing, submission, or capital parameters. It cannot
@@ -17,7 +20,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .accepted_execution_intent_publication import VerifiedQntyPublicationV0
+from .accepted_execution_intent_publication import (
+    PublicationAuthenticationError,
+    VerifiedQntyPublicationV0,
+    authenticate_accepted_execution_intent_v2,
+    load_trusted_qnty_publication_root,
+)
+from .accepted_execution_intent_v2 import AcceptedIntentV2Rejected
 from .canon import canonical_json_bytes, sha256_hex
 
 __all__ = [
@@ -203,19 +212,48 @@ def _request_id(
 
 
 def bridge_authenticated_intent_to_policy_request(
-    verified: VerifiedQntyPublicationV0,
+    intent_bytes: bytes,
+    *,
+    receipt_bytes: bytes,
+    trust_config_bytes: bytes,
+    expected_trust_config_digest: str,
+    anchor_bytes: bytes,
+    qntyspot_commit: str,
 ) -> AcceptedIntentPolicyEvaluationRequestV0 | None:
-    """Return a policy-evaluation request only for an authenticated target change."""
+    """Re-authenticate exact publication bytes, then bridge only a target change.
 
-    # The proof type is deliberately exact, not polymorphic. A subclass could
-    # bypass the token-protected constructor and override evidence_object(),
-    # turning a virtual method into an authentication bypass.
-    if type(verified) is not VerifiedQntyPublicationV0:
-        raise PolicyBridgeError(
-            "policy bridge requires the exact VerifiedQntyPublicationV0 authentication proof"
+    No caller-provided ``VerifiedQntyPublicationV0`` is accepted. Re-verifying
+    the signed artifact at this consumption boundary prevents forged or mutated
+    in-process proof objects from becoming an authentication substitute.
+    """
+
+    if type(intent_bytes) is not bytes:
+        raise PolicyBridgeError("accepted intent must be supplied as exact bytes")
+    if type(receipt_bytes) is not bytes:
+        raise PolicyBridgeError("publication receipt must be supplied as exact bytes")
+    if type(trust_config_bytes) is not bytes:
+        raise PolicyBridgeError("publication trust config must be supplied as exact bytes")
+    if type(anchor_bytes) is not bytes:
+        raise PolicyBridgeError("publication public anchor must be supplied as exact bytes")
+
+    try:
+        trusted_root = load_trusted_qnty_publication_root(
+            trust_config_bytes,
+            expected_config_digest=expected_trust_config_digest,
+            anchor_bytes=anchor_bytes,
         )
-    # Call the sealed base implementation explicitly rather than virtual-dispatching
-    # through untrusted integration code.
+        verified = authenticate_accepted_execution_intent_v2(
+            intent_bytes,
+            receipt=receipt_bytes,
+            trusted_root=trusted_root,
+            qntyspot_commit=qntyspot_commit,
+        )
+    except (PublicationAuthenticationError, AcceptedIntentV2Rejected) as exc:
+        raise PolicyBridgeError(f"publication reauthentication failed: {exc}") from exc
+
+    # The proof is created and consumed inside this call. No untrusted caller
+    # can substitute a retained/mutated proof object between verification and
+    # extraction of the authenticated evidence snapshot.
     evidence = VerifiedQntyPublicationV0.evidence_object(verified)
     admission = evidence.get("admission")
     decision = evidence.get("decision")
