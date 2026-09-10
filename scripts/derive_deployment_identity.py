@@ -172,21 +172,34 @@ def build_identity(root: str | Path, repository_commit: str) -> dict[str, Any]:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", default=".", help="repository root")
-    parser.add_argument("--repository-commit", required=True)
-    parser.add_argument("--output", help="optional output path")
-    args = parser.parse_args(argv)
+def _write_once(path: Path, data: bytes) -> None:
+    if path.exists():
+        if path.read_bytes() != data:
+            raise DeploymentIdentityError(f"refusing to overwrite different artifact: {path}")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
 
-    identity = build_identity(args.root, args.repository_commit)
-    payload = canonical_json_bytes(identity)
-    if args.output:
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(payload)
-    else:
-        print(payload.decode("ascii"))
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, required=True, help="explicit source checkout root")
+    parser.add_argument("--repository-commit", required=True, help="explicit canonical QntySpot commit")
+    parser.add_argument("--output", type=Path, required=True, help="write-once canonical JSON artifact")
+    args = parser.parse_args()
+    artifact = build_identity(args.root, args.repository_commit)
+    artifact_bytes = canonical_json_bytes(artifact)
+    _write_once(args.output, artifact_bytes)
+    print(
+        json.dumps(
+            {
+                "artifact_digest": hashlib.sha256(artifact_bytes).hexdigest(),
+                "implementation_digest": artifact["implementation_digest"],
+                "output": str(args.output),
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
