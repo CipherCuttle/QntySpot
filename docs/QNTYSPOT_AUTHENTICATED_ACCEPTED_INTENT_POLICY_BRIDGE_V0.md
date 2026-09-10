@@ -8,14 +8,25 @@ This is the first boundary allowed to wake the policy layer after Qnty publicati
 
 ## Input authority
 
-The only admissible input is `VerifiedQntyPublicationV0`, produced by `authenticate_accepted_execution_intent_v2` after verification against an explicit external Qnty publication trust root.
+The bridge does **not** trust a caller-retained `VerifiedQntyPublicationV0`. Python object immutability is not an authentication boundary: hostile in-process code can manufacture or mutate objects with low-level object primitives.
 
-Raw V2 bytes, parsed JSON, self-consistent intent objects, and caller-constructed projections are not admissible bridge inputs.
+The admissible bridge inputs are therefore explicit immutable byte inputs plus the independently supplied publication trust material:
+
+- exact accepted-intent bytes
+- exact publication-receipt bytes
+- canonical publication trust-config bytes
+- independently supplied expected trust-config digest
+- public Ed25519 anchor bytes
+- explicit QntySpot consumer commit
+
+At the point of policy-bridge consumption, the bridge reloads the trust root and calls `authenticate_accepted_execution_intent_v2` again. Only the proof created inside that same bridge call is consumed. Caller-constructed, retained, subclassed, or low-level-mutated proof objects are not bridge inputs.
+
+This repeated verification is deliberate trust-boundary work, not strategy recomputation: QntySpot still does not recompute Qnty/QntyLab research.
 
 ## Transition behavior
 
-- authenticated `NO_ACTION` → no policy request (`None`)
-- authenticated `TARGET_CHANGE` → one immutable `AcceptedIntentPolicyEvaluationRequestV0`
+- re-authenticated `NO_ACTION` → no policy request (`None`)
+- re-authenticated `TARGET_CHANGE` → one immutable `AcceptedIntentPolicyEvaluationRequestV0`
 
 The TARGET_CHANGE request binds:
 
@@ -56,9 +67,11 @@ A policy evaluator may later consume this request only under a separately govern
 
 `QNTYSPOT_AUTHENTICATED_ACCEPTED_INTENT_POLICY_BRIDGE_V0_CLOSED_PASS` requires:
 
-- real authenticated NO_ACTION remains inert
-- authenticated TARGET_CHANGE deterministically emits exactly one policy-evaluation request
-- unverified inputs fail closed
+- real signed NO_ACTION remains inert after re-authentication
+- signed TARGET_CHANGE deterministically emits exactly one policy-evaluation request
+- retained, subclassed, low-level-forged, or mutated proof objects cannot substitute for signed bytes
+- tampered accepted-intent bytes fail publication re-authentication
+- mutable receipt/trust objects are not accepted at the bridge byte boundary
 - request is immutable and canonical
 - no executable policy/economic fields leak into the request
 - no policy parser, execution, authority-root, network, or ambient-state dependency
