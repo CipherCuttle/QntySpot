@@ -26,6 +26,7 @@ SOURCE_PATHS = (
     "pyproject.toml",
     "qntyspot/__init__.py",
     "qntyspot/accepted_execution_intent.py",
+    "qntyspot/accepted_execution_intent_v2.py",
     "qntyspot/authority_root.py",
     "qntyspot/boundary.py",
     "qntyspot/canon.py",
@@ -56,10 +57,15 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
-LEGACY_SOURCE_PATHS = tuple(path for path in SOURCE_PATHS if path != "qntyspot/exact_signed_bytes.py")
+PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS = tuple(
+    path for path in SOURCE_PATHS if path != "qntyspot/accepted_execution_intent_v2.py"
+)
+LEGACY_SOURCE_PATHS = tuple(
+    path for path in PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS if path != "qntyspot/exact_signed_bytes.py"
+)
 PRE_ACCEPTED_INTENT_SOURCE_PATHS = tuple(
     path
-    for path in SOURCE_PATHS
+    for path in PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS
     if path
     not in {"qntyspot/accepted_execution_intent.py", "qntyspot/exact_signed_bytes.py"}
 )
@@ -94,6 +100,10 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         manifest_paths = PRE_ACCEPTED_INTENT_SOURCE_PATHS
     elif not (root / "qntyspot/exact_signed_bytes.py").exists():
         manifest_paths = LEGACY_SOURCE_PATHS
+    elif not (root / "qntyspot/accepted_execution_intent_v2.py").exists():
+        # Preserve the pre-V2 runtime identity for historical checkouts while
+        # making V2 part of the explicit manifest for current deployments.
+        manifest_paths = PRE_DYNAMIC_ACCEPTED_INTENT_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
@@ -162,34 +172,21 @@ def build_identity(root: str | Path, repository_commit: str) -> dict[str, Any]:
     }
 
 
-def _write_once(path: Path, data: bytes) -> None:
-    if path.exists():
-        if path.read_bytes() != data:
-            raise DeploymentIdentityError(f"refusing to overwrite different artifact: {path}")
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-
-
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, required=True, help="explicit source checkout root")
-    parser.add_argument("--repository-commit", required=True, help="explicit canonical QntySpot commit")
-    parser.add_argument("--output", type=Path, required=True, help="write-once canonical JSON artifact")
-    args = parser.parse_args()
-    artifact = build_identity(args.root, args.repository_commit)
-    artifact_bytes = canonical_json_bytes(artifact)
-    _write_once(args.output, artifact_bytes)
-    print(
-        json.dumps(
-            {
-                "artifact_digest": hashlib.sha256(artifact_bytes).hexdigest(),
-                "implementation_digest": artifact["implementation_digest"],
-                "output": str(args.output),
-            },
-            sort_keys=True,
-        )
-    )
+    parser.add_argument("--root", default=".", help="repository root")
+    parser.add_argument("--repository-commit", required=True)
+    parser.add_argument("--output", help="optional output path")
+    args = parser.parse_args(argv)
+
+    identity = build_identity(args.root, args.repository_commit)
+    payload = canonical_json_bytes(identity)
+    if args.output:
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(payload)
+    else:
+        print(payload.decode("ascii"))
     return 0
 
 
