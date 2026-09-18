@@ -58,103 +58,12 @@ def _uint(value: Any, *, field_name: str) -> int:
     return value
 
 
-@dataclass(frozen=True, slots=True)
-class InkV0FSignedSwapAdmissionV0:
-    """Ephemeral proof that complete external bytes equal the frozen swap."""
-
-    revalidation: InkV0FSameAmountRevalidationV0
-    envelope_id: str
-    admitted_at_epoch_s: int
-    signed_bytes: bytes = field(repr=False)
-    validated: ValidatedExactSignedBytesV0
-    schema: str = SIGNED_SWAP_ADMISSION_SCHEMA
-    _token: object = field(default=None, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if self._token is not _SIGNED_SWAP_TOKEN:
-            raise EnvelopeValidationError(
-                "signed swap admission must be produced by exact-byte validation"
-            )
-        if self.schema != SIGNED_SWAP_ADMISSION_SCHEMA:
-            raise EnvelopeValidationError("unknown signed swap admission schema")
-        _digest(self.envelope_id, field_name="envelope_id")
-        _uint(self.admitted_at_epoch_s, field_name="admitted_at_epoch_s")
-        if self.revalidation._token is not _REVALIDATION_TOKEN:
-            raise SafeHaltError(
-                "signed swap admission requires live-produced same-amount revalidation"
-            )
-        if type(self.signed_bytes) is not bytes or not self.signed_bytes:
-            raise EnvelopeValidationError("signed swap bytes must be non-empty bytes")
-        if type(self.validated) is not ValidatedExactSignedBytesV0:
-            raise EnvelopeValidationError("signed swap validation type is invalid")
-        request = self.revalidation.swap_request
-        rechecked = validate_exact_signed_bytes(self.signed_bytes, request.scope)
-        if rechecked != self.validated:
-            raise EnvelopeValidationError(
-                "signed swap validation does not match cryptographic revalidation"
-            )
-        if self.validated.scope != request.scope:
-            raise EnvelopeValidationError(
-                "signed swap validation scope differs from revalidation"
-            )
-        if self.admitted_at_epoch_s < self.revalidation.revalidated_at_epoch_s:
-            raise EnvelopeValidationError(
-                "signed swap admission predates same-amount revalidation"
-            )
-        if (
-            self.admitted_at_epoch_s - self.revalidation.revalidated_at_epoch_s
-            > MAX_REVALIDATION_TO_ADMISSION_S
-        ):
-            raise SafeHaltError(
-                "same-amount revalidation is too old for signed swap admission"
-            )
-        if sha256_hex(self.signed_bytes) != self.validated.signed_bytes_sha256:
-            raise EnvelopeValidationError("signed swap bytes differ from validated digest")
-        if len(self.signed_bytes) != self.validated.signed_bytes_length:
-            raise EnvelopeValidationError("signed swap byte length differs from validation")
-        parsed = self.validated.parsed
-        if parsed.transaction_type != "eip-1559":
-            raise EnvelopeValidationError("Ink V0F swap admission requires EIP-1559")
-        if parsed.chain_id != INK_CHAIN_ID:
-            raise EnvelopeValidationError("Ink V0F signed swap is on the wrong chain")
-        if parsed.sender_address != INK_V0F_TAKER_ADDRESS:
-            raise EnvelopeValidationError("Ink V0F signed swap has the wrong taker")
-        if parsed.target_address != INK_V0F_ROUTER_ADDRESS:
-            raise EnvelopeValidationError("Ink V0F signed swap has the wrong router")
-        if parsed.value_atomic != 0:
-            raise EnvelopeValidationError("Ink V0F signed swap carries native value")
-        if parsed.calldata != request.calldata:
-            raise EnvelopeValidationError(
-                "Ink V0F signed swap calldata differs from the frozen request"
-            )
-
-    @property
-    def transaction_hash(self) -> str:
-        return self.validated.parsed.transaction_hash
-
-    @property
-    def admission_id(self) -> str:
-        return digest_object(
-            {
-                "admitted_at_epoch_s": self.admitted_at_epoch_s,
-                "envelope_id": self.envelope_id,
-                "revalidation_id": self.revalidation.revalidation_id,
-                "schema": self.schema,
-                "signed_bytes_length": self.validated.signed_bytes_length,
-                "signed_bytes_sha256": self.validated.signed_bytes_sha256,
-                "transaction_hash": self.transaction_hash,
-            }
-        )
-
-
-def validate_ink_v0f_signed_swap(
+def _assert_revalidation_envelope_binding(
     revalidation: InkV0FSameAmountRevalidationV0,
     envelope: ExecutionEnvelopeV0,
-    signed_bytes: bytes,
     *,
     admitted_at_epoch_s: int,
-) -> InkV0FSignedSwapAdmissionV0:
-    """Validate complete signed swap bytes without changing or persisting them."""
+) -> None:
     if type(revalidation) is not InkV0FSameAmountRevalidationV0:
         raise AuthorityVerificationError("signed swap requires canonical revalidation")
     if revalidation._token is not _REVALIDATION_TOKEN:
@@ -188,19 +97,125 @@ def validate_ink_v0f_signed_swap(
             "signed swap revalidation scope differs from the frozen envelope"
         )
     admitted = _uint(admitted_at_epoch_s, field_name="admitted_at_epoch_s")
+    if admitted < revalidation.revalidated_at_epoch_s:
+        raise EnvelopeValidationError(
+            "signed swap admission predates same-amount revalidation"
+        )
+    if admitted - revalidation.revalidated_at_epoch_s > MAX_REVALIDATION_TO_ADMISSION_S:
+        raise SafeHaltError(
+            "same-amount revalidation is too old for signed swap admission"
+        )
     if admitted >= envelope.deadline_epoch_s:
         raise SafeHaltError("signed swap admission is at or past the frozen deadline")
     if envelope.constructed_at_epoch_s > revalidation.revalidated_at_epoch_s:
         raise EnvelopeValidationError(
             "same-amount revalidation predates envelope construction"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InkV0FSignedSwapAdmissionV0:
+    """Ephemeral proof that complete external bytes equal the frozen swap."""
+
+    revalidation: InkV0FSameAmountRevalidationV0
+    envelope: ExecutionEnvelopeV0
+    admitted_at_epoch_s: int
+    signed_bytes: bytes = field(repr=False)
+    validated: ValidatedExactSignedBytesV0
+    schema: str = SIGNED_SWAP_ADMISSION_SCHEMA
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _SIGNED_SWAP_TOKEN:
+            raise EnvelopeValidationError(
+                "signed swap admission must be produced by exact-byte validation"
+            )
+        if self.schema != SIGNED_SWAP_ADMISSION_SCHEMA:
+            raise EnvelopeValidationError("unknown signed swap admission schema")
+        _assert_revalidation_envelope_binding(
+            self.revalidation,
+            self.envelope,
+            admitted_at_epoch_s=self.admitted_at_epoch_s,
+        )
+        if type(self.signed_bytes) is not bytes or not self.signed_bytes:
+            raise EnvelopeValidationError("signed swap bytes must be non-empty bytes")
+        if type(self.validated) is not ValidatedExactSignedBytesV0:
+            raise EnvelopeValidationError("signed swap validation type is invalid")
+        request = self.revalidation.swap_request
+        rechecked = validate_exact_signed_bytes(self.signed_bytes, request.scope)
+        if rechecked != self.validated:
+            raise EnvelopeValidationError(
+                "signed swap validation does not match cryptographic revalidation"
+            )
+        if self.validated.scope != request.scope:
+            raise EnvelopeValidationError(
+                "signed swap validation scope differs from revalidation"
+            )
+        if sha256_hex(self.signed_bytes) != self.validated.signed_bytes_sha256:
+            raise EnvelopeValidationError("signed swap bytes differ from validated digest")
+        if len(self.signed_bytes) != self.validated.signed_bytes_length:
+            raise EnvelopeValidationError("signed swap byte length differs from validation")
+        parsed = self.validated.parsed
+        if parsed.transaction_type != "eip-1559":
+            raise EnvelopeValidationError("Ink V0F swap admission requires EIP-1559")
+        if parsed.chain_id != INK_CHAIN_ID:
+            raise EnvelopeValidationError("Ink V0F signed swap is on the wrong chain")
+        if parsed.sender_address != INK_V0F_TAKER_ADDRESS:
+            raise EnvelopeValidationError("Ink V0F signed swap has the wrong taker")
+        if parsed.target_address != INK_V0F_ROUTER_ADDRESS:
+            raise EnvelopeValidationError("Ink V0F signed swap has the wrong router")
+        if parsed.value_atomic != 0:
+            raise EnvelopeValidationError("Ink V0F signed swap carries native value")
+        if parsed.calldata != request.calldata:
+            raise EnvelopeValidationError(
+                "Ink V0F signed swap calldata differs from the frozen request"
+            )
+
+    @property
+    def envelope_id(self) -> str:
+        return self.envelope.envelope_id
+
+    @property
+    def transaction_hash(self) -> str:
+        return self.validated.parsed.transaction_hash
+
+    @property
+    def admission_id(self) -> str:
+        return digest_object(
+            {
+                "admitted_at_epoch_s": self.admitted_at_epoch_s,
+                "envelope_id": self.envelope_id,
+                "revalidation_id": self.revalidation.revalidation_id,
+                "schema": self.schema,
+                "signed_bytes_length": self.validated.signed_bytes_length,
+                "signed_bytes_sha256": self.validated.signed_bytes_sha256,
+                "transaction_hash": self.transaction_hash,
+            }
+        )
+
+
+def validate_ink_v0f_signed_swap(
+    revalidation: InkV0FSameAmountRevalidationV0,
+    envelope: ExecutionEnvelopeV0,
+    signed_bytes: bytes,
+    *,
+    admitted_at_epoch_s: int,
+) -> InkV0FSignedSwapAdmissionV0:
+    """Validate complete signed swap bytes without changing or persisting them."""
+    admitted = _uint(admitted_at_epoch_s, field_name="admitted_at_epoch_s")
+    _assert_revalidation_envelope_binding(
+        revalidation,
+        envelope,
+        admitted_at_epoch_s=admitted,
+    )
+    request = revalidation.swap_request
     fields = request.eip1559_signing_fields()
     if fields["type"] != 2 or fields["value"] != 0:
         raise EnvelopeValidationError("frozen Ink V0F swap signing fields are invalid")
     validated = validate_exact_signed_bytes(signed_bytes, request.scope)
     return InkV0FSignedSwapAdmissionV0(
         revalidation=revalidation,
-        envelope_id=envelope.envelope_id,
+        envelope=envelope,
         admitted_at_epoch_s=admitted,
         signed_bytes=signed_bytes,
         validated=validated,
@@ -421,7 +436,7 @@ def run_ink_v0f_zero_money_rehearsal(
         raise EnvelopeValidationError(
             "rehearsal envelope differs from the frozen Ink execution scope"
         )
-    if signed_swap.envelope_id != envelope.envelope_id:
+    if signed_swap.envelope != envelope or signed_swap.envelope_id != envelope.envelope_id:
         raise EnvelopeValidationError(
             "signed swap admission belongs to another frozen envelope"
         )
