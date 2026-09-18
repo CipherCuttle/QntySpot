@@ -14,6 +14,8 @@ from qntyspot.errors import ChainTruthError, EnvelopeValidationError, SafeHaltEr
 from qntyspot.execution_contract import (
     ApprovalActionV0,
     AuthorityLevel,
+    Capability,
+    LADDER,
     ChainPresence,
     ChainTruthVerdict,
     ExecutionEnvelopeV0,
@@ -131,8 +133,9 @@ def approval_and_envelope(*, amount: int = 1_000, min_output: int = 900):
     return sess, approval, envelope
 
 
-def test_source_ceiling_stays_reconcile_only() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+def test_source_ceiling_is_human_signed_execution_without_signature_production() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
 
 def test_approval_nonce_must_immediately_precede_frozen_swap_nonce() -> None:
