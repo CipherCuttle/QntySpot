@@ -736,6 +736,8 @@ class InkShadowAdapter(QuoteSource):
         rounding.
         """
 
+        if not isinstance(side, Side):
+            raise InkError("side must be Side")
         if (
             isinstance(desired_input_atomic, bool)
             or not isinstance(desired_input_atomic, int)

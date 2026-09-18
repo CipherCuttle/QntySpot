@@ -310,6 +310,26 @@ def test_impact_capped_input_reduces_an_oversized_order_and_rechecks_it() -> Non
     assert adapter._quote(observation, Side.BUY, selected).price_impact_bps <= 100
 
 
+def test_impact_capped_input_handles_sell_side_and_rejects_invalid_side() -> None:
+    adapter, observation = observed_adapter(reserve0=1_000_000, reserve1=1_000_000)
+    selected = adapter.impact_capped_input_atomic(
+        observation,
+        Side.SELL,
+        desired_input_atomic=100_000,
+        max_price_impact_bps=100,
+    )
+    assert 0 < selected < 100_000
+    assert adapter._quote(observation, Side.SELL, selected).price_impact_bps <= 100
+
+    with pytest.raises(Exception, match="side must be Side"):
+        adapter.impact_capped_input_atomic(  # type: ignore[arg-type]
+            observation,
+            "SELL",
+            desired_input_atomic=1_000,
+            max_price_impact_bps=100,
+        )
+
+
 def test_impact_cap_below_the_v2_fee_floor_fails_closed() -> None:
     adapter, observation = observed_adapter(
         reserve0=1_000_000_000,
