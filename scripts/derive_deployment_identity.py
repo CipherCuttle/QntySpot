@@ -24,6 +24,8 @@ STATUS = "SUPERSEDES_DEPLOYMENT_IDENTITY_V0_FOR_AUTHORITY_BINDING"
 # would allow an untracked file to become part of an authority identity.
 SOURCE_PATHS = (
     "pyproject.toml",
+    "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json",
+    "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.sha256",
     "qntyspot/__init__.py",
     "qntyspot/accepted_execution_intent.py",
     "qntyspot/accepted_execution_intent_publication.py",
@@ -40,6 +42,7 @@ SOURCE_PATHS = (
     "qntyspot/h003_audited_policy_binding.py",
     "qntyspot/identity.py",
     "qntyspot/ink.py",
+    "qntyspot/ink_v0f_risk.py",
     "qntyspot/keccak.py",
     "qntyspot/ledger/__init__.py",
     "qntyspot/ledger/atomics.py",
@@ -61,8 +64,20 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
+PRE_INK_V0F_RISK_SOURCE_PATHS = tuple(
+    path
+    for path in SOURCE_PATHS
+    if path
+    not in {
+        "qntyspot/ink_v0f_risk.py",
+        "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json",
+        "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.sha256",
+    }
+)
 PRE_PRELIVE_CAPITAL_ECONOMICS_SOURCE_PATHS = tuple(
-    path for path in SOURCE_PATHS if path != "qntyspot/prelive_economics.py"
+    path
+    for path in PRE_INK_V0F_RISK_SOURCE_PATHS
+    if path != "qntyspot/prelive_economics.py"
 )
 PRE_H003_AUDITED_POLICY_BINDING_SOURCE_PATHS = tuple(
     path
@@ -146,6 +161,11 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # Preserve the pre-prelive-economics runtime identity while binding
         # the additive capital-economics module into current deployments.
         manifest_paths = PRE_PRELIVE_CAPITAL_ECONOMICS_SOURCE_PATHS
+    elif not (root / "qntyspot/ink_v0f_risk.py").exists():
+        # Preserve the pre-Ink-V0F-risk runtime identity while binding the
+        # external risk consumer and exact vendored authority artifact into
+        # current deployments.
+        manifest_paths = PRE_INK_V0F_RISK_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
