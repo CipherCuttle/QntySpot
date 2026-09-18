@@ -1005,6 +1005,8 @@ class InkV0FSameAmountRevalidationV0:
     signer_state_digest: str
     fresh_quote_output_atomic: int
     fresh_required_min_output_atomic: int
+    common_block: int
+    revalidated_at_epoch_s: int
     schema: str = SAME_AMOUNT_REVALIDATION_SCHEMA
     _token: object = field(default=None, repr=False, compare=False)
 
@@ -1029,6 +1031,35 @@ class InkV0FSameAmountRevalidationV0:
         )
         if type(self.swap_request) is not InkV0FSwapSigningRequestV0:
             raise EnvelopeValidationError("revalidation swap request has the wrong type")
+        _uint(self.common_block, field="common_block")
+        _uint(self.revalidated_at_epoch_s, field="revalidated_at_epoch_s")
+        scope = self.swap_request.scope
+        if (
+            scope.chain_id != INK_CHAIN_ID
+            or scope.taker_address != INK_V0F_TAKER_ADDRESS
+            or scope.target_address != INK_V0F_ROUTER_ADDRESS
+            or scope.min_value_atomic != 0
+            or scope.max_value_atomic != 0
+        ):
+            raise EnvelopeValidationError(
+                "revalidation swap scope is outside the frozen Ink V0F transaction scope"
+            )
+        if (
+            scope.account_nonce is None
+            or scope.gas_limit_ceiling is None
+            or scope.max_fee_per_gas_ceiling is None
+            or scope.max_priority_fee_per_gas_ceiling is None
+        ):
+            raise EnvelopeValidationError(
+                "revalidation swap scope is missing exact nonce/gas/fee ceilings"
+            )
+        if (
+            sha256_hex(self.swap_request.calldata) != scope.calldata_sha256
+            or len(self.swap_request.calldata) != scope.calldata_length
+        ):
+            raise EnvelopeValidationError(
+                "revalidation swap calldata differs from its signed-byte scope"
+            )
 
     @property
     def revalidation_id(self) -> str:
@@ -1039,7 +1070,9 @@ class InkV0FSameAmountRevalidationV0:
                 "fresh_required_min_output_atomic": str(
                     self.fresh_required_min_output_atomic
                 ),
+                "common_block": self.common_block,
                 "market_observation_digest": self.market_observation_digest,
+                "revalidated_at_epoch_s": self.revalidated_at_epoch_s,
                 "router_observation_digest": self.router_observation_digest,
                 "schema": self.schema,
                 "signer_state_digest": self.signer_state_digest,
@@ -1150,5 +1183,7 @@ def revalidate_ink_v0f_same_amount(
         signer_state_digest=signer_state.digest,
         fresh_quote_output_atomic=quote.output_atomic,
         fresh_required_min_output_atomic=required_min,
+        common_block=market.common_block,
+        revalidated_at_epoch_s=now_epoch_s,
         _token=_REVALIDATION_TOKEN,
     )
