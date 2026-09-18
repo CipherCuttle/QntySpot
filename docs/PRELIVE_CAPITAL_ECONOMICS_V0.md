@@ -54,7 +54,10 @@ admission gate.
 
 ## 4. Profit is not gross sale proceeds
 
-compute_profit_allocation uses exact weighted-average cost basis.
+compute_profit_allocation uses exact weighted-average cost basis for one
+explicit accounting position and one exact base/quote instrument pair. Every
+trade must carry the same position and instrument identities or the allocator
+fails closed.
 
 - BUY quote spend plus explicit quote-denominated external costs increases cost
   basis.

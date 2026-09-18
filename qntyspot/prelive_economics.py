@@ -171,14 +171,26 @@ def assert_new_entry_concurrency(
 
 @dataclass(frozen=True, slots=True)
 class ExecutedTradeV0:
-    """One chronologically ordered settled trade in quote-accounting terms."""
+    """One settled trade bound to one explicit accounting position."""
 
+    position_id: str
+    base_instrument_id: str
+    quote_instrument_id: str
     side: Side
     base_atomic: int
     quote_atomic: int
     external_cost_quote_atomic: int = 0
 
     def __post_init__(self) -> None:
+        for field, value in (
+            ("position_id", self.position_id),
+            ("base_instrument_id", self.base_instrument_id),
+            ("quote_instrument_id", self.quote_instrument_id),
+        ):
+            if type(value) is not str or not value:
+                raise QntySpotError(f"{field} must be non-empty text")
+        if self.base_instrument_id == self.quote_instrument_id:
+            raise QntySpotError("base and quote instruments must be distinct")
         if not isinstance(self.side, Side):
             raise QntySpotError("trade side must be Side")
         _positive_int(self.base_atomic, field="base_atomic")
@@ -193,6 +205,9 @@ class ExecutedTradeV0:
 class ProfitAllocationV0:
     """Exact realized-PnL and conservative integer recycling result."""
 
+    position_id: str
+    base_instrument_id: str
+    quote_instrument_id: str
     realized_pnl_quote_atomic: Fraction
     realized_profit_quote_atomic: Fraction
     realized_loss_quote_atomic: Fraction
@@ -207,6 +222,9 @@ class ProfitAllocationV0:
 def compute_profit_allocation(
     trades: Iterable[ExecutedTradeV0],
     *,
+    position_id: str,
+    base_instrument_id: str,
+    quote_instrument_id: str,
     profit_recycle_ratio: Fraction,
     banked_profit_ratio: Fraction,
 ) -> ProfitAllocationV0:
@@ -218,6 +236,16 @@ def compute_profit_allocation(
     recycling/banking. Integer allocations round DOWN, so rounding can never
     create spendable capital.
     """
+
+    for field, value in (
+        ("position_id", position_id),
+        ("base_instrument_id", base_instrument_id),
+        ("quote_instrument_id", quote_instrument_id),
+    ):
+        if type(value) is not str or not value:
+            raise QntySpotError(f"{field} must be non-empty text")
+    if base_instrument_id == quote_instrument_id:
+        raise QntySpotError("base and quote instruments must be distinct")
 
     recycle_ratio = _unit_ratio(
         profit_recycle_ratio, field="profit_recycle_ratio"
@@ -236,6 +264,14 @@ def compute_profit_allocation(
     external_cost_total = 0
 
     for trade in trades:
+        if (
+            trade.position_id != position_id
+            or trade.base_instrument_id != base_instrument_id
+            or trade.quote_instrument_id != quote_instrument_id
+        ):
+            raise QntySpotError(
+                "trade does not belong to the requested accounting position/instrument pair"
+            )
         external_cost_total += trade.external_cost_quote_atomic
         if trade.side is Side.BUY:
             inventory += trade.base_atomic
@@ -267,6 +303,9 @@ def compute_profit_allocation(
     retained = realized_profit - recyclable - banked
 
     return ProfitAllocationV0(
+        position_id=position_id,
+        base_instrument_id=base_instrument_id,
+        quote_instrument_id=quote_instrument_id,
         realized_pnl_quote_atomic=realized,
         realized_profit_quote_atomic=realized_profit,
         realized_loss_quote_atomic=realized_loss,
