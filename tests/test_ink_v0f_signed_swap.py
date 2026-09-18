@@ -270,7 +270,7 @@ def test_signed_swap_admission_rejects_direct_caller_construction(monkeypatch) -
     with pytest.raises(EnvelopeValidationError, match="exact-byte validation"):
         InkV0FSignedSwapAdmissionV0(
             revalidation=revalidation,
-            envelope_id=envelope.envelope_id,
+            envelope=envelope,
             admitted_at_epoch_s=1_800_000_100,
             signed_bytes=raw,
             validated=admitted.validated,
