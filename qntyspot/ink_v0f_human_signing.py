@@ -17,7 +17,7 @@ No signing key material is accepted or produced here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
@@ -80,6 +80,15 @@ SAME_AMOUNT_REVALIDATION_SCHEMA = "qntyspot.ink_v0f.same_amount_revalidation.v0"
 SWAP_SIGNING_REQUEST_SCHEMA = "qntyspot.ink_v0f.swap_signing_request.v0"
 
 _PROVIDER_IDS = ("ink-rpc-a", "ink-rpc-b")
+
+# These tokens are process-local proof-of-path markers, matching the existing
+# ledger pattern for database-validated economic actions. They do not replace
+# cryptographic or chain verification; they prevent a caller-built dataclass
+# from impersonating the output of those verification paths.
+_SIGNED_APPROVAL_TOKEN = object()
+_APPROVAL_OBSERVATION_TOKEN = object()
+_APPROVAL_TRUTH_TOKEN = object()
+_APPROVAL_SETTLEMENT_TOKEN = object()
 
 
 def _uint(value: Any, *, field: str, positive: bool = False) -> int:
@@ -231,8 +240,13 @@ class InkV0FApprovalSigningRequestV0:
 class InkV0FSignedApprovalV0:
     request: InkV0FApprovalSigningRequestV0
     validated: ValidatedExactSignedBytesV0
+    _token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._token is not _SIGNED_APPROVAL_TOKEN:
+            raise EnvelopeValidationError(
+                "signed approval must be produced by exact-byte validation"
+            )
         if type(self.request) is not InkV0FApprovalSigningRequestV0:
             raise EnvelopeValidationError("signed approval request type is invalid")
         if type(self.validated) is not ValidatedExactSignedBytesV0:
@@ -436,7 +450,11 @@ def validate_ink_v0f_signed_approval(
     validated = validate_exact_signed_bytes(signed_bytes, request.scope)
     if validated.parsed.transaction_type != "eip-1559":
         raise EnvelopeValidationError("Ink V0F human signing accepts EIP-1559 transactions only")
-    return InkV0FSignedApprovalV0(request=request, validated=validated)
+    return InkV0FSignedApprovalV0(
+        request=request,
+        validated=validated,
+        _token=_SIGNED_APPROVAL_TOKEN,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -453,8 +471,13 @@ class InkV0FApprovalChainObservationV0:
     head_block_hash: str | None = None
     receipt_status: ReceiptStatus | None = None
     schema: str = APPROVAL_OBSERVATION_SCHEMA
+    _token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._token is not _APPROVAL_OBSERVATION_TOKEN:
+            raise ChainTruthError(
+                "approval observation must be produced by canonical RPC observation"
+            )
         if self.schema != APPROVAL_OBSERVATION_SCHEMA:
             raise ChainTruthError("unknown Ink V0F approval observation schema")
         if self.provider_id not in _PROVIDER_IDS:
@@ -577,6 +600,7 @@ def observe_ink_v0f_approval_transaction(
                     raw_evidence_sha256=evidence_digest,
                     head_block_number=head_number,
                     head_block_hash=_hash(head["hash"], field="head.hash"),
+                    _token=_APPROVAL_OBSERVATION_TOKEN,
                 )
             )
             continue
@@ -605,6 +629,7 @@ def observe_ink_v0f_approval_transaction(
                 head_block_number=head_number,
                 head_block_hash=_hash(head.get("hash"), field="head.hash"),
                 receipt_status=ReceiptStatus.SUCCESS if status == 1 else ReceiptStatus.REVERTED,
+                _token=_APPROVAL_OBSERVATION_TOKEN,
             )
         )
     return observations[0], observations[1]
@@ -622,6 +647,13 @@ class InkV0FApprovalTruthV0:
     receipt_status: ReceiptStatus | None
     evidence_digest: str
     schema: str = APPROVAL_TRUTH_SCHEMA
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _APPROVAL_TRUTH_TOKEN:
+            raise ChainTruthError(
+                "approval truth must be produced by the chain-truth evaluator"
+            )
 
 
 def evaluate_ink_v0f_approval_truth(
@@ -679,6 +711,7 @@ def evaluate_ink_v0f_approval_truth(
             block_hash=None if included is None else included.block_hash,
             receipt_status=None if included is None else included.receipt_status,
             evidence_digest=evidence_digest,
+            _token=_APPROVAL_TRUTH_TOKEN,
         )
 
     latest: dict[str, InkV0FApprovalChainObservationV0] = {}
@@ -762,6 +795,13 @@ class InkV0FApprovalSettlementV0:
     chain_truth_evidence_digest: str
     requires_revoke: bool
     schema: str = APPROVAL_SETTLEMENT_SCHEMA
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _APPROVAL_SETTLEMENT_TOKEN:
+            raise ChainTruthError(
+                "approval settlement must be produced by reconciliation"
+            )
 
 
 def reconcile_ink_v0f_approval(
@@ -822,6 +862,7 @@ def reconcile_ink_v0f_approval(
         allowance_observation_digest=allowance.digest,
         chain_truth_evidence_digest=truth.evidence_digest,
         requires_revoke=requires_revoke,
+        _token=_APPROVAL_SETTLEMENT_TOKEN,
     )
 
 
@@ -979,6 +1020,8 @@ def revalidate_ink_v0f_same_amount(
     approval_settlement: InkV0FApprovalSettlementV0,
     now_epoch_s: int,
 ) -> InkV0FSameAmountRevalidationV0:
+    if approval_settlement._token is not _APPROVAL_SETTLEMENT_TOKEN:
+        raise SafeHaltError("swap signing requires reconciler-produced approval settlement")
     if approval_settlement.state is not InkV0FApprovalSettlementState.SETTLED:
         raise SafeHaltError("swap signing requires a settled exact approval")
     if type(router_identity) is not InkV0FRouterIdentityV0:
