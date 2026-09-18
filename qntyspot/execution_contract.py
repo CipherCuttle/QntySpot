@@ -395,6 +395,7 @@ def granted_capabilities(
             source_phase_ceiling=level,
             verified_grant=verified_grant,
             now_epoch_s=now_epoch_s,
+            session=session,
             kill_switch=kill_switch_engaged,
             safe_halt=safe_halted,
         )
