@@ -447,6 +447,10 @@ def assert_ink_v0f_exit_admissible(
         raise LevelNotExecutableError("Ink V0F exit quote exceeds settled base inventory")
     if quote.price_impact_bps < 0 or quote.price_impact_bps > policy.max_price_impact_bps:
         raise LevelNotExecutableError("Ink V0F exit quoted price impact exceeds the frozen cap")
+    if quote.price_impact_bps > bounds.max_price_impact_bps:
+        raise LevelNotExecutableError(
+            "Ink V0F exit quoted price impact exceeds the committed policy cap"
+        )
 
 
 def amount_out_min_atomic(
@@ -462,8 +466,12 @@ def amount_out_min_atomic(
     if type(bounds) is not EconomicBounds or type(quote) is not InkQuoteV0:
         raise AuthorityVerificationError("Ink V0F minimum output requires bounds and quote")
     economic_floor = prorated_min_output_atomic(bounds, quote.input_atomic)
+    effective_slippage_bps = min(
+        policy.max_slippage_bps,
+        bounds.max_slippage_bps,
+    )
     slippage_floor = ceil_div(
-        quote.output_atomic * (BPS_DENOMINATOR - policy.max_slippage_bps),
+        quote.output_atomic * (BPS_DENOMINATOR - effective_slippage_bps),
         BPS_DENOMINATOR,
     )
     return max(economic_floor, slippage_floor)

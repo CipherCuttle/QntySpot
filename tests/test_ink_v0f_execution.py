@@ -46,10 +46,14 @@ from qntyspot.ink_v0f_execution import (
     encode_approve,
     encode_swap_exact_tokens_for_tokens,
 )
-from qntyspot.ink_v0f_risk import consume_ink_v0f_risk_artifact
+from qntyspot.ink_v0f_risk import (
+    assert_ink_v0f_entry_admissible,
+    consume_ink_v0f_risk_artifact,
+)
 from qntyspot.keccak import keccak256
 from qntyspot.ledger import open_ledger
 from qntyspot.policy import parse_policy
+from qntyspot.prelive_economics import PositionConcurrencySnapshotV0
 from qntyspot.states import IntentState
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -376,6 +380,37 @@ def test_minimum_output_is_never_weaker_than_policy_or_fifty_bps() -> None:
     slippage_floor = ceil_div(q.output_atomic * 9_950, 10_000)
     assert minimum == max(policy_floor, slippage_floor)
     assert result.swap.amount_out_min_atomic == minimum
+
+
+def test_minimum_output_honors_stricter_intent_slippage() -> None:
+    _, _, intent, _ = preview_entry()
+    obs = observation()
+    q = InkShadowAdapter._quote(obs, Side.BUY, intent.bounds.max_input_atomic)
+    stricter = replace(
+        intent.bounds,
+        min_output_atomic=1,
+        max_slippage_bps=10,
+    )
+    minimum = amount_out_min_atomic(risk(), bounds=stricter, quote=q)
+    assert minimum == ceil_div(q.output_atomic * 9_990, 10_000)
+
+
+def test_entry_quote_impact_cannot_exceed_stricter_intent_cap() -> None:
+    _, _, intent, _ = preview_entry()
+    obs = observation(reserve0=2 * 10**17, reserve1=2 * 10**17)
+    q = InkShadowAdapter._quote(obs, Side.BUY, intent.bounds.max_input_atomic)
+    assert q.price_impact_bps < 100
+    assert q.price_impact_bps > 10
+    stricter = replace(intent.bounds, max_price_impact_bps=10)
+    with pytest.raises(LevelNotExecutableError, match="committed policy cap"):
+        assert_ink_v0f_entry_admissible(
+            risk(),
+            observation=obs,
+            quote=q,
+            bounds=stricter,
+            cumulative_entry_atomic_after=intent.bounds.max_input_atomic,
+            concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
+        )
 
 
 def test_exit_preview_is_bound_to_settled_inventory_and_reverses_path() -> None:
