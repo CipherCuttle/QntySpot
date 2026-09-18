@@ -1,7 +1,7 @@
 """Ink V0F human-controlled signing, approval settlement, and pre-sign checks.
 
-This module adds no execution authority.  It prepares the deterministic Level-3
-mechanics while the binding source ceiling remains RECONCILE_ONLY:
+This module adds no authority by itself. It implements deterministic Level-3
+mechanics whose runtime use still requires a current exact external grant:
 
 * exact EIP-1559 approval and revoke-to-zero signing requests;
 * byte-exact validation of externally signed approval/revoke transactions;
