@@ -33,6 +33,7 @@ from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.errors import AuthorityCeilingError, AuthorityVerificationError, SessionIdentityError
 from qntyspot.execution_contract import (
     LADDER,
+    PHASE_GRANTED_AUTHORITY_LEVEL,
     AuthorityLevel,
     AuthorityPolicyRefV0,
     Capability,
@@ -352,6 +353,33 @@ def test_higher_external_grant_cannot_escape_shadow_source_ceiling(
             verified_grant=verified,
             now_epoch_s=NOW,
         )
+
+
+def test_current_level_three_source_ceiling_clips_a_higher_external_grant(
+    trusted_root: TrustedAuthorityRootV0,
+) -> None:
+    high = _receipt(AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER)
+    verified = verify_authority_grant(
+        receipt=high,
+        trusted_root=trusted_root,
+        session=_session(high),
+        now_epoch_s=NOW,
+    )
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    assert effective_authority_level(
+        source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+        verified_grant=verified,
+        now_epoch_s=NOW,
+    ) is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    permitted = effective_capabilities(
+        source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+        verified_grant=verified,
+        now_epoch_s=NOW,
+    )
+    assert Capability.SUBMIT_EXACT_BYTES in permitted
+    assert Capability.CONSTRUCT_ENVELOPE in permitted
+    assert Capability.AUTHORIZE_APPROVAL in permitted
+    assert Capability.PRODUCE_SIGNATURE not in permitted
 
 
 def test_both_gates_are_required() -> None:
