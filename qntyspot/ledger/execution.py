@@ -1359,8 +1359,8 @@ class ExecutionRuntime:
         Both Level-3 capabilities are checked before any public RPC read.
         Approval and swap are derived from one live market snapshot and carry
         the exact same input amount, so a later re-quote cannot silently leave
-        residual allowance by resizing the swap. Under the current
-        RECONCILE_ONLY source ceiling this method is dormant.
+        residual allowance by resizing the swap. Under the current Level-3
+        source ceiling this method still requires a matching external grant.
         """
 
         self._authorize(
