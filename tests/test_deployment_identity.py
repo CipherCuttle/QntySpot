@@ -110,6 +110,12 @@ def test_current_identity_includes_ink_v0f_router_preauth() -> None:
     assert "qntyspot/ink_v0f_preauth.py" in paths
 
 
+def test_current_identity_includes_ink_v0f_human_signing() -> None:
+    identity = build_identity(ROOT, CANONICAL_COMMIT)
+    paths = [item["path"] for item in identity["implementation_identity"]["file_manifest"]]
+    assert "qntyspot/ink_v0f_human_signing.py" in paths
+
+
 def test_identity_is_independent_of_host_path_and_timestamps(tmp_path: Path) -> None:
     copied = tmp_path / "different-host-root"
     for relative_path in SOURCE_PATHS:
