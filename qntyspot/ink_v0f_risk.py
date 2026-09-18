@@ -12,7 +12,9 @@ from fractions import Fraction
 from typing import Any
 
 from .canon import canonical_json_bytes, sha256_hex, strict_json_loads
+from .domain import EconomicBounds, Side
 from .errors import AuthorityVerificationError, LevelNotExecutableError
+from .ink import InkMarketObservationV0, InkQuoteV0, InkShadowAdapter
 from .prelive_economics import (
     DustLiveConcurrencyV0,
     PositionConcurrencySnapshotV0,
@@ -201,48 +203,89 @@ def consume_ink_v0f_risk_artifact(raw: bytes) -> InkV0FRiskPolicyV0:
     )
 
 
-def assert_ink_v0f_entry_admissible(
+def assert_ink_v0f_grant_window_admissible(
     policy: InkV0FRiskPolicyV0,
     *,
-    network_id: str,
-    venue_id: str,
-    pool_address: str,
-    base_instrument_id: str,
-    quote_instrument_id: str,
-    entry_atomic: int,
-    cumulative_entry_atomic_after: int,
-    price_impact_bps: int,
-    slippage_bps: int,
-    concurrency_snapshot: PositionConcurrencySnapshotV0,
+    not_before_epoch_s: int,
+    not_after_epoch_s: int,
 ) -> None:
-    """Fail closed unless an ENTRY is inside every frozen V0F risk bound."""
+    """Enforce the external dust policy grant-duration ceiling."""
 
     if type(policy) is not InkV0FRiskPolicyV0:
         raise AuthorityVerificationError("Ink V0F policy object is not verified")
-    for field, actual, expected in (
-        ("network_id", network_id, policy.network_id),
-        ("venue_id", venue_id, policy.venue_id),
-        ("pool_address", pool_address, policy.pool_address),
-        ("base_instrument_id", base_instrument_id, policy.base_instrument_id),
-        ("quote_instrument_id", quote_instrument_id, policy.quote_instrument_id),
+    if (
+        type(not_before_epoch_s) is not int
+        or isinstance(not_before_epoch_s, bool)
+        or type(not_after_epoch_s) is not int
+        or isinstance(not_after_epoch_s, bool)
     ):
-        if actual != expected:
-            raise LevelNotExecutableError(f"Ink V0F {field} is outside the frozen scope")
+        raise AuthorityVerificationError("Ink V0F grant times must be integer epoch seconds")
+    duration = not_after_epoch_s - not_before_epoch_s
+    if duration <= 0:
+        raise LevelNotExecutableError("Ink V0F grant duration must be positive")
+    if duration > policy.max_grant_duration_s:
+        raise LevelNotExecutableError("Ink V0F grant duration exceeds the frozen cap")
 
-    if type(entry_atomic) is not int or isinstance(entry_atomic, bool) or entry_atomic <= 0:
-        raise LevelNotExecutableError("Ink V0F entry amount must be positive integer atomics")
-    if entry_atomic > policy.max_entry_atomic:
+
+def assert_ink_v0f_entry_admissible(
+    policy: InkV0FRiskPolicyV0,
+    *,
+    observation: InkMarketObservationV0,
+    quote: InkQuoteV0,
+    bounds: EconomicBounds,
+    cumulative_entry_atomic_after: int,
+    concurrency_snapshot: PositionConcurrencySnapshotV0,
+) -> None:
+    """Bind one proposed ENTRY to canonical Ink evidence and frozen risk."""
+
+    if type(policy) is not InkV0FRiskPolicyV0:
+        raise AuthorityVerificationError("Ink V0F policy object is not verified")
+    if type(observation) is not InkMarketObservationV0:
+        raise AuthorityVerificationError("Ink V0F admission requires an Ink market observation")
+    if type(quote) is not InkQuoteV0:
+        raise AuthorityVerificationError("Ink V0F admission requires an Ink quote")
+    if type(bounds) is not EconomicBounds:
+        raise AuthorityVerificationError("Ink V0F admission requires committed economic bounds")
+    if InkShadowAdapter.venue_id != policy.venue_id:
+        raise AuthorityVerificationError("Ink adapter venue identity differs from frozen risk")
+
+    if observation.chain_id != 57_073:
+        raise LevelNotExecutableError("Ink V0F observation is outside the frozen network")
+    if observation.pool_address != policy.pool_address:
+        raise LevelNotExecutableError("Ink V0F observation is outside the frozen pool")
+    expected_base_address = policy.base_instrument_id.rsplit(":", 1)[1]
+    expected_quote_address = policy.quote_instrument_id.rsplit(":", 1)[1]
+    if observation.token0 != expected_base_address or observation.token1 != expected_quote_address:
+        raise LevelNotExecutableError("Ink V0F observation token pair is outside the frozen scope")
+    if quote.observation_digest != observation.digest() or quote.common_block != observation.common_block:
+        raise LevelNotExecutableError("Ink V0F quote is not bound to the supplied observation")
+
+    if bounds.side is not Side.BUY or quote.side is not Side.BUY:
+        raise LevelNotExecutableError("Ink V0F dust phase admits ENTRY BUY actions only")
+    if bounds.input_instrument_id != policy.quote_instrument_id:
+        raise LevelNotExecutableError("Ink V0F input instrument is outside the frozen scope")
+    if bounds.output_instrument_id != policy.base_instrument_id:
+        raise LevelNotExecutableError("Ink V0F output instrument is outside the frozen scope")
+    if bounds.max_input_atomic > policy.max_entry_atomic:
+        raise LevelNotExecutableError("Ink V0F committed input bound exceeds the dust cap")
+    if bounds.max_price_impact_bps > policy.max_price_impact_bps:
+        raise LevelNotExecutableError("Ink V0F policy price-impact ceiling exceeds external risk")
+    if bounds.max_slippage_bps > policy.max_slippage_bps:
+        raise LevelNotExecutableError("Ink V0F policy slippage ceiling exceeds external risk")
+
+    if quote.input_atomic <= 0 or quote.input_atomic > bounds.max_input_atomic:
+        raise LevelNotExecutableError("Ink V0F quote input exceeds committed bounds")
+    if quote.input_atomic > policy.max_entry_atomic:
         raise LevelNotExecutableError("Ink V0F entry exceeds the dust cap")
+    if quote.price_impact_bps < 0 or quote.price_impact_bps > policy.max_price_impact_bps:
+        raise LevelNotExecutableError("Ink V0F quoted price impact exceeds the frozen cap")
     if (
         type(cumulative_entry_atomic_after) is not int
         or isinstance(cumulative_entry_atomic_after, bool)
-        or cumulative_entry_atomic_after < entry_atomic
+        or cumulative_entry_atomic_after < quote.input_atomic
     ):
         raise LevelNotExecutableError("Ink V0F cumulative entry accounting is invalid")
     if cumulative_entry_atomic_after > policy.max_cumulative_entry_atomic:
         raise LevelNotExecutableError("Ink V0F cumulative entry capital exceeds the dust cap")
-    if _bps(price_impact_bps, field="price_impact_bps") > policy.max_price_impact_bps:
-        raise LevelNotExecutableError("Ink V0F price impact exceeds the frozen cap")
-    if _bps(slippage_bps, field="slippage_bps") > policy.max_slippage_bps:
-        raise LevelNotExecutableError("Ink V0F slippage exceeds the frozen cap")
+
     assert_new_entry_concurrency(policy.concurrency, concurrency_snapshot)
