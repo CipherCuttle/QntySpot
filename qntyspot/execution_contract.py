@@ -86,7 +86,8 @@ from .errors import (
     SafeHaltError,
     SessionIdentityError,
 )
-from .prelive_economics import prorated_min_output_atomic\nfrom .states import EXTERNALLY_AMBIGUOUS_STATES, PRE_COMMITMENT_STATES, IntentState
+from .prelive_economics import prorated_min_output_atomic
+from .states import EXTERNALLY_AMBIGUOUS_STATES, PRE_COMMITMENT_STATES, IntentState
 
 __all__ = [
     "CONTRACT_VERSION",
