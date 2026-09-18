@@ -176,6 +176,8 @@ def _fixture(*, taker: str):
         signer_state_digest="84" * 32,
         fresh_quote_output_atomic=1_000,
         fresh_required_min_output_atomic=900,
+        common_block=200,
+        revalidated_at_epoch_s=1_800_000_050,
         _token=human._REVALIDATION_TOKEN,
     )
     return sess, envelope, revalidation
@@ -202,6 +204,8 @@ def test_direct_revalidation_construction_is_rejected() -> None:
             signer_state_digest=revalidation.signer_state_digest,
             fresh_quote_output_atomic=revalidation.fresh_quote_output_atomic,
             fresh_required_min_output_atomic=revalidation.fresh_required_min_output_atomic,
+            common_block=revalidation.common_block,
+            revalidated_at_epoch_s=revalidation.revalidated_at_epoch_s,
         )
 
 
@@ -212,7 +216,12 @@ def test_exact_external_swap_bytes_are_admitted_without_reencoding(monkeypatch) 
     sess, envelope, revalidation = _fixture(taker=taker)
 
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
-    admission = validate_ink_v0f_signed_swap(revalidation, raw)
+    admission = validate_ink_v0f_signed_swap(
+        revalidation,
+        envelope,
+        raw,
+        admitted_at_epoch_s=1_800_000_100,
+    )
 
     assert admission.signed_bytes == raw
     assert admission.validated.parsed.sender_address == taker
@@ -228,28 +237,87 @@ def test_mutated_signed_swap_bytes_fail_closed(monkeypatch) -> None:
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
-    _, _, revalidation = _fixture(taker=taker)
+    _, envelope, revalidation = _fixture(taker=taker)
 
     raw = bytearray(_sign_type2(revalidation.swap_request.eip1559_signing_fields(), key))
     raw[-1] ^= 1
     with pytest.raises(EnvelopeValidationError):
-        validate_ink_v0f_signed_swap(revalidation, bytes(raw))
+        validate_ink_v0f_signed_swap(
+            revalidation,
+            envelope,
+            bytes(raw),
+            admitted_at_epoch_s=1_800_000_100,
+        )
 
 
 def test_signed_swap_admission_rejects_direct_caller_construction(monkeypatch) -> None:
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
-    _, _, revalidation = _fixture(taker=taker)
+    _, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
     admitted = validate_ink_v0f_signed_swap(revalidation, raw)
 
     with pytest.raises(EnvelopeValidationError, match="exact-byte validation"):
         InkV0FSignedSwapAdmissionV0(
             revalidation=revalidation,
+            envelope_id=envelope.envelope_id,
+            admitted_at_epoch_s=1_800_000_100,
             signed_bytes=raw,
             validated=admitted.validated,
         )
+
+
+def test_signed_swap_rejects_stale_revalidation_and_envelope_drift(monkeypatch) -> None:
+    key = keys.PrivateKey(bytes.fromhex("01" * 32))
+    taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
+    monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    sess, envelope, revalidation = _fixture(taker=taker)
+    raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
+
+    with pytest.raises(SafeHaltError, match="too old"):
+        validate_ink_v0f_signed_swap(
+            revalidation,
+            envelope,
+            raw,
+            admitted_at_epoch_s=1_800_000_171,
+        )
+
+    drifted = ExecutionEnvelopeV0(
+        session_id=envelope.session_id,
+        session_identity_digest=envelope.session_identity_digest,
+        economic_action_id=envelope.economic_action_id,
+        chain_id=envelope.chain_id,
+        taker_address=envelope.taker_address,
+        input_instrument_id=envelope.input_instrument_id,
+        output_instrument_id=envelope.output_instrument_id,
+        max_input_atomic=envelope.max_input_atomic,
+        min_output_atomic=envelope.min_output_atomic,
+        transaction_to=envelope.transaction_to,
+        transaction_value_atomic=envelope.transaction_value_atomic,
+        calldata_sha256=envelope.calldata_sha256,
+        calldata_length=envelope.calldata_length,
+        allowance_target=envelope.allowance_target,
+        account_nonce=envelope.account_nonce + 1,
+        gas_limit_ceiling=envelope.gas_limit_ceiling,
+        max_fee_per_gas_ceiling_atomic=envelope.max_fee_per_gas_ceiling_atomic,
+        max_priority_fee_per_gas_ceiling_atomic=envelope.max_priority_fee_per_gas_ceiling_atomic,
+        deadline_epoch_s=envelope.deadline_epoch_s,
+        authority_policy_digest=envelope.authority_policy_digest,
+        plan_id=envelope.plan_id,
+        quote_id=envelope.quote_id,
+        quote_observation_digest=envelope.quote_observation_digest,
+        venue_block_number=envelope.venue_block_number,
+        constructed_at_epoch_s=envelope.constructed_at_epoch_s,
+    )
+    with pytest.raises(EnvelopeValidationError, match="frozen envelope"):
+        validate_ink_v0f_signed_swap(
+            revalidation,
+            drifted,
+            raw,
+            admitted_at_epoch_s=1_800_000_100,
+        )
+    assert sess.identity_digest == envelope.session_identity_digest
 
 
 def test_zero_money_rehearsal_has_no_transport_or_chain_truth_escape(monkeypatch) -> None:
@@ -258,7 +326,12 @@ def test_zero_money_rehearsal_has_no_transport_or_chain_truth_escape(monkeypatch
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
-    admission = validate_ink_v0f_signed_swap(revalidation, raw)
+    admission = validate_ink_v0f_signed_swap(
+        revalidation,
+        envelope,
+        raw,
+        admitted_at_epoch_s=1_800_000_100,
+    )
 
     transcript = run_ink_v0f_zero_money_rehearsal(
         session=sess,
@@ -289,7 +362,12 @@ def test_rehearsal_rejects_cross_action_scope(monkeypatch) -> None:
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
-    admission = validate_ink_v0f_signed_swap(revalidation, raw)
+    admission = validate_ink_v0f_signed_swap(
+        revalidation,
+        envelope,
+        raw,
+        admitted_at_epoch_s=1_800_000_100,
+    )
 
     wrong_intent = IntentV0(
         economic_action_id="99" * 32,
@@ -320,7 +398,12 @@ def test_rehearsal_output_records_cannot_be_caller_minted(monkeypatch) -> None:
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
-    admission = validate_ink_v0f_signed_swap(revalidation, raw)
+    admission = validate_ink_v0f_signed_swap(
+        revalidation,
+        envelope,
+        raw,
+        admitted_at_epoch_s=1_800_000_100,
+    )
     transcript = run_ink_v0f_zero_money_rehearsal(
         session=sess,
         intent=_intent(),
