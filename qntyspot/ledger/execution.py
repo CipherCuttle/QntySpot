@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from ..canon import digest_object, parse_canonical_decimal, sha256_hex, strict_json_loads
 from ..domain import EconomicBounds, ReservationStatus, Side
@@ -51,13 +51,12 @@ from ..execution_contract import (
     reconcile_to_receipt,
     derive_transaction_hash,
 )
-from ..ink_v0f_preauth import (
-    InkV0FAllowanceObservationV0,
-    InkV0FRouterObservationV0,
-    assert_ink_v0f_approval_admissible,
-    assert_ink_v0f_execution_envelope_admissible,
-)
-from ..ink_v0f_execution import InkV0FHumanSigningPreviewV0
+if TYPE_CHECKING:
+    from ..ink_v0f_execution import InkV0FHumanSigningPreviewV0
+    from ..ink_v0f_preauth import (
+        InkV0FAllowanceObservationV0,
+        InkV0FRouterObservationV0,
+    )
 from ..exact_signed_bytes import (
     ExactSignedBytesAdmissionV0,
     ExactSignedBytesScopeV0,
@@ -1362,6 +1361,8 @@ class ExecutionRuntime:
             Capability.CONSTRUCT_ENVELOPE,
             now_epoch_s=now_epoch_s,
         )
+        from ..ink_v0f_preauth import assert_ink_v0f_execution_envelope_admissible
+
         assert_ink_v0f_execution_envelope_admissible(
             envelope,
             preview,
@@ -1492,6 +1493,8 @@ class ExecutionRuntime:
             Capability.AUTHORIZE_APPROVAL,
             now_epoch_s=now_epoch_s,
         )
+        from ..ink_v0f_preauth import assert_ink_v0f_approval_admissible
+
         assert_ink_v0f_approval_admissible(
             approval,
             preview,
