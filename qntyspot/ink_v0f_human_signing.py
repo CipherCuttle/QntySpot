@@ -173,6 +173,22 @@ class InkV0FApprovalSigningRequestV0:
             raise EnvelopeValidationError("Ink V0F approval scope does not target the token")
         if self.scope.min_value_atomic != 0 or self.scope.max_value_atomic != 0:
             raise EnvelopeValidationError("Ink V0F approval must carry zero native value")
+        expected_calldata = (
+            encode_approve(self.spender_address, self.allowance_atomic)
+            if self.kind is InkV0FApprovalKind.EXACT_APPROVAL
+            else _encode_revoke_to_zero(self.spender_address)
+        )
+        if self.kind is InkV0FApprovalKind.EXACT_APPROVAL and self.allowance_atomic <= 0:
+            raise EnvelopeValidationError("exact approval allowance must be positive")
+        if self.kind is InkV0FApprovalKind.REVOKE_TO_ZERO and self.allowance_atomic != 0:
+            raise EnvelopeValidationError("revoke allowance must be exactly zero")
+        if (
+            self.scope.calldata_sha256 != sha256_hex(expected_calldata)
+            or self.scope.calldata_length != len(expected_calldata)
+        ):
+            raise EnvelopeValidationError(
+                "Ink V0F approval scope calldata differs from the request"
+            )
 
     @property
     def request_id(self) -> str:
@@ -215,6 +231,22 @@ class InkV0FApprovalSigningRequestV0:
 class InkV0FSignedApprovalV0:
     request: InkV0FApprovalSigningRequestV0
     validated: ValidatedExactSignedBytesV0
+
+    def __post_init__(self) -> None:
+        if type(self.request) is not InkV0FApprovalSigningRequestV0:
+            raise EnvelopeValidationError("signed approval request type is invalid")
+        if type(self.validated) is not ValidatedExactSignedBytesV0:
+            raise EnvelopeValidationError("signed approval validation type is invalid")
+        if self.validated.scope != self.request.scope:
+            raise EnvelopeValidationError("signed approval scope differs from its request")
+        if self.validated.parsed.transaction_type != "eip-1559":
+            raise EnvelopeValidationError("Ink V0F human signing accepts EIP-1559 only")
+        if self.validated.parsed.chain_id != INK_CHAIN_ID:
+            raise EnvelopeValidationError("signed approval is on the wrong chain")
+        if self.validated.parsed.sender_address != self.request.scope.taker_address:
+            raise EnvelopeValidationError("signed approval sender differs from the request")
+        if self.validated.parsed.target_address != self.request.token_address:
+            raise EnvelopeValidationError("signed approval target differs from the request")
 
     @property
     def transaction_hash(self) -> str:
@@ -303,6 +335,9 @@ def build_ink_v0f_approval_signing_request(
         raise EnvelopeValidationError("Ink V0F approval amount must equal frozen swap input")
     if approval.observed_prior_allowance_atomic != 0:
         raise EnvelopeValidationError("first-live Ink V0F approval requires zero prior allowance")
+    constructed = _uint(constructed_at_epoch_s, field="constructed_at_epoch_s")
+    if constructed >= approval.deadline_epoch_s:
+        raise EnvelopeValidationError("Ink V0F approval signing request is past its deadline")
     nonce = _uint(approval_nonce, field="approval_nonce")
     if envelope.account_nonce != nonce + 1:
         raise EnvelopeValidationError(
@@ -327,9 +362,7 @@ def build_ink_v0f_approval_signing_request(
         spender_address=approval.spender_address,
         allowance_atomic=approval.requested_allowance_atomic,
         scope=scope,
-        constructed_at_epoch_s=_uint(
-            constructed_at_epoch_s, field="constructed_at_epoch_s"
-        ),
+        constructed_at_epoch_s=constructed,
     )
 
 
@@ -382,6 +415,7 @@ def validate_ink_v0f_signed_approval(
 ) -> InkV0FSignedApprovalV0:
     if type(request) is not InkV0FApprovalSigningRequestV0:
         raise AuthorityVerificationError("signed approval validation requires a signing request")
+    request.eip1559_signing_fields()
     validated = validate_exact_signed_bytes(signed_bytes, request.scope)
     if validated.parsed.transaction_type != "eip-1559":
         raise EnvelopeValidationError("Ink V0F human signing accepts EIP-1559 transactions only")
@@ -702,6 +736,8 @@ class InkV0FApprovalSettlementState(str, Enum):
 class InkV0FApprovalSettlementV0:
     state: InkV0FApprovalSettlementState
     request_id: str
+    approval_action_id: str
+    economic_action_id: str
     transaction_hash: str
     expected_allowance_atomic: int
     observed_allowance_atomic: int
@@ -721,6 +757,13 @@ def reconcile_ink_v0f_approval(
         raise ChainTruthError("signed approval does not belong to the signing request")
     if truth.transaction_hash != signed.transaction_hash:
         raise ChainTruthError("approval truth belongs to another signed transaction")
+    expected_external_action_id = (
+        request.approval_action_id
+        if request.kind is InkV0FApprovalKind.EXACT_APPROVAL
+        else request.scope.economic_action_id
+    )
+    if truth.external_action_id != expected_external_action_id:
+        raise ChainTruthError("approval truth belongs to another external action")
     if (
         allowance.token_address != request.token_address
         or allowance.owner_address != INK_V0F_TAKER_ADDRESS
@@ -754,6 +797,8 @@ def reconcile_ink_v0f_approval(
     return InkV0FApprovalSettlementV0(
         state=state,
         request_id=request.request_id,
+        approval_action_id=request.approval_action_id,
+        economic_action_id=request.economic_action_id,
         transaction_hash=signed.transaction_hash,
         expected_allowance_atomic=expected,
         observed_allowance_atomic=observed,
@@ -919,6 +964,28 @@ def revalidate_ink_v0f_same_amount(
 ) -> InkV0FSameAmountRevalidationV0:
     if approval_settlement.state is not InkV0FApprovalSettlementState.SETTLED:
         raise SafeHaltError("swap signing requires a settled exact approval")
+    if type(router_identity) is not InkV0FRouterIdentityV0:
+        raise AuthorityVerificationError("same-amount revalidation requires verified router identity")
+    if approval.economic_action_id is None:
+        raise SafeHaltError("approval is not bound to an economic action")
+    if (
+        approval.economic_action_id != envelope.economic_action_id
+        or intent.economic_action_id != envelope.economic_action_id
+        or approval_settlement.economic_action_id != envelope.economic_action_id
+        or approval_settlement.approval_action_id != approval.approval_action_id
+    ):
+        raise SafeHaltError("approval settlement, intent, and swap are not the same action")
+    if (
+        approval.session_identity_digest != session.identity_digest
+        or envelope.session_identity_digest != session.identity_digest
+        or approval.authority_policy_digest != session.authority_policy_digest
+        or envelope.authority_policy_digest != session.authority_policy_digest
+        or envelope.taker_address != session.taker_address
+    ):
+        raise SafeHaltError("approval or swap scope differs from the execution session")
+    expected_token = WETH9_ADDRESS if intent.side is Side.BUY else KRAKMASK_ADDRESS
+    if approval.token_address != expected_token or approval.spender_address != INK_V0F_ROUTER_ADDRESS:
+        raise SafeHaltError("approval token/spender differs from the frozen swap direction")
     if approval.requested_allowance_atomic != envelope.max_input_atomic:
         raise SafeHaltError("approval amount and frozen swap input differ")
     if approval_settlement.observed_allowance_atomic != envelope.max_input_atomic:
