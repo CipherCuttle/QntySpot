@@ -650,20 +650,54 @@ def effective_authority_level(
     return min(source_phase_ceiling, grant.authority_policy.granted_level)
 
 
+def _phase_scoped_runtime_level(
+    level: AuthorityLevel,
+    session: ExecutionSessionV0,
+) -> AuthorityLevel:
+    """Apply the current Ink-only source scope to authority above Level 1."""
+    if level <= AuthorityLevel.RECONCILE_ONLY:
+        return level
+    from .ink import INK_CHAIN_ID
+    from .ink_v0f_execution import INK_V0F_TAKER_ADDRESS
+    from .ink_v0f_risk import INK_V0F_VENUE_ID
+
+    if (
+        session.network_id != f"evm:{INK_CHAIN_ID}"
+        or session.taker_address != INK_V0F_TAKER_ADDRESS
+        or session.venue_id != INK_V0F_VENUE_ID
+    ):
+        return AuthorityLevel.RECONCILE_ONLY
+    return level
+
+
 def effective_capabilities(
     *,
     source_phase_ceiling: AuthorityLevel,
     verified_grant: VerifiedAuthorityGrantV0,
     now_epoch_s: int,
+    session: ExecutionSessionV0 | None = None,
     kill_switch: bool = False,
     safe_halt: bool = False,
 ) -> frozenset[Capability]:
-    """Return capabilities only after both source and external gates agree."""
+    """Return capabilities after source, external-grant, and current phase-scope gates."""
     level = effective_authority_level(
         source_phase_ceiling=source_phase_ceiling,
         verified_grant=verified_grant,
         now_epoch_s=now_epoch_s,
     )
+    if level > AuthorityLevel.RECONCILE_ONLY:
+        if session is None:
+            raise AuthorityVerificationError(
+                "Level-2+ capability queries require the exact execution session"
+            )
+        grant = _require_verified(verified_grant)
+        _assert_authority_session_binding(
+            session,
+            grant.authority_policy,
+            now_epoch_s=now_epoch_s,
+            error=AuthorityVerificationError,
+        )
+        level = _phase_scoped_runtime_level(level, session)
     capabilities = LADDER[level]
     if kill_switch or safe_halt:
         capabilities &= KILL_SWITCH_PRESERVED_CAPABILITIES
@@ -704,6 +738,7 @@ def require_effective_capability(
         verified_grant=grant,
         now_epoch_s=now_epoch_s,
     )
+    level = _phase_scoped_runtime_level(level, session)
     permitted = LADDER[level]
     if kill_switch or safe_halt:
         permitted &= KILL_SWITCH_PRESERVED_CAPABILITIES
