@@ -11,10 +11,10 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from ..canon import digest_object, parse_canonical_decimal, sha256_hex, strict_json_loads
-from ..domain import EconomicBounds, ReservationStatus, Side
+from ..domain import EconomicBounds, IntentV0, ReservationStatus, Side
 from ..errors import (
     AuthorityCeilingError,
     AuthorityVerificationError,
@@ -51,6 +51,10 @@ from ..execution_contract import (
     reconcile_to_receipt,
     derive_transaction_hash,
 )
+if TYPE_CHECKING:
+    from ..ink_v0f_execution import InkV0FRouterIdentityV0
+    from ..ink_v0f_preauth import InkV0FLiveVerifier
+    from ..ink_v0f_risk import InkV0FRiskPolicyV0
 from ..exact_signed_bytes import (
     ExactSignedBytesAdmissionV0,
     ExactSignedBytesScopeV0,
@@ -101,6 +105,7 @@ FAILURE_BOUNDARIES = (
     "reservation",
     "envelope",
     "approval",
+    "ink_v0f_preauth_bundle",
     "signed_metadata",
     "submission_attempt",
     "chain_observation",
@@ -1332,6 +1337,275 @@ class ExecutionRuntime:
                 external,
             )
             return inserted
+
+    def record_ink_v0f_preauth_bundle(
+        self,
+        *,
+        live_verifier: "InkV0FLiveVerifier",
+        risk_policy: "InkV0FRiskPolicyV0",
+        router_identity: "InkV0FRouterIdentityV0",
+        intent: IntentV0,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        account_nonce: int,
+        gas_limit_ceiling: int,
+        max_fee_per_gas_ceiling: int,
+        max_priority_fee_per_gas_ceiling: int,
+        constructed_at_epoch_s: int,
+        now_epoch_s: int,
+    ) -> tuple[ApprovalActionV0, ExecutionEnvelopeV0]:
+        """Atomically derive and persist one exact approval+swap preauth bundle.
+
+        Both Level-3 capabilities are checked before any public RPC read.
+        Approval and swap are derived from one live market snapshot and carry
+        the exact same input amount, so a later re-quote cannot silently leave
+        residual allowance by resizing the swap. Under the current
+        RECONCILE_ONLY source ceiling this method is dormant.
+        """
+
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.CONSTRUCT_ENVELOPE,
+            now_epoch_s=now_epoch_s,
+        )
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.AUTHORIZE_APPROVAL,
+            now_epoch_s=now_epoch_s,
+        )
+        stored_session = self._conn.execute(
+            "SELECT identity_digest FROM execution_sessions WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        if stored_session is None:
+            raise LedgerError("Ink V0F preauth requires a durable execution session")
+        if stored_session["identity_digest"] != session.identity_digest:
+            raise EnvelopeValidationError("stored session identity disagrees")
+        if self.ledger.intent_state(intent.economic_action_id) is not IntentState.RESERVED:
+            raise EnvelopeValidationError(
+                "Ink V0F preauth requires a durable reservation"
+            )
+
+        from ..ink_v0f_preauth import (
+            assert_ink_v0f_approval_admissible,
+            assert_ink_v0f_execution_envelope_admissible,
+            build_ink_v0f_approval_action,
+            build_ink_v0f_execution_envelope,
+            derive_live_ink_v0f_preview,
+        )
+
+        live = derive_live_ink_v0f_preview(
+            live_verifier=live_verifier,
+            policy=risk_policy,
+            router_identity=router_identity,
+            ledger=self.ledger,
+            intent=intent,
+            session=session,
+            account_nonce=account_nonce,
+            gas_limit_ceiling=gas_limit_ceiling,
+            max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
+            max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
+            constructed_at_epoch_s=constructed_at_epoch_s,
+        )
+        allowance_observation = live_verifier.observe_allowance_for_market(
+            live.market_observation,
+            token_address=live.preview.approval.token_address,
+        )
+        approval = build_ink_v0f_approval_action(
+            live.preview,
+            allowance_observation,
+            session,
+        )
+        envelope = build_ink_v0f_execution_envelope(
+            live.preview,
+            live.router_observation,
+            session,
+        )
+        assert_ink_v0f_approval_admissible(
+            approval,
+            live.preview,
+            allowance_observation,
+            session,
+            now_epoch_s=now_epoch_s,
+        )
+        assert_ink_v0f_execution_envelope_admissible(
+            envelope,
+            live.preview,
+            live.router_observation,
+            session,
+            now_epoch_s=now_epoch_s,
+        )
+        if approval.economic_action_id != envelope.economic_action_id:
+            raise EnvelopeValidationError(
+                "Ink V0F approval and envelope name different economic actions"
+            )
+        if approval.requested_allowance_atomic != envelope.max_input_atomic:
+            raise EnvelopeValidationError(
+                "Ink V0F approval and envelope input amounts differ"
+            )
+
+        envelope_values = {
+            "envelope_id": envelope.envelope_id,
+            "session_id": envelope.session_id,
+            "session_identity_digest": envelope.session_identity_digest,
+            "economic_action_id": envelope.economic_action_id,
+            "plan_id": envelope.plan_id,
+            "quote_id": envelope.quote_id,
+            "quote_observation_digest": envelope.quote_observation_digest,
+            "venue_block_number": envelope.venue_block_number,
+            "chain_id": envelope.chain_id,
+            "taker_address": envelope.taker_address,
+            "input_instrument_id": envelope.input_instrument_id,
+            "output_instrument_id": envelope.output_instrument_id,
+            "max_input_atomic": str(envelope.max_input_atomic),
+            "min_output_atomic": str(envelope.min_output_atomic),
+            "transaction_to": envelope.transaction_to,
+            "transaction_value_atomic": str(envelope.transaction_value_atomic),
+            "calldata_sha256": envelope.calldata_sha256,
+            "calldata_length": envelope.calldata_length,
+            "allowance_target": envelope.allowance_target,
+            "account_nonce": envelope.account_nonce,
+            "gas_limit_ceiling": envelope.gas_limit_ceiling,
+            "max_fee_per_gas_ceiling_atomic": str(
+                envelope.max_fee_per_gas_ceiling_atomic
+            ),
+            "max_priority_fee_per_gas_ceiling_atomic": str(
+                envelope.max_priority_fee_per_gas_ceiling_atomic
+            ),
+            "deadline_epoch_s": envelope.deadline_epoch_s,
+            "authority_policy_digest": envelope.authority_policy_digest,
+            "evidence_digest": envelope.evidence_digest,
+            "lifecycle": "AUTHORIZED",
+            "constructed_at_epoch_s": envelope.constructed_at_epoch_s,
+        }
+        approval_values = {
+            "approval_action_id": approval.approval_action_id,
+            "session_id": approval.session_id,
+            "session_identity_digest": approval.session_identity_digest,
+            "economic_action_id": approval.economic_action_id,
+            "taker_address": approval.taker_address,
+            "token_address": approval.token_address,
+            "spender_address": approval.spender_address,
+            "requested_allowance_atomic": str(approval.requested_allowance_atomic),
+            "observed_prior_allowance_atomic": str(
+                approval.observed_prior_allowance_atomic
+            ),
+            "authority_policy_digest": approval.authority_policy_digest,
+            "lifecycle": "AUTHORIZED",
+            "deadline_epoch_s": approval.deadline_epoch_s,
+            "created_at_epoch_s": now_epoch_s,
+        }
+
+        with self._transaction("ink_v0f_preauth_bundle") as conn:
+            self._reject_if_killed("Ink V0F preauth bundle")
+            session_row = self._require_session(session.session_id, conn)
+            if session_row["identity_digest"] != session.identity_digest:
+                raise EnvelopeValidationError("stored session identity disagrees")
+            action_row = self._require_economic_intent(
+                envelope.economic_action_id,
+                conn,
+            )
+            if IntentState(action_row["state"]) is not IntentState.RESERVED:
+                raise EnvelopeValidationError(
+                    "Ink V0F preauth requires a durable reservation"
+                )
+            persisted_bounds = self._bounds_from_intent(action_row)
+            if persisted_bounds != intent.bounds:
+                raise EnvelopeValidationError(
+                    "Ink V0F intent bounds changed during live preflight"
+                )
+            if envelope.max_input_atomic > persisted_bounds.max_input_atomic:
+                raise EnvelopeValidationError(
+                    "Ink V0F envelope input exceeds persisted economic bounds"
+                )
+            required_output = -(
+                (-persisted_bounds.min_output_atomic * envelope.max_input_atomic)
+                // persisted_bounds.max_input_atomic
+            )
+            if envelope.min_output_atomic < required_output:
+                raise EnvelopeValidationError(
+                    "Ink V0F envelope output weakens persisted economic bounds"
+                )
+            side = Side(action_row["side"])
+            expected_input = (
+                action_row["quote_instrument_id"]
+                if side is Side.BUY
+                else action_row["instrument_id"]
+            )
+            expected_output = (
+                action_row["instrument_id"]
+                if side is Side.BUY
+                else action_row["quote_instrument_id"]
+            )
+            if (
+                envelope.input_instrument_id != expected_input
+                or envelope.output_instrument_id != expected_output
+            ):
+                raise EnvelopeValidationError(
+                    "Ink V0F envelope instruments differ from the persisted intent"
+                )
+            expected_token_address = expected_input.rsplit(":", 1)[-1]
+            if approval.token_address != expected_token_address:
+                raise EnvelopeValidationError(
+                    "Ink V0F approval token differs from the persisted intent"
+                )
+            if approval.requested_allowance_atomic != envelope.max_input_atomic:
+                raise EnvelopeValidationError(
+                    "Ink V0F approval amount differs from the frozen swap input"
+                )
+            if side is Side.BUY:
+                policy_row = conn.execute(
+                    "SELECT per_order_cap_atomic, global_cap_atomic FROM policies "
+                    "WHERE policy_id = ?",
+                    (action_row["policy_id"],),
+                ).fetchone()
+                if policy_row is None:
+                    raise LedgerError("Ink V0F preauth policy is not admitted")
+                assert_effective_capital_within(
+                    requested_atomic=envelope.max_input_atomic,
+                    held_atomic=self.ledger.held_atomic(),
+                    local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
+                    local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
+                    verified_grant=verified_grant,
+                    now_epoch_s=now_epoch_s,
+                )
+
+            self._economic_external_action(
+                conn,
+                envelope.economic_action_id,
+                session_id=session.session_id,
+            )
+            self._insert_or_match(
+                conn,
+                "approval_actions",
+                "approval_action_id",
+                approval.approval_action_id,
+                approval_values,
+            )
+            approval_external = {
+                "external_action_id": approval.approval_action_id,
+                "kind": "APPROVAL",
+                "economic_action_id": None,
+                "approval_action_id": approval.approval_action_id,
+                "session_id": session.session_id,
+            }
+            self._insert_or_match(
+                conn,
+                "external_actions",
+                "external_action_id",
+                approval.approval_action_id,
+                approval_external,
+            )
+            self._insert_or_match(
+                conn,
+                "execution_envelopes",
+                "envelope_id",
+                envelope.envelope_id,
+                envelope_values,
+            )
+        return approval, envelope
 
     def record_signed_transaction_metadata(
         self,
