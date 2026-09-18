@@ -13,6 +13,7 @@ import pytest
 from conftest import base_policy_doc
 from qntyspot.canon import canonical_json_bytes
 from qntyspot.errors import (
+    InkError,
     LevelNotExecutableError,
     RpcProtocolError,
     RpcResponseTooLargeError,
@@ -321,7 +322,7 @@ def test_impact_capped_input_handles_sell_side_and_rejects_invalid_side() -> Non
     assert 0 < selected < 100_000
     assert adapter._quote(observation, Side.SELL, selected).price_impact_bps <= 100
 
-    with pytest.raises(Exception, match="side must be Side"):
+    with pytest.raises(InkError, match="side must be Side"):
         adapter.impact_capped_input_atomic(  # type: ignore[arg-type]
             observation,
             "SELL",
