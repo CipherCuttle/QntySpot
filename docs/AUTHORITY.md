@@ -91,8 +91,12 @@ phase.
 - live capital
 
 The public-read implementations are limited to `qntyspot/ink.py`,
-`qntyspot/solana.py`, `qntyspot/robinhood.py`, and the injected-transport
-`qntyspot/robinhood_chain_truth.py`. The Solana path validates Jupiter's raw instruction
+`qntyspot/ink_v0f_preauth.py`, `qntyspot/solana.py`,
+`qntyspot/robinhood.py`, and the injected-transport
+`qntyspot/robinhood_chain_truth.py`. The Ink V0F preauth module may verify
+the frozen router and ERC-20 allowance at the exact market-observation block,
+but its durable Level-3 entrypoints remain capability-gated and unreachable
+under the binding Level-1 ceiling. The Solana path validates Jupiter's raw instruction
 evidence but does not assemble or serialize a transaction, trust any
 third-party serialized payload, read a secret, or expose a submission method.
 Offline unit tests disable sockets for the entire session; the one live
