@@ -715,6 +715,129 @@ class InkShadowAdapter(QuoteSource):
             common_block=observation.common_block,
         )
 
+    @staticmethod
+    def impact_capped_input_atomic(
+        observation: InkMarketObservationV0,
+        side: Side,
+        desired_input_atomic: int,
+        max_price_impact_bps: int,
+    ) -> int:
+        """Return a deterministic conservative input that satisfies impact.
+
+        The policy amount is a maximum, never a target that must be spent.
+        If that amount is already safe it is returned unchanged. Otherwise the
+        continuous V2 curve defines an upper search region and the selector
+        requires one output-atomic unit of rounding margin before accepting a
+        reduced integer amount. The final result is always re-quoted through
+        the canonical integer V2 equation.
+
+        The one-atomic margin deliberately prefers a tiny amount of unused
+        capacity over claiming a boundary amount whose safety depends on floor
+        rounding.
+        """
+
+        if not isinstance(side, Side):
+            raise InkError("side must be Side")
+        if (
+            isinstance(desired_input_atomic, bool)
+            or not isinstance(desired_input_atomic, int)
+            or desired_input_atomic <= 0
+        ):
+            raise LevelNotExecutableError(
+                "desired input must be a positive integer atomic amount"
+            )
+        if (
+            isinstance(max_price_impact_bps, bool)
+            or not isinstance(max_price_impact_bps, int)
+            or not 0 <= max_price_impact_bps <= 10_000
+        ):
+            raise InkError("max_price_impact_bps must be in [0, 10000]")
+
+        desired_quote = InkShadowAdapter._quote(
+            observation, side, desired_input_atomic
+        )
+        if desired_quote.price_impact_bps <= max_price_impact_bps:
+            return desired_input_atomic
+
+        if side is Side.BUY:
+            reserve_in = observation.reserve1_atomic
+            reserve_out = observation.reserve0_atomic
+            required_output_per_input = Fraction(
+                reserve_out * 10_000,
+                reserve_in * (10_000 + max_price_impact_bps),
+            )
+        else:
+            reserve_in = observation.reserve0_atomic
+            reserve_out = observation.reserve1_atomic
+            if max_price_impact_bps == 10_000:
+                return desired_input_atomic
+            required_output_per_input = Fraction(
+                reserve_out * (10_000 - max_price_impact_bps),
+                reserve_in * 10_000,
+            )
+
+        fee_num = V2_FEE_NUMERATOR
+        fee_den = V2_FEE_DENOMINATOR
+        # Continuous V2 output is:
+        #   fee_num*x*reserve_out / (reserve_in*fee_den + fee_num*x)
+        # Any integer-floor-safe amount must lie at or below the continuous
+        # price-impact crossing.
+        continuous_numerator = fee_num * reserve_out
+        base_denominator = reserve_in * fee_den
+        crossing = (
+            Fraction(continuous_numerator, 1) / required_output_per_input
+            - base_denominator
+        ) / fee_num
+        upper = min(desired_input_atomic, int(crossing))
+        if upper <= 0:
+            raise LevelNotExecutableError(
+                "no Ink input is safely executable under the price-impact ceiling"
+            )
+
+        def rounding_surplus(input_atomic: int) -> Fraction:
+            continuous_output = Fraction(
+                fee_num * input_atomic * reserve_out,
+                base_denominator + fee_num * input_atomic,
+            )
+            required_output = required_output_per_input * input_atomic
+            return continuous_output - required_output
+
+        # The surplus is concave. Find its integer peak without floating point,
+        # then find the upper boundary where at least one full output atomic
+        # unit of margin remains. That margin is sufficient for floor/ceil
+        # rounding to preserve the policy impact bound.
+        lo, hi = 1, upper
+        while hi - lo > 8:
+            third = (hi - lo) // 3
+            left = lo + third
+            right = hi - third
+            if rounding_surplus(left) < rounding_surplus(right):
+                lo = left + 1
+            else:
+                hi = right - 1
+        peak = max(range(lo, hi + 1), key=rounding_surplus)
+        if rounding_surplus(peak) < 1:
+            raise LevelNotExecutableError(
+                "no conservatively rounded Ink input satisfies the price-impact ceiling"
+            )
+
+        lo, hi = peak, upper
+        selected = peak
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if rounding_surplus(mid) >= 1:
+                selected = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+
+        selected_quote = InkShadowAdapter._quote(observation, side, selected)
+        if selected_quote.price_impact_bps > max_price_impact_bps:
+            raise SafeHaltError(
+                "conservative Ink sizing failed its canonical integer quote recheck"
+            )
+        return selected
+
     def _require_observation(self, observation: InkMarketObservationV0 | None) -> InkMarketObservationV0:
         chosen = observation or self._observation
         if chosen is None:

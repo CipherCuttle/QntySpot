@@ -86,6 +86,7 @@ from .errors import (
     SafeHaltError,
     SessionIdentityError,
 )
+from .prelive_economics import prorated_min_output_atomic
 from .states import EXTERNALLY_AMBIGUOUS_STATES, PRE_COMMITMENT_STATES, IntentState
 
 __all__ = [
@@ -2467,8 +2468,15 @@ def assert_envelope_admissible(
     _instrument_address(envelope.output_instrument_id, chain_id=envelope.chain_id, field="output instrument")
     if envelope.max_input_atomic > bounds.max_input_atomic:
         raise EnvelopeValidationError("envelope would spend more than the bound authorizes")
-    if envelope.min_output_atomic < bounds.min_output_atomic:
-        raise EnvelopeValidationError("envelope carries a weaker minimum output than the bound")
+    prorated_minimum = prorated_min_output_atomic(bounds, envelope.max_input_atomic)
+    if expectation.min_output_atomic < prorated_minimum:
+        raise EnvelopeValidationError(
+            "venue expectation carries a weaker minimum output than the prorated bound"
+        )
+    if envelope.min_output_atomic < prorated_minimum:
+        raise EnvelopeValidationError(
+            "envelope carries a weaker minimum output than the prorated bound"
+        )
     if envelope.deadline_epoch_s > bounds.deadline_epoch_s:
         raise EnvelopeValidationError("envelope outlives the bound's deadline")
     if envelope.deadline_epoch_s <= now_epoch_s:

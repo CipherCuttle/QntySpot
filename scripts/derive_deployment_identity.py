@@ -52,6 +52,7 @@ SOURCE_PATHS = (
     "qntyspot/ledger/store.py",
     "qntyspot/operations.py",
     "qntyspot/policy.py",
+    "qntyspot/prelive_economics.py",
     "qntyspot/raw_evidence.py",
     "qntyspot/redaction.py",
     "qntyspot/robinhood.py",
@@ -60,8 +61,13 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
+PRE_PRELIVE_CAPITAL_ECONOMICS_SOURCE_PATHS = tuple(
+    path for path in SOURCE_PATHS if path != "qntyspot/prelive_economics.py"
+)
 PRE_H003_AUDITED_POLICY_BINDING_SOURCE_PATHS = tuple(
-    path for path in SOURCE_PATHS if path != "qntyspot/h003_audited_policy_binding.py"
+    path
+    for path in PRE_PRELIVE_CAPITAL_ECONOMICS_SOURCE_PATHS
+    if path != "qntyspot/h003_audited_policy_binding.py"
 )
 PRE_POLICY_BRIDGE_SOURCE_PATHS = tuple(
     path
@@ -136,6 +142,10 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # Preserve the pre-H003-policy-binding runtime identity while making
         # the audited binding contract part of current authority identity.
         manifest_paths = PRE_H003_AUDITED_POLICY_BINDING_SOURCE_PATHS
+    elif not (root / "qntyspot/prelive_economics.py").exists():
+        # Preserve the pre-prelive-economics runtime identity while binding
+        # the additive capital-economics module into current deployments.
+        manifest_paths = PRE_PRELIVE_CAPITAL_ECONOMICS_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
