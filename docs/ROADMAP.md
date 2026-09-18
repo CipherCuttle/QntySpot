@@ -9,9 +9,9 @@ V0E  HOSTILE FAILURE SUITE            <- registry frozen (114 cases), suite merg
 PROGRAM A  CONTROL PLANE CLOSURE      <- closed
 PROGRAM B  PRE-LIVE EXECUTION CONTRACT   <- frozen prerequisite
 PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION <- canonical pass, offline-only
-EXTERNAL AUTHORITY-ROOT CONTRACT          <- current contract freeze, offline-only
-QNTY AUTHORITY-ROOT IMPLEMENTATION        <- next, not started
-V0F  INK DUST LIVE
+EXTERNAL AUTHORITY-ROOT CONTRACT          <- closed / consumed
+QNTY AUTHORITY-ROOT IMPLEMENTATION        <- merged + zero-money grant qualified
+V0F  INK DUST LIVE                        <- pre-live human-signing handoff current
 V0G  SOLANA DUST LIVE
 V0H  ROBINHOOD DUST LIVE
 V1   QntyLab-assisted ladder research
@@ -101,25 +101,26 @@ venue network activity and is not authorized to sign, submit, approve, or
 deploy capital. The external authority-root consumer is intentionally
 fail-closed because B1 has no independent root verifier.
 
-The external authority-root contract is now the active offline contract phase.
-It freezes `TrustedAuthorityRootV0`, `AuthorityGrantReceiptV0`, and
-`VerifiedAuthorityGrantV0`, the external trust-anchor boundary, Ed25519
-verification, epoch/expiry rules, exact scope binding, the dual-control
-intersection rule, and SQLite continuity evidence. It does not implement or
-deploy an independent issuer, and it does not authorize Robinhood testnet.
+The external authority-root consumer and independent QntyAuthorityRoot issuer
+are implemented and qualified. Ink V0F has a frozen 0.001 WETH risk envelope,
+one exact taker, a 900-second maximum grant window, atomic overlap fencing, and
+a zero-money cross-repository receipt qualification. No production receipt has
+been issued.
 
-The next phase is `QNTY_AUTHORITY_ROOT_IMPLEMENTATION_V0`. Any later
-zero-capital Robinhood testnet qualification requires a separate amendment
-after that implementation is reviewed.
+The current Ink V0F step is an offline human-signing handoff preview. It pins
+the legacy InkySwap V1 UniswapV2Router02 identity and proves deterministic
+entry/exit calldata, exact-amount approvals, slippage floors, settled-inventory
+exit bounds, and future signed-byte scope while the runtime source ceiling
+remains `RECONCILE_ONLY`.
 
 ## V0F / V0G / V0H — Dust live
 
-The first phases in which `SIGNING_AUTHORIZED` and `LIVE_CAPITAL_AUTHORIZED`
-may become true, one venue at a time (Ink, Solana, Robinhood), starting at
-dust size. Each requires its own authority review; none is granted by any phase
-merged so far, and none is granted by the Program B contract. The dust size
-itself is a separate choice: the historical V0D qualification amount is not
-frozen as future dust capital.
+The first phases in which live external effects may become authorized, one
+venue at a time (Ink, Solana, Robinhood), starting at dust size. Ink V0F has a
+frozen 0.001 WETH maximum entry/cumulative envelope, but the current source
+ceiling is still `RECONCILE_ONLY`; signing and live capital remain disabled.
+A later explicit Level-3 phase must merge and then be rebound into a fresh
+AuthorityRoot grant before any human-signed execution can occur.
 
 ## V1 — QntyLab-assisted ladder research
 

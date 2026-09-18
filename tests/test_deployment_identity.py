@@ -37,7 +37,10 @@ def test_historical_deployment_identity_artifact_is_preserved() -> None:
             "qntyspot/accepted_intent_policy_bridge.py",
             "qntyspot/h003_audited_policy_binding.py",
             "qntyspot/prelive_economics.py",
+            "qntyspot/ink_v0f_execution.py",
             "qntyspot/ink_v0f_risk.py",
+            "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json",
+            "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.sha256",
             "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json",
             "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.sha256",
             "qntyspot/robinhood_chain_truth.py",
@@ -90,6 +93,14 @@ def test_current_identity_includes_ink_v0f_risk_consumer_and_artifact() -> None:
     assert "qntyspot/ink_v0f_risk.py" in paths
     assert "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json" in paths
     assert "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.sha256" in paths
+
+
+def test_current_identity_includes_ink_v0f_handoff_and_router_artifact() -> None:
+    identity = build_identity(ROOT, CANONICAL_COMMIT)
+    paths = [item["path"] for item in identity["implementation_identity"]["file_manifest"]]
+    assert "qntyspot/ink_v0f_execution.py" in paths
+    assert "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json" in paths
+    assert "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.sha256" in paths
 
 
 def test_identity_is_independent_of_host_path_and_timestamps(tmp_path: Path) -> None:
