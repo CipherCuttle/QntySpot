@@ -28,7 +28,7 @@ REPAIRED_IMPLEMENTATION_DIGEST = "7fdd08cbb60de858d4eab7031a8463f29b62648be4b881
 # repaired digest above remains immutable and distinct from current runtime
 # identity. Update this successor digest only when exact identity derivation
 # advances.
-CURRENT_IMPLEMENTATION_DIGEST = "854e375b72d5e154bda25f3bed86eccdb3da8581018abb3ca9555bee45b47082"
+CURRENT_IMPLEMENTATION_DIGEST = "6b0803fe826a16758b5462317e2d5b861183fd9dca2b421672d01553aea3f425"
 OLD_IMPLEMENTATION_DIGEST = "3195730dcc9368847cab61d9250279c0ed1f13c9b93691360a2d01b109c5b9d6"
 TAKER = "0x1324d87e24e1657f6fe6805de814bb6873052106"
 OLD_VENUE = "zero-x-swap-v2-robinhood-chain"

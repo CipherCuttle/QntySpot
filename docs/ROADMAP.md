@@ -11,7 +11,7 @@ PROGRAM B  PRE-LIVE EXECUTION CONTRACT   <- frozen prerequisite
 PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION <- canonical pass, offline-only
 EXTERNAL AUTHORITY-ROOT CONTRACT          <- closed / consumed
 QNTY AUTHORITY-ROOT IMPLEMENTATION        <- merged + zero-money grant qualified
-V0F  INK DUST LIVE                        <- live router/envelope preauth current
+V0F  INK DUST LIVE                        <- signed-swap / zero-money rehearsal prep current
 V0G  SOLANA DUST LIVE
 V0H  ROBINHOOD DUST LIVE
 V1   QntyLab-assisted ladder research
@@ -107,10 +107,12 @@ one exact taker, a 900-second maximum grant window, atomic overlap fencing, and
 a zero-money cross-repository receipt qualification. No production receipt has
 been issued.
 
-The current Ink V0F step extends the merged offline human-signing handoff with
-same-block two-provider router/allowance verification and dormant
-Ink-specific durable envelope/approval admission. The runtime source ceiling
-remains `RECONCILE_ONLY`, so construction/approval persistence is still
+The current Ink V0F step extends the merged human-signing/approval-settlement
+path with exact externally signed swap-byte admission proof and a deterministic
+zero-money rehearsal transcript. The rehearsal accepts no transport or chain
+observation and its simulated reconciliation cannot be persisted as chain
+truth. The runtime source ceiling remains `RECONCILE_ONLY`; durable signed-byte
+admission, approval submission, swap submission, and live capital remain
 unreachable until a separate Level-3 authority transition.
 
 ## V0F / V0G / V0H — Dust live
