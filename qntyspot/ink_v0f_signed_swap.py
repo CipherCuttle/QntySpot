@@ -83,6 +83,11 @@ class InkV0FSignedSwapAdmissionV0:
         if type(self.validated) is not ValidatedExactSignedBytesV0:
             raise EnvelopeValidationError("signed swap validation type is invalid")
         request = self.revalidation.swap_request
+        rechecked = validate_exact_signed_bytes(self.signed_bytes, request.scope)
+        if rechecked != self.validated:
+            raise EnvelopeValidationError(
+                "signed swap validation does not match cryptographic revalidation"
+            )
         if self.validated.scope != request.scope:
             raise EnvelopeValidationError(
                 "signed swap validation scope differs from revalidation"
@@ -187,6 +192,21 @@ class InkV0FMockSubmissionV0:
                 "zero-money rehearsal cannot record an external submission effect"
             )
 
+    @property
+    def mock_submission_id(self) -> str:
+        return digest_object(
+            {
+                "external_effect": self.external_effect,
+                "provider_id": self.provider_id,
+                "rehearsed_at_epoch_s": self.rehearsed_at_epoch_s,
+                "schema": self.schema,
+                "signed_bytes_sha256": self.signed_bytes_sha256,
+                "signed_swap_admission_id": self.signed_swap_admission_id,
+                "transaction_hash": self.transaction_hash,
+                "transport_invoked": self.transport_invoked,
+            }
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class InkV0FRehearsalReconciliationV0:
@@ -205,6 +225,8 @@ class InkV0FRehearsalReconciliationV0:
             raise EnvelopeValidationError(
                 "rehearsal reconciliation must be produced by the rehearsal runner"
             )
+        if self.schema != REHEARSAL_RECONCILIATION_SCHEMA:
+            raise EnvelopeValidationError("unknown rehearsal reconciliation schema")
         _digest(self.mock_submission_id, field_name="mock_submission_id")
         _digest(self.economic_action_id, field_name="economic_action_id")
         if self.simulated_result != "SIMULATED_CONFIRMED_NO_CHAIN_EFFECT":
@@ -260,6 +282,14 @@ class InkV0FZeroMoneyRehearsalV0:
             )
         if self.mock_submission.external_effect:
             raise EnvelopeValidationError("rehearsal mock submission created an effect")
+        if self.reconciliation.mock_submission_id != self.mock_submission.mock_submission_id:
+            raise EnvelopeValidationError(
+                "rehearsal reconciliation names another mock submission"
+            )
+        if self.reconciliation.economic_action_id != self.economic_action_id:
+            raise EnvelopeValidationError(
+                "rehearsal reconciliation names another economic action"
+            )
         if self.reconciliation.persistable_as_chain_truth:
             raise EnvelopeValidationError(
                 "rehearsal reconciliation became persistable chain truth"
@@ -271,16 +301,7 @@ class InkV0FZeroMoneyRehearsalV0:
             {
                 "economic_action_id": self.economic_action_id,
                 "envelope_id": self.envelope_id,
-                "mock_submission_id": digest_object(
-                    {
-                        "provider_id": self.mock_submission.provider_id,
-                        "schema": self.mock_submission.schema,
-                        "signed_swap_admission_id": (
-                            self.mock_submission.signed_swap_admission_id
-                        ),
-                        "transaction_hash": self.mock_submission.transaction_hash,
-                    }
-                ),
+                "mock_submission_id": self.mock_submission.mock_submission_id,
                 "reconciliation_id": self.reconciliation.reconciliation_id,
                 "revalidation_id": self.revalidation_id,
                 "schema": self.schema,
@@ -358,17 +379,8 @@ def run_ink_v0f_zero_money_rehearsal(
         rehearsed_at_epoch_s=timestamp,
         _token=_MOCK_SUBMISSION_TOKEN,
     )
-    mock_submission_id = digest_object(
-        {
-            "provider_id": mock_submission.provider_id,
-            "rehearsed_at_epoch_s": mock_submission.rehearsed_at_epoch_s,
-            "schema": mock_submission.schema,
-            "signed_swap_admission_id": mock_submission.signed_swap_admission_id,
-            "transaction_hash": mock_submission.transaction_hash,
-        }
-    )
     reconciliation = InkV0FRehearsalReconciliationV0(
-        mock_submission_id=mock_submission_id,
+        mock_submission_id=mock_submission.mock_submission_id,
         economic_action_id=envelope.economic_action_id,
         simulated_result="SIMULATED_CONFIRMED_NO_CHAIN_EFFECT",
         _token=_REHEARSAL_RECONCILIATION_TOKEN,
