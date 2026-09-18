@@ -15,12 +15,12 @@ broadcast surface, and no daemon here. Nothing in this module performs I/O,
 reads the environment, reads a clock, or reaches a network. Every temporal
 input is an explicit argument.
 
-The source ceiling is ``PHASE_GRANTED_AUTHORITY_LEVEL =
-AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES``. Runtime submission additionally requires
-the independently rooted consumer gate in ``qntyspot.authority_root``; this
-module cannot be used to authorize signing, approval, transaction construction,
-or capital deployment; exact-byte submission is additionally gated by the
-runtime's verified grant and reservation path.
+The binding source ceiling is ``PHASE_GRANTED_AUTHORITY_LEVEL =
+AuthorityLevel.RECONCILE_ONLY``. The Level-2 exact-signed-bytes implementation
+remains present for a future reviewed phase, but it is unreachable through the
+runtime authority gate today. This module cannot authorize signing, approval,
+transaction construction, submission, or capital deployment above the binding
+reconcile-only ceiling.
 
 NAMING NOTE
 -----------
@@ -350,10 +350,10 @@ KILL_SWITCH_PRESERVED_CAPABILITIES: frozenset[Capability] = frozenset(
     }
 )
 
-#: The reviewed source ceiling for the exact-signed-bytes implementation phase.
-#: This is only one half of authority; runtime actions also require a current,
-#: independently verified external grant.
-PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+#: The binding reviewed source ceiling. The independently implemented Level-2
+#: exact-signed-bytes path remains dormant until a later explicit phase change.
+#: Runtime actions also require a current, independently verified external grant.
+PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.RECONCILE_ONLY
 
 assert set(LADDER) == set(AuthorityLevel), "the ladder must cover every level"
 assert all(
@@ -411,7 +411,7 @@ def assert_phase_ceiling(level: AuthorityLevel) -> None:
         raise AuthorityCeilingError(
             f"{level.name} exceeds the granted phase ceiling "
             f"{PHASE_GRANTED_AUTHORITY_LEVEL.name}; "
-            f"{CONTRACT_VERSION} grants no runtime authority above SUBMIT_EXACT_SIGNED_BYTES"
+            f"{CONTRACT_VERSION} grants no runtime authority above RECONCILE_ONLY"
         )
 
 

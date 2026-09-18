@@ -24,10 +24,10 @@ def design() -> dict[str, object]:
     return json.loads(ARTIFACT.read_bytes())
 
 
-def test_current_source_ceiling_and_design_target_are_distinct() -> None:
+def test_current_source_ceiling_now_matches_the_frozen_design_target() -> None:
     document = design()
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
     assert document["input_qntyspot"]["current_source_phase_ceiling"] == "SHADOW"
     assert document["source_ceiling_design"]["target"] == "RECONCILE_ONLY"
     assert document["source_ceiling_design"]["runtime_change_in_this_phase"] == "NO"
@@ -38,7 +38,8 @@ def test_current_source_ceiling_and_design_target_are_distinct() -> None:
 
 
 def test_implementation_source_now_matches_the_frozen_design_target() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert Capability.SUBMIT_EXACT_BYTES in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
 
 

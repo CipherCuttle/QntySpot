@@ -144,7 +144,7 @@ def _verified(level: AuthorityLevel = AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER):
 
 
 def test_source_ceiling_and_effective_ladder_are_exact() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
     assert LADDER[AuthorityLevel.RECONCILE_ONLY] == frozenset(
         {
             Capability.OBSERVE_MARKET,
@@ -155,10 +155,23 @@ def test_source_ceiling_and_effective_ladder_are_exact() -> None:
             Capability.RESERVE_CAPITAL,
         }
     )
+    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert Capability.SUBMIT_EXACT_BYTES in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
     assert Capability.CONSTRUCT_ENVELOPE not in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
     assert Capability.AUTHORIZE_APPROVAL not in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
     assert Capability.PRODUCE_SIGNATURE not in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
+
+
+def test_higher_external_grant_cannot_unlock_exact_byte_submission() -> None:
+    grant, session = _verified(AuthorityLevel.HUMAN_SIGNED_EXECUTION)
+    with pytest.raises(AuthorityCeilingError, match="SUBMIT_EXACT_BYTES"):
+        require_effective_capability(
+            capability=Capability.SUBMIT_EXACT_BYTES,
+            source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+            verified_grant=grant,
+            session=session,
+            now_epoch_s=NOW,
+        )
 
 
 def test_source_ceiling_alone_does_not_activate_level_one() -> None:
