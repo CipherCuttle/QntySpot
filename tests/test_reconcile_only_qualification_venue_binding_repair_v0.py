@@ -27,7 +27,7 @@ REPAIRED_IMPLEMENTATION_DIGEST = "7fdd08cbb60de858d4eab7031a8463f29b62648be4b881
 # Advanced again by the additive pre-live capital-economics runtime binding.
 # The historical repaired digest above remains immutable and distinct from
 # current runtime identity.
-CURRENT_IMPLEMENTATION_DIGEST = "e83a7efeafbbea9d0d1fde524144ce60088091f18db0bead2d69322ba8e40d62"
+CURRENT_IMPLEMENTATION_DIGEST = "0951b951d9ba2beaba352a4d8c25f9b983f04cba3ec0c18797fa341e23fd2170"
 OLD_IMPLEMENTATION_DIGEST = "3195730dcc9368847cab61d9250279c0ed1f13c9b93691360a2d01b109c5b9d6"
 TAKER = "0x1324d87e24e1657f6fe6805de814bb6873052106"
 OLD_VENUE = "zero-x-swap-v2-robinhood-chain"
