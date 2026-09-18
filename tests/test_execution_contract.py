@@ -407,6 +407,59 @@ def test_min_output_weakened_is_rejected() -> None:
         )
 
 
+def test_liquidity_narrowed_envelope_keeps_the_same_limit_price() -> None:
+    grant = authority()
+    active = session(grant)
+    narrowed_input = MAX_INPUT // 2
+    narrowed_minimum = MIN_OUTPUT // 2
+    admit(
+        envelope(
+            active,
+            grant,
+            max_input_atomic=narrowed_input,
+            min_output_atomic=narrowed_minimum,
+        ),
+        grant=grant,
+        active_session=active,
+        expectation=expectation(
+            sell_amount_atomic=narrowed_input,
+            min_output_atomic=narrowed_minimum,
+        ),
+        venue_response=venue_response(
+            sell_amount_atomic=narrowed_input,
+            buy_amount_atomic=narrowed_minimum + 5_000,
+            min_buy_amount_atomic=narrowed_minimum,
+        ),
+    )
+
+
+def test_liquidity_narrowing_cannot_weaken_the_prorated_output_floor() -> None:
+    grant = authority()
+    active = session(grant)
+    narrowed_input = MAX_INPUT // 2
+    required = MIN_OUTPUT // 2
+    with pytest.raises(EnvelopeValidationError, match="prorated bound"):
+        admit(
+            envelope(
+                active,
+                grant,
+                max_input_atomic=narrowed_input,
+                min_output_atomic=required - 1,
+            ),
+            grant=grant,
+            active_session=active,
+            expectation=expectation(
+                sell_amount_atomic=narrowed_input,
+                min_output_atomic=required - 1,
+            ),
+            venue_response=venue_response(
+                sell_amount_atomic=narrowed_input,
+                buy_amount_atomic=required + 5_000,
+                min_buy_amount_atomic=required - 1,
+            ),
+        )
+
+
 def test_deadline_expired_is_rejected() -> None:
     grant = authority()
     active = session(grant)

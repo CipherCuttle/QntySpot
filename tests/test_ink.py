@@ -286,6 +286,44 @@ def test_v2_quote_uses_integer_floor_and_fee() -> None:
     assert quote.spot_price == Fraction(1, 1)
 
 
+def test_impact_capped_input_keeps_a_safe_desired_size() -> None:
+    adapter, observation = observed_adapter(reserve0=1_000_000, reserve1=1_000_000)
+    selected = adapter.impact_capped_input_atomic(
+        observation,
+        Side.BUY,
+        desired_input_atomic=1_000,
+        max_price_impact_bps=100,
+    )
+    assert selected == 1_000
+    assert adapter._quote(observation, Side.BUY, selected).price_impact_bps <= 100
+
+
+def test_impact_capped_input_reduces_an_oversized_order_and_rechecks_it() -> None:
+    adapter, observation = observed_adapter(reserve0=1_000_000, reserve1=1_000_000)
+    selected = adapter.impact_capped_input_atomic(
+        observation,
+        Side.BUY,
+        desired_input_atomic=100_000,
+        max_price_impact_bps=100,
+    )
+    assert 0 < selected < 100_000
+    assert adapter._quote(observation, Side.BUY, selected).price_impact_bps <= 100
+
+
+def test_impact_cap_below_the_v2_fee_floor_fails_closed() -> None:
+    adapter, observation = observed_adapter(
+        reserve0=1_000_000_000,
+        reserve1=1_000_000_000,
+    )
+    with pytest.raises(LevelNotExecutableError, match="price-impact ceiling"):
+        adapter.impact_capped_input_atomic(
+            observation,
+            Side.BUY,
+            desired_input_atomic=100_000,
+            max_price_impact_bps=10,
+        )
+
+
 def test_policy_limit_exactly_at_limit_would_execute() -> None:
     adapter, observation = observed_adapter()
     policy = policy_for_fixture(max_impact=10_000)
