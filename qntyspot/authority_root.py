@@ -665,6 +665,7 @@ def _phase_scoped_runtime_level(
         session.network_id != f"evm:{INK_CHAIN_ID}"
         or session.taker_address != INK_V0F_TAKER_ADDRESS
         or session.venue_id != INK_V0F_VENUE_ID
+        or session.venue_adapter_version != "ink-v0f"
     ):
         return AuthorityLevel.RECONCILE_ONLY
     return level
