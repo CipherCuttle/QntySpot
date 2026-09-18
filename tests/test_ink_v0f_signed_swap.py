@@ -256,7 +256,12 @@ def test_signed_swap_admission_rejects_direct_caller_construction(monkeypatch) -
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
     _, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
-    admitted = validate_ink_v0f_signed_swap(revalidation, raw)
+    admitted = validate_ink_v0f_signed_swap(
+        revalidation,
+        envelope,
+        raw,
+        admitted_at_epoch_s=1_800_000_100,
+    )
 
     with pytest.raises(EnvelopeValidationError, match="exact-byte validation"):
         InkV0FSignedSwapAdmissionV0(
