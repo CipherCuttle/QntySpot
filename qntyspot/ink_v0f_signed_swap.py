@@ -34,6 +34,7 @@ SIGNED_SWAP_ADMISSION_SCHEMA = "qntyspot.ink_v0f.signed_swap_admission.v0"
 MOCK_SUBMISSION_SCHEMA = "qntyspot.ink_v0f.mock_submission.v0"
 REHEARSAL_RECONCILIATION_SCHEMA = "qntyspot.ink_v0f.rehearsal_reconciliation.v0"
 ZERO_MONEY_REHEARSAL_SCHEMA = "qntyspot.ink_v0f.zero_money_rehearsal.v0"
+MAX_REVALIDATION_TO_ADMISSION_S = 120
 
 _SIGNED_SWAP_TOKEN = object()
 _MOCK_SUBMISSION_TOKEN = object()
@@ -62,6 +63,8 @@ class InkV0FSignedSwapAdmissionV0:
     """Ephemeral proof that complete external bytes equal the frozen swap."""
 
     revalidation: InkV0FSameAmountRevalidationV0
+    envelope_id: str
+    admitted_at_epoch_s: int
     signed_bytes: bytes = field(repr=False)
     validated: ValidatedExactSignedBytesV0
     schema: str = SIGNED_SWAP_ADMISSION_SCHEMA
@@ -74,6 +77,8 @@ class InkV0FSignedSwapAdmissionV0:
             )
         if self.schema != SIGNED_SWAP_ADMISSION_SCHEMA:
             raise EnvelopeValidationError("unknown signed swap admission schema")
+        _digest(self.envelope_id, field_name="envelope_id")
+        _uint(self.admitted_at_epoch_s, field_name="admitted_at_epoch_s")
         if self.revalidation._token is not _REVALIDATION_TOKEN:
             raise SafeHaltError(
                 "signed swap admission requires live-produced same-amount revalidation"
@@ -91,6 +96,17 @@ class InkV0FSignedSwapAdmissionV0:
         if self.validated.scope != request.scope:
             raise EnvelopeValidationError(
                 "signed swap validation scope differs from revalidation"
+            )
+        if self.admitted_at_epoch_s < self.revalidation.revalidated_at_epoch_s:
+            raise EnvelopeValidationError(
+                "signed swap admission predates same-amount revalidation"
+            )
+        if (
+            self.admitted_at_epoch_s - self.revalidation.revalidated_at_epoch_s
+            > MAX_REVALIDATION_TO_ADMISSION_S
+        ):
+            raise SafeHaltError(
+                "same-amount revalidation is too old for signed swap admission"
             )
         if sha256_hex(self.signed_bytes) != self.validated.signed_bytes_sha256:
             raise EnvelopeValidationError("signed swap bytes differ from validated digest")
@@ -120,6 +136,8 @@ class InkV0FSignedSwapAdmissionV0:
     def admission_id(self) -> str:
         return digest_object(
             {
+                "admitted_at_epoch_s": self.admitted_at_epoch_s,
+                "envelope_id": self.envelope_id,
                 "revalidation_id": self.revalidation.revalidation_id,
                 "schema": self.schema,
                 "signed_bytes_length": self.validated.signed_bytes_length,
@@ -131,7 +149,10 @@ class InkV0FSignedSwapAdmissionV0:
 
 def validate_ink_v0f_signed_swap(
     revalidation: InkV0FSameAmountRevalidationV0,
+    envelope: ExecutionEnvelopeV0,
     signed_bytes: bytes,
+    *,
+    admitted_at_epoch_s: int,
 ) -> InkV0FSignedSwapAdmissionV0:
     """Validate complete signed swap bytes without changing or persisting them."""
     if type(revalidation) is not InkV0FSameAmountRevalidationV0:
@@ -140,13 +161,47 @@ def validate_ink_v0f_signed_swap(
         raise SafeHaltError(
             "signed swap requires live-produced same-amount revalidation"
         )
+    if type(envelope) is not ExecutionEnvelopeV0:
+        raise AuthorityVerificationError("signed swap requires canonical envelope")
     request = revalidation.swap_request
+    scope = request.scope
+    if (
+        envelope.session_id != scope.session_id
+        or envelope.session_identity_digest != scope.session_identity_digest
+        or envelope.economic_action_id != scope.economic_action_id
+        or envelope.authority_policy_digest != scope.authority_policy_digest
+        or envelope.chain_id != scope.chain_id
+        or envelope.taker_address != scope.taker_address
+        or envelope.transaction_to != scope.target_address
+        or envelope.transaction_value_atomic != 0
+        or scope.min_value_atomic != 0
+        or scope.max_value_atomic != 0
+        or envelope.calldata_sha256 != scope.calldata_sha256
+        or envelope.calldata_length != scope.calldata_length
+        or envelope.account_nonce != scope.account_nonce
+        or envelope.gas_limit_ceiling != scope.gas_limit_ceiling
+        or envelope.max_fee_per_gas_ceiling_atomic != scope.max_fee_per_gas_ceiling
+        or envelope.max_priority_fee_per_gas_ceiling_atomic
+        != scope.max_priority_fee_per_gas_ceiling
+    ):
+        raise EnvelopeValidationError(
+            "signed swap revalidation scope differs from the frozen envelope"
+        )
+    admitted = _uint(admitted_at_epoch_s, field_name="admitted_at_epoch_s")
+    if admitted >= envelope.deadline_epoch_s:
+        raise SafeHaltError("signed swap admission is at or past the frozen deadline")
+    if envelope.constructed_at_epoch_s > revalidation.revalidated_at_epoch_s:
+        raise EnvelopeValidationError(
+            "same-amount revalidation predates envelope construction"
+        )
     fields = request.eip1559_signing_fields()
     if fields["type"] != 2 or fields["value"] != 0:
         raise EnvelopeValidationError("frozen Ink V0F swap signing fields are invalid")
     validated = validate_exact_signed_bytes(signed_bytes, request.scope)
     return InkV0FSignedSwapAdmissionV0(
         revalidation=revalidation,
+        envelope_id=envelope.envelope_id,
+        admitted_at_epoch_s=admitted,
         signed_bytes=signed_bytes,
         validated=validated,
         _token=_SIGNED_SWAP_TOKEN,
@@ -366,11 +421,34 @@ def run_ink_v0f_zero_money_rehearsal(
         raise EnvelopeValidationError(
             "rehearsal envelope differs from the frozen Ink execution scope"
         )
+    if signed_swap.envelope_id != envelope.envelope_id:
+        raise EnvelopeValidationError(
+            "signed swap admission belongs to another frozen envelope"
+        )
     if signed_swap.revalidation.swap_request.scope.scope_digest != scope.scope_digest:
         raise EnvelopeValidationError(
             "signed swap no longer matches the revalidated frozen scope"
         )
+    if (
+        envelope.calldata_sha256 != scope.calldata_sha256
+        or envelope.calldata_length != scope.calldata_length
+        or envelope.account_nonce != scope.account_nonce
+        or envelope.gas_limit_ceiling != scope.gas_limit_ceiling
+        or envelope.max_fee_per_gas_ceiling_atomic != scope.max_fee_per_gas_ceiling
+        or envelope.max_priority_fee_per_gas_ceiling_atomic
+        != scope.max_priority_fee_per_gas_ceiling
+        or envelope.authority_policy_digest != scope.authority_policy_digest
+    ):
+        raise EnvelopeValidationError(
+            "rehearsal envelope transaction fields differ from signed swap scope"
+        )
     timestamp = _uint(rehearsed_at_epoch_s, field_name="rehearsed_at_epoch_s")
+    if timestamp < signed_swap.admitted_at_epoch_s:
+        raise EnvelopeValidationError(
+            "rehearsal timestamp predates signed swap admission"
+        )
+    if timestamp >= envelope.deadline_epoch_s:
+        raise SafeHaltError("zero-money rehearsal is at or past the frozen deadline")
 
     mock_submission = InkV0FMockSubmissionV0(
         signed_swap_admission_id=signed_swap.admission_id,
