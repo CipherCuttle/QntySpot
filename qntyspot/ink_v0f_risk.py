@@ -288,6 +288,10 @@ def assert_ink_v0f_entry_admissible(
         raise LevelNotExecutableError("Ink V0F entry exceeds the dust cap")
     if quote.price_impact_bps < 0 or quote.price_impact_bps > policy.max_price_impact_bps:
         raise LevelNotExecutableError("Ink V0F quoted price impact exceeds the frozen cap")
+    if quote.price_impact_bps > bounds.max_price_impact_bps:
+        raise LevelNotExecutableError(
+            "Ink V0F quoted price impact exceeds the committed policy cap"
+        )
     if (
         type(cumulative_entry_atomic_after) is not int
         or isinstance(cumulative_entry_atomic_after, bool)

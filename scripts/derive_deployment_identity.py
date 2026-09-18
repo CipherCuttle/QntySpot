@@ -26,6 +26,8 @@ SOURCE_PATHS = (
     "pyproject.toml",
     "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json",
     "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.sha256",
+    "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json",
+    "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.sha256",
     "qntyspot/__init__.py",
     "qntyspot/accepted_execution_intent.py",
     "qntyspot/accepted_execution_intent_publication.py",
@@ -42,6 +44,7 @@ SOURCE_PATHS = (
     "qntyspot/h003_audited_policy_binding.py",
     "qntyspot/identity.py",
     "qntyspot/ink.py",
+    "qntyspot/ink_v0f_execution.py",
     "qntyspot/ink_v0f_risk.py",
     "qntyspot/keccak.py",
     "qntyspot/ledger/__init__.py",
@@ -64,9 +67,19 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
-PRE_INK_V0F_RISK_SOURCE_PATHS = tuple(
+PRE_INK_V0F_HANDOFF_SOURCE_PATHS = tuple(
     path
     for path in SOURCE_PATHS
+    if path
+    not in {
+        "qntyspot/ink_v0f_execution.py",
+        "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json",
+        "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.sha256",
+    }
+)
+PRE_INK_V0F_RISK_SOURCE_PATHS = tuple(
+    path
+    for path in PRE_INK_V0F_HANDOFF_SOURCE_PATHS
     if path
     not in {
         "qntyspot/ink_v0f_risk.py",
@@ -166,6 +179,11 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # external risk consumer and exact vendored authority artifact into
         # current deployments.
         manifest_paths = PRE_INK_V0F_RISK_SOURCE_PATHS
+    elif not (root / "qntyspot/ink_v0f_execution.py").exists():
+        # Preserve the pre-human-signing-preview runtime identity while
+        # binding the Ink router identity and strict offline calldata codec
+        # into current deployments.
+        manifest_paths = PRE_INK_V0F_HANDOFF_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}

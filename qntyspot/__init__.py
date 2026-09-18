@@ -1,13 +1,12 @@
 """QntySpot -- deterministic policy-bound spot runtime.
 
-PHASE: EXACT-SIGNED-BYTES SOURCE CEILING IMPLEMENTATION
+PHASE: INK V0F PRE-LIVE / RECONCILE-ONLY SOURCE CEILING
 --------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
 one bounded Robinhood/Chainlink/0x adapter. It has no signer, no key handling,
-no transaction encoder, and no live-capital authority from any other
-repository. The only new external-effect seam accepts a complete, externally
-signed EVM byte string, validates it read-only, and can submit that exact
-byte string under a verified Level-2 grant.
+and no live-capital authority. The Ink V0F preview codec may deterministically
+describe exact router calldata for offline review, but the binding runtime
+source ceiling remains RECONCILE_ONLY and cannot authorize submission.
 
 ``execution_contract`` and ``ledger.execution_schema`` are the frozen Program B
 pre-live execution contract. ``ledger.execution`` is the offline B1 runtime;
@@ -33,7 +32,7 @@ __version__ = "0.0.1a0"
 
 #: Machine-readable phase marker. The source ceiling is reconcile-only, but a
 #: current independently verified external grant remains required at runtime.
-AUTHORITY = "ROBINHOOD_SUBMIT_EXACT_SIGNED_BYTES"
+AUTHORITY = "INK_V0F_RECONCILE_ONLY"
 NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False
@@ -141,6 +140,23 @@ from .exact_signed_bytes import (  # noqa: E402
     ParsedExactSignedBytesV0,
     ValidatedExactSignedBytesV0,
     validate_exact_signed_bytes,
+)
+from .ink_v0f_execution import (  # noqa: E402
+    INK_V0F_ROUTER_ADDRESS,
+    INK_V0F_ROUTER_ARTIFACT_DIGEST,
+    INK_V0F_ROUTER_BYTECODE_SHA256,
+    InkV0FApprovalCallV0,
+    InkV0FHumanSigningPreviewV0,
+    InkV0FRouterIdentityV0,
+    InkV0FSwapCallV0,
+    amount_out_min_atomic,
+    assert_ink_v0f_exit_admissible,
+    build_ink_v0f_human_signing_preview,
+    consume_ink_v0f_router_artifact,
+    decode_approve,
+    decode_swap_exact_tokens_for_tokens,
+    encode_approve,
+    encode_swap_exact_tokens_for_tokens,
 )
 from .authority_root import (  # noqa: E402
     AUTHORITY_ROOT_CONTRACT_VERSION,
@@ -260,6 +276,21 @@ __all__ = [
     "ParsedExactSignedBytesV0",
     "ValidatedExactSignedBytesV0",
     "validate_exact_signed_bytes",
+    "INK_V0F_ROUTER_ADDRESS",
+    "INK_V0F_ROUTER_ARTIFACT_DIGEST",
+    "INK_V0F_ROUTER_BYTECODE_SHA256",
+    "InkV0FApprovalCallV0",
+    "InkV0FHumanSigningPreviewV0",
+    "InkV0FRouterIdentityV0",
+    "InkV0FSwapCallV0",
+    "amount_out_min_atomic",
+    "assert_ink_v0f_exit_admissible",
+    "build_ink_v0f_human_signing_preview",
+    "consume_ink_v0f_router_artifact",
+    "decode_approve",
+    "decode_swap_exact_tokens_for_tokens",
+    "encode_approve",
+    "encode_swap_exact_tokens_for_tokens",
     "AUTHORITY_ROOT_CONTRACT_VERSION",
     "TrustedAuthorityRootV0",
     "AuthorityGrantReceiptV0",
