@@ -241,12 +241,29 @@ class InkV0FSignedApprovalV0:
             raise EnvelopeValidationError("signed approval scope differs from its request")
         if self.validated.parsed.transaction_type != "eip-1559":
             raise EnvelopeValidationError("Ink V0F human signing accepts EIP-1559 only")
-        if self.validated.parsed.chain_id != INK_CHAIN_ID:
+        parsed = self.validated.parsed
+        scope = self.request.scope
+        if parsed.chain_id != INK_CHAIN_ID:
             raise EnvelopeValidationError("signed approval is on the wrong chain")
-        if self.validated.parsed.sender_address != self.request.scope.taker_address:
+        if parsed.sender_address != scope.taker_address:
             raise EnvelopeValidationError("signed approval sender differs from the request")
-        if self.validated.parsed.target_address != self.request.token_address:
+        if parsed.target_address != self.request.token_address:
             raise EnvelopeValidationError("signed approval target differs from the request")
+        if parsed.value_atomic != 0:
+            raise EnvelopeValidationError("signed approval carries unexpected native value")
+        if len(parsed.calldata) != scope.calldata_length or sha256_hex(parsed.calldata) != scope.calldata_sha256:
+            raise EnvelopeValidationError("signed approval calldata differs from the request")
+        if scope.account_nonce is not None and parsed.account_nonce != scope.account_nonce:
+            raise EnvelopeValidationError("signed approval nonce differs from the request")
+        if scope.gas_limit_ceiling is not None and parsed.gas_limit > scope.gas_limit_ceiling:
+            raise EnvelopeValidationError("signed approval gas exceeds the request ceiling")
+        if scope.max_fee_per_gas_ceiling is not None and parsed.max_fee_per_gas > scope.max_fee_per_gas_ceiling:
+            raise EnvelopeValidationError("signed approval fee exceeds the request ceiling")
+        if (
+            scope.max_priority_fee_per_gas_ceiling is not None
+            and parsed.max_priority_fee_per_gas > scope.max_priority_fee_per_gas_ceiling
+        ):
+            raise EnvelopeValidationError("signed approval priority fee exceeds the request ceiling")
 
     @property
     def transaction_hash(self) -> str:
