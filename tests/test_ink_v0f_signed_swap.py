@@ -183,11 +183,11 @@ def _fixture(*, taker: str):
     return sess, envelope, revalidation
 
 
-def test_source_ceiling_stays_below_submission_and_level3() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
-    assert Capability.CONSTRUCT_ENVELOPE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
-    assert Capability.AUTHORIZE_APPROVAL not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+def test_source_ceiling_is_level_three_without_internal_signature_authority() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    assert Capability.SUBMIT_EXACT_BYTES in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.CONSTRUCT_ENVELOPE in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.AUTHORIZE_APPROVAL in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
 
@@ -352,7 +352,7 @@ def test_zero_money_rehearsal_has_no_transport_or_chain_truth_escape(monkeypatch
         rehearsed_at_epoch_s=1_800_000_100,
     )
 
-    assert transcript.source_authority_level is AuthorityLevel.RECONCILE_ONLY
+    assert transcript.source_authority_level is AuthorityLevel.HUMAN_SIGNED_EXECUTION
     assert transcript.mock_submission.transport_invoked is False
     assert transcript.mock_submission.external_effect is False
     assert transcript.reconciliation.persistable_as_chain_truth is False
