@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .canon import canonical_json_bytes, digest_object, sha256_hex, strict_json_loads
-from .domain import BPS_DENOMINATOR, EconomicBounds, Side, ceil_div
+from .domain import BPS_DENOMINATOR, EconomicBounds, IntentV0, Side, ceil_div
 from .errors import AuthorityVerificationError, EnvelopeValidationError, LevelNotExecutableError
 from .exact_signed_bytes import ExactSignedBytesScopeV0
 from .execution_contract import ExecutionSessionV0
@@ -36,10 +36,12 @@ from .ink_v0f_risk import (
     assert_ink_v0f_entry_admissible,
 )
 from .keccak import keccak256
+from .ledger.store import SpotLedger
 from .prelive_economics import (
     PositionConcurrencySnapshotV0,
     prorated_min_output_atomic,
 )
+from .states import BUDGET_HOLDING_STATES, IntentState
 
 INK_V0F_ROUTER_SCHEMA = "qntyspot.ink_v0f_router_identity.v0"
 INK_V0F_ROUTER_ADDRESS = "0xa8c1c38ff57428e5c3a34e0899be5cb385476507"
@@ -467,42 +469,124 @@ def amount_out_min_atomic(
     return max(economic_floor, slippage_floor)
 
 
+def _durable_intent_row(
+    ledger: SpotLedger,
+    intent: IntentV0,
+) -> dict[str, Any]:
+    if type(ledger) is not SpotLedger:
+        raise AuthorityVerificationError("Ink V0F preview requires the canonical SpotLedger")
+    if type(intent) is not IntentV0:
+        raise AuthorityVerificationError("Ink V0F preview requires a durable intent")
+    row = dict(ledger.intent_row(intent.economic_action_id))
+    if row["state"] != IntentState.RESERVED.value:
+        raise LevelNotExecutableError(
+            "Ink V0F preview requires the durable intent to be RESERVED"
+        )
+    exact = (
+        ("policy_id", row["policy_id"], intent.policy_id),
+        ("instrument_id", row["instrument_id"], intent.instrument_id),
+        ("quote_instrument_id", row["quote_instrument_id"], intent.quote_instrument_id),
+        ("network_id", row["network_id"], intent.network_id),
+        ("cycle_id", row["cycle_id"], intent.cycle_id),
+        ("level_id", row["level_id"], intent.level_id),
+        ("side", row["side"], intent.side.value),
+        ("kind", row["kind"], intent.kind.value),
+    )
+    for field, actual, expected in exact:
+        if actual != expected:
+            raise AuthorityVerificationError(
+                f"Ink V0F durable intent {field} differs from the supplied intent"
+            )
+    if strict_json_loads(row["bounds_json"]) != intent.bounds.canonical_object():
+        raise AuthorityVerificationError(
+            "Ink V0F durable intent bounds differ from the supplied intent"
+        )
+    return row
+
+
+def _concurrency_snapshot_from_ledger(
+    ledger: SpotLedger,
+    *,
+    current_economic_action_id: str,
+    instrument_id: str,
+    network_id: str,
+) -> PositionConcurrencySnapshotV0:
+    snapshot = ledger.snapshot()
+    intents = [dict(item) for item in snapshot.intents]
+    open_cycles = {
+        str(item["cycle_id"])
+        for item in snapshot.derived
+        if int(str(item["filled_base_inventory_atomic"])) > 0
+    }
+    cycle_scope: dict[str, tuple[str, str]] = {}
+    for item in intents:
+        cycle_id = str(item["cycle_id"])
+        cycle_scope.setdefault(
+            cycle_id,
+            (str(item["network_id"]), str(item["instrument_id"])),
+        )
+
+    open_global = len(open_cycles)
+    open_network = sum(
+        1
+        for cycle_id in open_cycles
+        if cycle_scope.get(cycle_id, (None, None))[0] == network_id
+    )
+    open_instrument = sum(
+        1
+        for cycle_id in open_cycles
+        if cycle_scope.get(cycle_id, (None, None))[1] == instrument_id
+    )
+    holding_values = {state.value for state in BUDGET_HOLDING_STATES}
+    holding_values.add(IntentState.SAFE_HALT.value)
+    in_flight_entries = sum(
+        1
+        for item in intents
+        if item["economic_action_id"] != current_economic_action_id
+        and item["kind"] == "ENTRY"
+        and item["state"] in holding_values
+    )
+    return PositionConcurrencySnapshotV0(
+        open_positions_global=open_global,
+        open_positions_network=open_network,
+        open_positions_instrument=open_instrument,
+        in_flight_entries=in_flight_entries,
+    )
+
+
 def build_ink_v0f_human_signing_preview(
     *,
     policy: InkV0FRiskPolicyV0,
     router: InkV0FRouterIdentityV0,
     observation: InkMarketObservationV0,
     quote: InkQuoteV0,
-    bounds: EconomicBounds,
+    ledger: SpotLedger,
+    intent: IntentV0,
     session: ExecutionSessionV0,
-    economic_action_id: str,
     account_nonce: int,
     gas_limit_ceiling: int,
     max_fee_per_gas_ceiling: int,
     max_priority_fee_per_gas_ceiling: int,
     constructed_at_epoch_s: int,
-    cumulative_entry_atomic_after: int | None = None,
-    concurrency_snapshot: PositionConcurrencySnapshotV0 | None = None,
-    settled_inventory_base_atomic: int | None = None,
 ) -> InkV0FHumanSigningPreviewV0:
-    """Construct one deterministic preview without authorizing or submitting it."""
+    """Construct a preview from durable ledger truth without authorizing it."""
 
     if type(router) is not InkV0FRouterIdentityV0:
         raise AuthorityVerificationError("Ink V0F preview requires a verified router identity")
     if type(session) is not ExecutionSessionV0:
         raise AuthorityVerificationError("Ink V0F preview requires an execution session")
+    row = _durable_intent_row(ledger, intent)
+    bounds = intent.bounds
+    if row["network_id"] != policy.network_id:
+        raise AuthorityVerificationError("Ink V0F durable intent network differs from frozen risk")
     if session.network_id != policy.network_id or session.venue_id != INK_V0F_VENUE_ID:
         raise AuthorityVerificationError("Ink V0F preview session scope differs from frozen risk")
     if session.chain_id != INK_CHAIN_ID:
         raise AuthorityVerificationError("Ink V0F preview session is on the wrong chain")
     if session.taker_address != INK_V0F_TAKER_ADDRESS:
         raise AuthorityVerificationError("Ink V0F preview session has the wrong taker")
-    if type(economic_action_id) is not str or len(economic_action_id) != 64:
-        raise EnvelopeValidationError("economic_action_id must be a canonical digest")
-    try:
-        int(economic_action_id, 16)
-    except ValueError as exc:
-        raise EnvelopeValidationError("economic_action_id must be hexadecimal") from exc
+    if session.policy_id != intent.policy_id:
+        raise AuthorityVerificationError("Ink V0F preview session policy differs from durable intent")
     nonce = _uint(account_nonce, field="account nonce")
     gas = _uint(gas_limit_ceiling, field="gas limit ceiling", positive=True)
     max_fee = _uint(max_fee_per_gas_ceiling, field="fee ceiling", positive=True)
@@ -517,39 +601,30 @@ def build_ink_v0f_human_signing_preview(
         raise LevelNotExecutableError("Ink V0F preview deadline has already expired")
 
     if bounds.side is Side.BUY:
-        if cumulative_entry_atomic_after is None or concurrency_snapshot is None:
-            raise AuthorityVerificationError(
-                "Ink V0F entry preview requires cumulative capital and concurrency"
-            )
-        if settled_inventory_base_atomic is not None:
-            raise AuthorityVerificationError(
-                "Ink V0F entry preview must not accept caller-supplied inventory"
-            )
+        concurrency_snapshot = _concurrency_snapshot_from_ledger(
+            ledger,
+            current_economic_action_id=intent.economic_action_id,
+            instrument_id=intent.instrument_id,
+            network_id=intent.network_id,
+        )
         assert_ink_v0f_entry_admissible(
             policy,
             observation=observation,
             quote=quote,
             bounds=bounds,
-            cumulative_entry_atomic_after=cumulative_entry_atomic_after,
+            cumulative_entry_atomic_after=ledger.held_atomic(),
             concurrency_snapshot=concurrency_snapshot,
         )
         path = (WETH9_ADDRESS, KRAKMASK_ADDRESS)
         approval_token = WETH9_ADDRESS
     else:
-        if settled_inventory_base_atomic is None:
-            raise AuthorityVerificationError(
-                "Ink V0F exit preview requires settled base inventory"
-            )
-        if cumulative_entry_atomic_after is not None or concurrency_snapshot is not None:
-            raise AuthorityVerificationError(
-                "Ink V0F exit preview does not consume entry concurrency/capital inputs"
-            )
+        settled_inventory = ledger.inventory_atomic(intent.cycle_id)
         assert_ink_v0f_exit_admissible(
             policy,
             observation=observation,
             quote=quote,
             bounds=bounds,
-            settled_inventory_base_atomic=settled_inventory_base_atomic,
+            settled_inventory_base_atomic=settled_inventory,
         )
         path = (KRAKMASK_ADDRESS, WETH9_ADDRESS)
         approval_token = KRAKMASK_ADDRESS
@@ -579,7 +654,7 @@ def build_ink_v0f_human_signing_preview(
     scope = ExactSignedBytesScopeV0(
         session_id=session.session_id,
         session_identity_digest=session.identity_digest,
-        economic_action_id=economic_action_id,
+        economic_action_id=intent.economic_action_id,
         authority_policy_digest=session.authority_policy_digest,
         chain_id=INK_CHAIN_ID,
         taker_address=session.taker_address,

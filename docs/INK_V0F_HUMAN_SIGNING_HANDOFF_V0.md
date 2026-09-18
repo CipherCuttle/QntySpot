@@ -37,7 +37,9 @@ The offline preview:
   quote-relative 50-bps slippage floor;
 - emits an exact-amount ERC-20 `approve(router, amount)` preview rather than
   an unlimited approval;
-- binds SELL input to settled base inventory;
+- requires a durably RESERVED intent and exact stored bounds;
+- derives BUY held capital/concurrency from the ledger rather than caller input;
+- derives SELL input capacity from settled ledger inventory;
 - emits `ExactSignedBytesScopeV0` so future externally signed bytes can be
   checked for sender, chain, target, calldata, nonce, gas and fee ceilings.
 
