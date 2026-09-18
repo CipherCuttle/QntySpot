@@ -27,6 +27,7 @@ from qntyspot.errors import (
 from qntyspot.economics import build_intent
 from qntyspot.execution_contract import (
     AuthorityLevel,
+    PHASE_GRANTED_AUTHORITY_LEVEL,
     ChainObservationV0,
     ChainPresence,
     ExternalTransactionReferenceV0,
@@ -51,6 +52,11 @@ from qntyspot.states import IntentState
 
 from test_external_authority_root import _receipt, _root_for, _session
 from test_submit_exact_signed_bytes_v0 import RAW
+
+pytestmark = pytest.mark.skipif(
+    PHASE_GRANTED_AUTHORITY_LEVEL < AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES,
+    reason="historical Level-2 runtime suite is dormant under the binding RECONCILE_ONLY ceiling",
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 REPAIR_ARTIFACT = ROOT / "artifacts/SUBMIT_EXACT_SIGNED_BYTES_SAFE_HALT_RESUME_REPAIR_V0.json"

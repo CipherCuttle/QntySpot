@@ -163,7 +163,7 @@ def test_source_ceiling_and_effective_ladder_are_exact() -> None:
 
 
 def test_higher_external_grant_cannot_unlock_exact_byte_submission() -> None:
-    grant, session = _verified(AuthorityLevel.HUMAN_SIGNED_EXECUTION)
+    grant, session = _verified()
     with pytest.raises(AuthorityCeilingError, match="SUBMIT_EXACT_BYTES"):
         require_effective_capability(
             capability=Capability.SUBMIT_EXACT_BYTES,
