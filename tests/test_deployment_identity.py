@@ -39,6 +39,7 @@ def test_historical_deployment_identity_artifact_is_preserved() -> None:
             "qntyspot/prelive_economics.py",
             "qntyspot/ink_v0f_execution.py",
             "qntyspot/ink_v0f_preauth.py",
+            "qntyspot/ink_v0f_human_signing.py",
             "qntyspot/ink_v0f_risk.py",
             "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json",
             "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.sha256",
