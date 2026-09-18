@@ -241,25 +241,37 @@ class InkV0FLiveVerifier:
 
     def _heads_for_market(self, market: InkMarketObservationV0) -> list[int]:
         if type(market) is not InkMarketObservationV0:
-            raise AuthorityVerificationError("Ink V0F live verification requires an Ink market observation")
-        endpoints = {provider.endpoint for provider in self.providers}
-        if endpoints != set(market.provider_heads):
-            raise SafeHaltError("router verification providers differ from market-observation providers")
+            raise AuthorityVerificationError(
+                "Ink V0F live verification requires an Ink market observation"
+            )
+        endpoints = tuple(provider.endpoint for provider in self.providers)
+        if set(endpoints) != set(market.provider_heads):
+            raise SafeHaltError(
+                "router verification providers differ from market-observation providers"
+            )
+
+        # The pool observation already sampled both provider heads immediately
+        # before selecting its common block. Re-polling eth_blockNumber here
+        # would create a second, racing freshness snapshot on a fast chain.
+        heads = [int(market.provider_heads[endpoint]) for endpoint in endpoints]
         chain_ids: list[int] = []
-        heads: list[int] = []
         for provider in self.providers:
             try:
                 chain_ids.append(provider.chain_id())
-                heads.append(provider.block_number())
             except RpcError as exc:
-                raise SafeHaltError(f"router provider head/chain observation failed: {exc}") from exc
+                raise SafeHaltError(
+                    f"router provider chain verification failed: {exc}"
+                ) from exc
         if chain_ids != [INK_CHAIN_ID, INK_CHAIN_ID]:
             raise SafeHaltError(f"router provider chain id mismatch: {chain_ids}")
         if abs(heads[0] - heads[1]) > self.max_head_lag_blocks:
             raise SafeHaltError(f"router provider head lag exceeds bound: {heads}")
         if any(head < market.common_block for head in heads):
-            raise SafeHaltError("router provider head is behind the market common block")
-        if any(head - market.common_block > self.max_observation_age_blocks for head in heads):
+            raise SafeHaltError("market provider head is behind its common block")
+        if any(
+            head - market.common_block > self.max_observation_age_blocks
+            for head in heads
+        ):
             raise SafeHaltError("market common block is too old for router preflight")
         return heads
 
