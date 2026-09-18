@@ -455,14 +455,14 @@ def test_forged_exit_quote_is_rejected_by_reserve_recomputation() -> None:
         )
 
 
-def test_preview_phase_cannot_authorize_submission_or_live_capital() -> None:
+def test_preview_phase_is_level_three_pregrant_without_signature_or_live_capital() -> None:
     _, _, _, result = preview_entry()
     fields = result.eip1559_signing_fields()
     assert fields["chainId"] == 57_073
     assert fields["to"] == INK_V0F_ROUTER_ADDRESS
     assert fields["value"] == 0
     assert fields["data"] == "0x" + result.swap.calldata.hex()
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-    assert qntyspot.AUTHORITY == "INK_V0F_RECONCILE_ONLY"
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    assert qntyspot.AUTHORITY == "INK_V0F_HUMAN_SIGNED_EXECUTION_PREGRANT"
     assert qntyspot.SIGNING_AUTHORIZED is False
     assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False
