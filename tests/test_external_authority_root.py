@@ -12,6 +12,8 @@ from dataclasses import replace
 
 import pytest
 
+import qntyspot.authority_root as authority_root
+
 from conftest import NOW
 from qntyspot.authority_root import (
     AUTHORITY_ROOT_CONTRACT_VERSION,
@@ -392,6 +394,32 @@ def test_current_level_three_source_ceiling_clips_higher_non_ink_runtime_scope(
     assert Capability.CONSTRUCT_ENVELOPE not in permitted
     assert Capability.AUTHORIZE_APPROVAL not in permitted
     assert Capability.PRODUCE_SIGNATURE not in permitted
+
+
+def test_level_three_phase_scope_requires_exact_ink_adapter_version() -> None:
+    ink_session = ExecutionSessionV0(
+        repository_commit="44" * 20,
+        implementation_digest="55" * 32,
+        runtime_identity="cpython-3.11",
+        db_schema_version=1,
+        policy_id="66" * 32,
+        authority_policy_digest="77" * 32,
+        taker_address="0x3e604be3293d930069d0805e85379e0ca5fa01cb",
+        network_id="evm:57073",
+        venue_id="inkyswap-v2-ink-mainnet",
+        venue_adapter_version="ink-v0f",
+        started_at_epoch_s=NOW,
+        session_ordinal=0,
+    )
+    assert authority_root._phase_scoped_runtime_level(
+        AuthorityLevel.HUMAN_SIGNED_EXECUTION,
+        ink_session,
+    ) is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    wrong_adapter = replace(ink_session, venue_adapter_version="ink-v0f-other")
+    assert authority_root._phase_scoped_runtime_level(
+        AuthorityLevel.HUMAN_SIGNED_EXECUTION,
+        wrong_adapter,
+    ) is AuthorityLevel.RECONCILE_ONLY
 
 
 def test_both_gates_are_required() -> None:
