@@ -141,10 +141,6 @@ def policy_doc():
             "rearm_hysteresis_bps": 200,
             "rearm_cooldown_s": 600,
         },
-        "profit": {
-            "profit_recycle_ratio": "0",
-            "banked_profit_ratio": "1",
-        },
     }
 
 
