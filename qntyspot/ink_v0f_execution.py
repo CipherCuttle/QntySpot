@@ -1,12 +1,13 @@
 """Offline Ink V0F router codec and human-controlled signing preview.
 
-This module is deliberately non-authorizing. It consumes already-verified
-market/risk inputs and constructs deterministic transaction *previews* while
-the binding QntySpot source ceiling remains RECONCILE_ONLY. It performs no
-network I/O, persists nothing, produces no signature, and exposes no transport.
+This module is deliberately non-signing. It consumes already-verified
+market/risk inputs and constructs deterministic transaction previews under the
+reviewed Ink V0F Level-3 source ceiling. Runtime use still requires a current
+exact external grant. It performs no network I/O, persists nothing, produces
+no signature, and exposes no transport.
 
-The preview is the exact material a later, separately authorized Level-3 phase
-may turn into a durable execution envelope for a human-controlled taker.
+The preview is the exact material the grant-gated Level-3 runtime may turn into
+a durable execution envelope for a human-controlled taker.
 """
 
 from __future__ import annotations
