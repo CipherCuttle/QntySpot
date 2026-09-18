@@ -318,22 +318,33 @@ def test_preauth_runtime_methods_remain_dormant_at_level_one() -> None:
     assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
     assert Capability.CONSTRUCT_ENVELOPE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert Capability.AUTHORIZE_APPROVAL not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
-    assert hasattr(ExecutionRuntime, "record_ink_v0f_execution_envelope")
-    assert hasattr(ExecutionRuntime, "record_ink_v0f_approval_action")
+    assert hasattr(ExecutionRuntime, "record_ink_v0f_preauth_bundle")
+    assert not hasattr(ExecutionRuntime, "record_ink_v0f_execution_envelope")
+    assert not hasattr(ExecutionRuntime, "record_ink_v0f_approval_action")
 
 
-def test_persistence_api_cannot_accept_caller_built_preview_or_router_observation() -> None:
-    envelope_params = inspect.signature(
-        ExecutionRuntime.record_ink_v0f_execution_envelope
+def test_persistence_api_cannot_accept_caller_built_preauth_facts() -> None:
+    params = inspect.signature(
+        ExecutionRuntime.record_ink_v0f_preauth_bundle
     ).parameters
-    approval_params = inspect.signature(
-        ExecutionRuntime.record_ink_v0f_approval_action
-    ).parameters
-    for params in (envelope_params, approval_params):
-        assert "preview" not in params
-        assert "router_observation" not in params
-        assert "allowance_observation" not in params
-        assert "live_verifier" in params
-        assert "risk_policy" in params
-        assert "router_identity" in params
-        assert "intent" in params
+    assert "preview" not in params
+    assert "router_observation" not in params
+    assert "allowance_observation" not in params
+    assert "envelope" not in params
+    assert "approval" not in params
+    assert "live_verifier" in params
+    assert "risk_policy" in params
+    assert "router_identity" in params
+    assert "intent" in params
+
+
+def test_atomic_bundle_contract_freezes_one_exact_input_amount(monkeypatch) -> None:
+    live, _, _ = verifier(monkeypatch)
+    p = preview()
+    market = market_observation()
+    router_observation = live.observe_router_for_market(market)
+    allowance = live.observe_allowance_for_market(market, token_address=WETH9_ADDRESS)
+    approval = build_ink_v0f_approval_action(p, allowance, session())
+    envelope = build_ink_v0f_execution_envelope(p, router_observation, session())
+    assert approval.economic_action_id == envelope.economic_action_id
+    assert approval.requested_allowance_atomic == envelope.max_input_atomic

@@ -66,3 +66,17 @@ entrypoint must first pass the effective-authority gate and then:
 
 This prevents a preconstructed Python record from substituting for live venue
 verification at the eventual Level-3 persistence boundary.
+
+
+## Atomic approval/swap amount binding
+
+The first-live durable API records approval + swap preauthorization as one
+transactional bundle derived from one live market snapshot. The requested ERC-20
+allowance must equal the swap input exactly.
+
+The runtime does not expose separate public Ink approval/envelope persistence
+entrypoints. This prevents a later liquidity change from silently resizing the
+swap below an already-authorized allowance and leaving residual router spending
+authority. A later human-signing phase must revalidate the **same frozen input
+amount** before swap signing; if that amount is no longer safe, execution must
+stop and the approval must be revoked/cleared rather than resized.
