@@ -314,10 +314,11 @@ def test_approval_requires_same_block_zero_prior_allowance_and_exact_amount(monk
         build_ink_v0f_approval_action(p, nonzero, session())
 
 
-def test_preauth_runtime_methods_remain_dormant_at_level_one() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-    assert Capability.CONSTRUCT_ENVELOPE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
-    assert Capability.AUTHORIZE_APPROVAL not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+def test_preauth_runtime_method_is_in_level_three_but_has_no_split_persistence_escape() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    assert Capability.CONSTRUCT_ENVELOPE in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.AUTHORIZE_APPROVAL in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert hasattr(ExecutionRuntime, "record_ink_v0f_preauth_bundle")
     assert not hasattr(ExecutionRuntime, "record_ink_v0f_execution_envelope")
     assert not hasattr(ExecutionRuntime, "record_ink_v0f_approval_action")
