@@ -140,29 +140,39 @@ def test_quote_from_a_different_observation_fails_closed() -> None:
 
 
 @pytest.mark.parametrize(
-    ("bound_kwargs", "quote_input", "quote_impact", "message"),
+    ("bound_kwargs", "quote_input", "message"),
     (
-        ({"max_input_atomic": 10**15 + 1}, 10**15, Fraction(100), "committed input"),
-        ({"impact": 101}, 10**15, Fraction(100), "policy price-impact"),
-        ({"slippage": 51}, 10**15, Fraction(100), "policy slippage"),
-        ({}, 10**15 + 1, Fraction(100), "quote input"),
-        ({}, 10**15, Fraction(101), "canonical reserve-derived"),
+        ({"max_input_atomic": 10**15 + 1}, 10**15, "committed input"),
+        ({"impact": 101}, 10**15, "policy price-impact"),
+        ({"slippage": 51}, 10**15, "policy slippage"),
+        ({}, 10**15 + 1, "quote input"),
     ),
 )
-def test_entry_widening_fails_closed(bound_kwargs, quote_input, quote_impact, message) -> None:
+def test_entry_widening_fails_closed(bound_kwargs, quote_input, message) -> None:
     policy = verified_policy()
     obs = observation()
     with pytest.raises(LevelNotExecutableError, match=message):
         assert_ink_v0f_entry_admissible(
             policy,
             observation=obs,
-            quote=(
-                replace(quote(obs, input_atomic=quote_input), price_impact_bps=quote_impact)
-                if quote_impact != quote(obs, input_atomic=quote_input).price_impact_bps
-                else quote(obs, input_atomic=quote_input)
-            ),
+            quote=quote(obs, input_atomic=quote_input),
             bounds=bounds(**bound_kwargs),
             cumulative_entry_atomic_after=max(quote_input, 10**15),
+            concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
+        )
+
+
+def test_forged_quote_impact_fails_before_risk_evaluation() -> None:
+    policy = verified_policy()
+    obs = observation()
+    forged = replace(quote(obs), price_impact_bps=Fraction(0))
+    with pytest.raises(LevelNotExecutableError, match="canonical reserve-derived"):
+        assert_ink_v0f_entry_admissible(
+            policy,
+            observation=obs,
+            quote=forged,
+            bounds=bounds(),
+            cumulative_entry_atomic_after=10**15,
             concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
         )
 
@@ -174,7 +184,7 @@ def test_wrong_instrument_scope_and_concurrency_fail_closed() -> None:
         side=Side.BUY,
         input_instrument_id=INK_V0F_BASE_INSTRUMENT_ID,
         output_instrument_id=INK_V0F_QUOTE_INSTRUMENT_ID,
-        max_input_atomic=1,
+        max_input_atomic=10**15,
         min_output_atomic=1,
         limit_price=Fraction(1),
         max_price_impact_bps=1,
@@ -185,9 +195,9 @@ def test_wrong_instrument_scope_and_concurrency_fail_closed() -> None:
         assert_ink_v0f_entry_admissible(
             policy,
             observation=obs,
-            quote=quote(obs, input_atomic=1),
+            quote=quote(obs),
             bounds=wrong_bounds,
-            cumulative_entry_atomic_after=1,
+            cumulative_entry_atomic_after=10**15,
             concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
         )
 
@@ -195,9 +205,9 @@ def test_wrong_instrument_scope_and_concurrency_fail_closed() -> None:
         assert_ink_v0f_entry_admissible(
             policy,
             observation=obs,
-            quote=quote(obs, input_atomic=1),
-            bounds=bounds(max_input_atomic=1, impact=1, slippage=1),
-            cumulative_entry_atomic_after=1,
+            quote=quote(obs),
+            bounds=bounds(),
+            cumulative_entry_atomic_after=10**15,
             concurrency_snapshot=PositionConcurrencySnapshotV0(1, 1, 1, 0),
         )
 
