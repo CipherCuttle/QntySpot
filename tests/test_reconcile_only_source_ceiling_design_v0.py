@@ -24,10 +24,10 @@ def design() -> dict[str, object]:
     return json.loads(ARTIFACT.read_bytes())
 
 
-def test_current_source_ceiling_now_matches_the_frozen_design_target() -> None:
+def test_frozen_level_one_design_is_preserved_after_current_source_advances() -> None:
     document = design()
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
     assert document["input_qntyspot"]["current_source_phase_ceiling"] == "SHADOW"
     assert document["source_ceiling_design"]["target"] == "RECONCILE_ONLY"
     assert document["source_ceiling_design"]["runtime_change_in_this_phase"] == "NO"
@@ -37,10 +37,11 @@ def test_current_source_ceiling_now_matches_the_frozen_design_target() -> None:
     assert document["network_and_qualification"]["target"] == "ROBINHOOD_TESTNET_RECONCILE_ONLY"
 
 
-def test_implementation_source_now_matches_the_frozen_design_target() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+def test_current_source_advances_without_rewriting_the_frozen_level_one_ladder() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[AuthorityLevel.RECONCILE_ONLY]
     assert Capability.SUBMIT_EXACT_BYTES in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
+    assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
 
 def test_level_1_capabilities_match_frozen_program_b() -> None:
