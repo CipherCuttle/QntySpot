@@ -37,6 +37,7 @@ from qntyspot.ink import (
 from qntyspot.ink_v0f_execution import (
     INK_V0F_ROUTER_ADDRESS,
     INK_V0F_TAKER_ADDRESS,
+    InkV0FRouterIdentityV0,
     encode_swap_exact_tokens_for_tokens,
 )
 from qntyspot.ink_v0f_human_signing import (
@@ -256,7 +257,7 @@ def _signed_stub(request):
         max_priority_fee_per_gas=1,
         target_address=request.token_address,
         value_atomic=0,
-        calldata=b"",
+        calldata=bytes.fromhex(request.eip1559_signing_fields()["data"][2:]),
         sender_address=request.scope.taker_address,
         transaction_hash="0x" + "aa" * 32,
     )
@@ -425,6 +426,8 @@ def test_same_amount_revalidation_returns_frozen_swap_or_stops(monkeypatch) -> N
     settlement = InkV0FApprovalSettlementV0(
         state=InkV0FApprovalSettlementState.SETTLED,
         request_id="aa" * 32,
+        approval_action_id=approval.approval_action_id,
+        economic_action_id=ACTION_ID,
         transaction_hash="0x" + "ab" * 32,
         expected_allowance_atomic=1_000,
         observed_allowance_atomic=1_000,
@@ -478,10 +481,13 @@ def test_same_amount_revalidation_returns_frozen_swap_or_stops(monkeypatch) -> N
     )
     monkeypatch.setattr(human, "amount_out_min_atomic", lambda *args, **kwargs: 900)
 
+    router_identity = object.__new__(InkV0FRouterIdentityV0)
+    object.__setattr__(router_identity, "address", INK_V0F_ROUTER_ADDRESS)
+
     result = revalidate_ink_v0f_same_amount(
         live_verifier=live,
         risk_policy=SimpleNamespace(),
-        router_identity=SimpleNamespace(address=INK_V0F_ROUTER_ADDRESS),
+        router_identity=router_identity,
         ledger=SimpleNamespace(),
         intent=_intent(),
         session=sess,
@@ -498,7 +504,7 @@ def test_same_amount_revalidation_returns_frozen_swap_or_stops(monkeypatch) -> N
         revalidate_ink_v0f_same_amount(
             live_verifier=live,
             risk_policy=SimpleNamespace(),
-            router_identity=SimpleNamespace(address=INK_V0F_ROUTER_ADDRESS),
+            router_identity=router_identity,
             ledger=SimpleNamespace(),
             intent=_intent(),
             session=sess,
