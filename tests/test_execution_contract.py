@@ -116,19 +116,19 @@ def admit(env=None, **kwargs) -> None:
 
 
 # --------------------------------------------------------------------------
-# I-09 / phase freeze: the contract grants no runtime authority
+# I-09 / phase ceiling: Level 3 still requires independent external authority
 # --------------------------------------------------------------------------
 
 
-def test_the_phase_grants_only_reconcile_only_authority() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
-    assert_phase_ceiling(AuthorityLevel.SHADOW)
-    assert_phase_ceiling(AuthorityLevel.RECONCILE_ONLY)
+def test_the_phase_grants_human_signed_execution_as_source_ceiling() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
     for level in AuthorityLevel:
-        if level <= AuthorityLevel.RECONCILE_ONLY:
-            continue
-        with pytest.raises(AuthorityCeilingError, match="exceeds the granted phase ceiling"):
+        if level <= AuthorityLevel.HUMAN_SIGNED_EXECUTION:
             assert_phase_ceiling(level)
+        else:
+            with pytest.raises(AuthorityCeilingError, match="exceeds the granted phase ceiling"):
+                assert_phase_ceiling(level)
+    assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
 
 @pytest.mark.parametrize(
@@ -143,11 +143,11 @@ def test_the_phase_grants_only_reconcile_only_authority() -> None:
         Capability.OBSERVE_CHAIN,
     ],
 )
-def test_no_capability_above_reconcile_only_is_reachable_without_a_grant(capability: Capability) -> None:
-    """A caller cannot buy authority by passing a higher level."""
+def test_level_one_plus_capabilities_are_unreachable_without_a_grant(capability: Capability) -> None:
+    """The Level-3 source ceiling never substitutes for external authority."""
     for level in AuthorityLevel:
-        if level is AuthorityLevel.RECONCILE_ONLY:
-            with pytest.raises(AuthorityVerificationError, match="verified external grant"):
+        if level > PHASE_GRANTED_AUTHORITY_LEVEL:
+            with pytest.raises(AuthorityCeilingError):
                 require_capability(capability, level)
         elif level is AuthorityLevel.SHADOW:
             if capability in LADDER[AuthorityLevel.SHADOW]:
@@ -156,7 +156,7 @@ def test_no_capability_above_reconcile_only_is_reachable_without_a_grant(capabil
                 with pytest.raises(AuthorityCeilingError):
                     require_capability(capability, level)
         else:
-            with pytest.raises(AuthorityCeilingError):
+            with pytest.raises(AuthorityVerificationError, match="verified external grant"):
                 require_capability(capability, level)
 
 
@@ -195,7 +195,7 @@ def test_the_kill_switch_stops_every_new_external_effect(level: AuthorityLevel, 
         with pytest.raises(AuthorityCeilingError):
             granted_capabilities(level, kill_switch_engaged=not halted, safe_halted=halted)
         return
-    if level in (AuthorityLevel.RECONCILE_ONLY, AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES):
+    if level >= AuthorityLevel.RECONCILE_ONLY:
         with pytest.raises(AuthorityVerificationError, match="verified external grant"):
             granted_capabilities(level, kill_switch_engaged=not halted, safe_halted=halted)
         return
@@ -592,7 +592,7 @@ def test_a_clean_response_is_executable_and_that_is_not_an_authority() -> None:
     )
     assert readiness.verdict is ExecutionReadiness.EXECUTABLE
     # I-01: readiness is a fact about the venue, never a capability.
-    with pytest.raises(AuthorityCeilingError):
+    with pytest.raises(AuthorityVerificationError, match="verified external grant"):
         require_capability(Capability.SUBMIT_EXACT_BYTES, AuthorityLevel.HUMAN_SIGNED_EXECUTION)
 
 

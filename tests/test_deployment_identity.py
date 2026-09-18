@@ -235,7 +235,7 @@ def test_wrong_commit_shape_is_rejected() -> None:
         build_identity(ROOT, "not-a-commit")
 
 
-def test_identity_repair_does_not_change_the_current_implementation_phase() -> None:
+def test_identity_tracks_the_current_level_three_source_transition() -> None:
     from qntyspot.execution_contract import AuthorityLevel, PHASE_GRANTED_AUTHORITY_LEVEL
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION

@@ -7,39 +7,39 @@ scope of `qntyspot/`.
 
 ```
 PROJECT                 = QntySpot
-ACTIVE_PHASE            = QNTY_SPOT_RECONCILE_ONLY_QUALIFICATION_VENUE_BINDING_REPAIR_V0
-AUTHORITY               = ROBINHOOD_RECONCILE_ONLY_READ_ONLY
-SOURCE_PHASE_CEILING    = RECONCILE_ONLY
-EFFECTIVE_LEVEL_1_AUTHORITY_REQUIRES_CURRENT_EXTERNAL_GRANT = YES
-NETWORK_AUTHORIZED      = YES (bounded public Robinhood REST/RPC, Chainlink, and 0x reads only)
-SIGNING_AUTHORIZED      = NO
-LIVE_CAPITAL_AUTHORIZED = NO
-CAPITAL_AUTHORITY       = NONE
+ACTIVE_PHASE            = INK_V0F_HUMAN_SIGNED_EXECUTION_SOURCE_TRANSITION_V0
+AUTHORITY               = INK_V0F_HUMAN_SIGNED_EXECUTION_PREGRANT
+SOURCE_PHASE_CEILING    = HUMAN_SIGNED_EXECUTION
+EFFECTIVE_LEVEL_3_AUTHORITY_REQUIRES_CURRENT_EXTERNAL_GRANT = YES
+NETWORK_AUTHORIZED      = YES (bounded public reads through reviewed adapters)
+SIGNING_AUTHORIZED      = NO (QntySpot cannot produce a signature)
+LIVE_CAPITAL_AUTHORIZED = NO (no production Level-3 grant provisioned)
+CAPITAL_AUTHORITY       = NONE UNTIL MATCHING EXTERNAL GRANT
 ```
 
 These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 `qntyspot.NETWORK_AUTHORIZED`, `qntyspot.SIGNING_AUTHORIZED`, and
 `qntyspot.LIVE_CAPITAL_AUTHORIZED`.
 
-The reconcile-only source ceiling is only one half of authority. A current,
+The Level-3 source ceiling is only one half of authority. A current,
 independently verified AuthorityRoot grant bound to the exact implementation,
-network, taker, and venue is required for effective Level 1 behavior. No such
-grant is present during this implementation phase, so effective Level 1
-authority remains denied. The `NETWORK_AUTHORIZED = YES` flag remains the
-historical bounded-public-read ceiling; this phase performs zero network
-activity. Program B architecture, B1 implementation, and this external-root
-contract do not create live execution authority — see
-[docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
+network, taker, venue, capital ceilings, and validity window is required for
+every effective Level-1+ runtime action. No production Level-3 grant is
+provisioned by this source transition, so production execution remains denied.
+`SIGNING_AUTHORIZED = NO` means QntySpot cannot produce a signature; Level 3
+uses only complete bytes signed by the externally controlled human account.
+`LIVE_CAPITAL_AUTHORIZED = NO` records the current pregrant deployment state,
+not a claim that the reviewed Level-3 source path is absent.
 
 The frozen external-root consumer contract is documented in
 [docs/EXTERNAL_AUTHORITY_ROOT_CONTRACT_V0.md](EXTERNAL_AUTHORITY_ROOT_CONTRACT_V0.md).
 QntySpot consumes a serialized receipt plus an explicit external trust
 configuration. It does not contain or select root private material, does not
 self-issue, and does not treat a verified receipt as sufficient to escape the
-source phase ceiling. The external root is not implemented or deployed in this
-phase.
+source phase ceiling. The external root consumer is already implemented and remains mandatory. This
+phase does not issue, embed, discover, or provision a production grant.
 
-## The read-only reconcile-only source ceiling authorizes
+## The Level-3 source ceiling authorizes only when the external grant also authorizes
 
 - Deterministic, immutable domain models (`qntyspot/domain.py`,
   `qntyspot/identity.py`)
@@ -73,30 +73,39 @@ phase.
   version-0/address-lookup-table semantics
 - Deterministic policy-bound shadow decisions with canonical SHA-256 evidence
   and offline replay from frozen live evidence
+- The reviewed Ink V0F atomic preauthorization path: exact reservation,
+  envelope construction, and exact approval authorization
+- Submission of only the complete externally signed byte string that validates
+  against the frozen envelope and current grant
+- The human-signing handoff and exact signed-swap validation path; no signature
+  production occurs inside QntySpot
 
-## The read-only reconcile-only source ceiling forbids
+## The Level-3 source ceiling still forbids
 
 - private-key access
 - wallet signing
-- transaction construction
-- transaction broadcast
-- live trading
+- arbitrary or unbounded transaction construction
+- any transaction broadcast outside the exact grant-bound submission entrypoint
+- execution without a current matching external grant
 - venue discovery
 - automatic token selection
 - bridging
 - OpenSea execution
 - wallet-secret access
-- approvals
-- transaction submission
-- live capital
+- unlimited or caller-selected approvals
+- transaction mutation after human signing
+- signature production
+- autonomous signing or autonomous execution
+- production live capital before the separately provisioned exact Level-3 grant
 
 The public-read implementations are limited to `qntyspot/ink.py`,
 `qntyspot/ink_v0f_preauth.py`, `qntyspot/solana.py`,
 `qntyspot/robinhood.py`, and the injected-transport
 `qntyspot/robinhood_chain_truth.py`. The Ink V0F preauth module may verify
 the frozen router and ERC-20 allowance at the exact market-observation block,
-but its durable Level-3 entrypoints remain capability-gated and unreachable
-under the binding Level-1 ceiling. The Solana path validates Jupiter's raw instruction
+and its durable Level-3 entrypoints remain capability-gated. They are
+reachable only when a current exact external grant independently permits the
+same Level-3 session scope. The Solana path validates Jupiter's raw instruction
 evidence but does not assemble or serialize a transaction, trust any
 third-party serialized payload, read a secret, or expose a submission method.
 Offline unit tests disable sockets for the entire session; the one live
@@ -150,16 +159,17 @@ LEVEL 4  AUTONOMOUS_BOUNDED_SIGNER   a future, separately authorized signer
 ```
 
 ```
-PHASE_GRANTED_AUTHORITY_LEVEL = LEVEL 1 (RECONCILE_ONLY)
+PHASE_GRANTED_AUTHORITY_LEVEL = LEVEL 3 (HUMAN_SIGNED_EXECUTION)
 SOURCE_CEILING_ALONE_SUFFICIENT = NO
 EFFECTIVE_AUTHORITY = MIN(SOURCE_PHASE_CEILING, VERIFIED_EXTERNAL_GRANT_LEVEL)
 ```
 
 `qntyspot/authority_root.py` intersects the source ceiling with a current
-`VerifiedAuthorityGrantV0` at every runtime consumption point. Without a valid
-matching grant, Level 1 is denied. Level 1 reservation is durable local
-accounting only and is not live-capital authority. Construction, approval,
-signing, and submission remain denied.
+`VerifiedAuthorityGrantV0` at every runtime consumption point. Without a valid matching grant, every Level-1+ capability is denied. A grant
+below Level 3 reduces effective authority to that lower level. A grant above
+Level 3 is clipped to Level 3, so `PRODUCE_SIGNATURE` remains impossible.
+The source transition by itself therefore cannot submit, approve, or move
+capital.
 
 `qntyspot/ledger/execution_schema.py` defines the execution authority tables.
 The B1 runtime writes only explicit offline records supplied by its caller; it

@@ -346,9 +346,12 @@ class InkV0FZeroMoneyRehearsalV0:
             "signed_swap_admission_id",
         ):
             _digest(getattr(self, field_name), field_name=field_name)
-        if self.source_authority_level is not AuthorityLevel.RECONCILE_ONLY:
+        if self.source_authority_level not in {
+            AuthorityLevel.RECONCILE_ONLY,
+            AuthorityLevel.HUMAN_SIGNED_EXECUTION,
+        }:
             raise AuthorityVerificationError(
-                "pre-Level-3 rehearsal requires the RECONCILE_ONLY source ceiling"
+                "zero-money rehearsal is only defined for the reviewed Ink pregrant ceilings"
             )
         if self.mock_submission.external_effect:
             raise EnvelopeValidationError("rehearsal mock submission created an effect")
@@ -391,9 +394,12 @@ def run_ink_v0f_zero_money_rehearsal(
     rehearsed_at_epoch_s: int,
 ) -> InkV0FZeroMoneyRehearsalV0:
     """Produce a deterministic no-transport rehearsal transcript."""
-    if PHASE_GRANTED_AUTHORITY_LEVEL is not AuthorityLevel.RECONCILE_ONLY:
+    if PHASE_GRANTED_AUTHORITY_LEVEL not in {
+        AuthorityLevel.RECONCILE_ONLY,
+        AuthorityLevel.HUMAN_SIGNED_EXECUTION,
+    }:
         raise AuthorityVerificationError(
-            "this rehearsal is defined only before the Level-3 source transition"
+            "this rehearsal is outside the reviewed Ink pregrant source ceilings"
         )
     if type(session) is not ExecutionSessionV0:
         raise AuthorityVerificationError("rehearsal requires an execution session")

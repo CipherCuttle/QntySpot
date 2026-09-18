@@ -1,20 +1,21 @@
 """QntySpot -- deterministic policy-bound spot runtime.
 
-PHASE: INK V0F PRE-LIVE / RECONCILE-ONLY SOURCE CEILING
+PHASE: INK V0F / HUMAN-SIGNED EXECUTION SOURCE CEILING / PRE-GRANT
 --------------------------------------------------------------------------
 This package contains the merged bounded Ink and Solana/Jupiter adapters and
-one bounded Robinhood/Chainlink/0x adapter. It has no signer, no key handling,
-and no live-capital authority. The Ink V0F preview codec may deterministically
-describe exact router calldata for offline review, but the binding runtime
-source ceiling remains RECONCILE_ONLY and cannot authorize submission.
+one bounded Robinhood/Chainlink/0x adapter. It has no signer and no key
+handling. The reviewed Ink V0F source ceiling is HUMAN_SIGNED_EXECUTION:
+a matching external grant may authorize the bounded envelope/approval/exact
+externally-signed-byte path. No production Level-3 grant is provisioned by
+this source transition, so production live-capital authority remains absent.
 
 ``execution_contract`` and ``ledger.execution_schema`` are the frozen Program B
 pre-live execution contract. ``ledger.execution`` is the offline B1 runtime;
 ``authority_root`` is the external-root contract consumer. Together they
 provide immutable records, deterministic validators, and a SQLite authority
-surface with no network, signer, or capital capability. They authorize no
-runtime Level-1 behavior without a current external grant, and the runtime
-denies every capability above Level 1.
+surface. They authorize no Level-1+ runtime behavior without a current exact
+external grant. The runtime source ceiling is Level 3, while signature
+production remains denied because PRODUCE_SIGNATURE exists only at Level 4.
 
 What it does contain: an immutable domain model, a strict fail-closed policy
 reader, a deterministic economic-limit contract, an append-only SQLite ledger
@@ -30,9 +31,11 @@ from __future__ import annotations
 
 __version__ = "0.0.1a0"
 
-#: Machine-readable phase marker. The source ceiling is reconcile-only, but a
-#: current independently verified external grant remains required at runtime.
-AUTHORITY = "INK_V0F_RECONCILE_ONLY"
+#: Machine-readable phase marker. The source ceiling is Level 3, but every
+#: Level-1+ runtime action still requires a current exact external grant.
+#: SIGNING_AUTHORIZED means QntySpot may produce a signature; it remains false.
+#: No production Level-3 grant is provisioned by this source transition.
+AUTHORITY = "INK_V0F_HUMAN_SIGNED_EXECUTION_PREGRANT"
 NETWORK_AUTHORIZED = True
 SIGNING_AUTHORIZED = False
 LIVE_CAPITAL_AUTHORIZED = False

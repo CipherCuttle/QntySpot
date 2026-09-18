@@ -143,8 +143,8 @@ def _verified(level: AuthorityLevel = AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER):
     return grant, session
 
 
-def test_source_ceiling_and_effective_ladder_are_exact() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+def test_historical_level_one_ladder_is_exact_while_current_source_is_level_three() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
     assert LADDER[AuthorityLevel.RECONCILE_ONLY] == frozenset(
         {
             Capability.OBSERVE_MARKET,
@@ -155,11 +155,13 @@ def test_source_ceiling_and_effective_ladder_are_exact() -> None:
             Capability.RESERVE_CAPITAL,
         }
     )
-    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[AuthorityLevel.RECONCILE_ONLY]
     assert Capability.SUBMIT_EXACT_BYTES in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
     assert Capability.CONSTRUCT_ENVELOPE not in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
     assert Capability.AUTHORIZE_APPROVAL not in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
-    assert Capability.PRODUCE_SIGNATURE not in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
+    assert Capability.CONSTRUCT_ENVELOPE in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.AUTHORIZE_APPROVAL in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
 
 def test_higher_external_grant_cannot_unlock_exact_byte_submission() -> None:

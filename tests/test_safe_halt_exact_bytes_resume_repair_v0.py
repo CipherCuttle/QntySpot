@@ -54,8 +54,11 @@ from test_external_authority_root import _receipt, _root_for, _session
 from test_submit_exact_signed_bytes_v0 import RAW
 
 pytestmark = pytest.mark.skipif(
-    PHASE_GRANTED_AUTHORITY_LEVEL < AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES,
-    reason="historical Level-2 runtime suite is dormant under the binding RECONCILE_ONLY ceiling",
+    PHASE_GRANTED_AUTHORITY_LEVEL is not AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES,
+    reason=(
+        "historical generic Level-2 runtime suite is outside the current "
+        "Ink-scoped Level-3 phase"
+    ),
 )
 
 ROOT = Path(__file__).resolve().parents[1]

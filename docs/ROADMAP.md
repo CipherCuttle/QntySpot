@@ -11,14 +11,15 @@ PROGRAM B  PRE-LIVE EXECUTION CONTRACT   <- frozen prerequisite
 PROGRAM B1 PRE-LIVE EXECUTION IMPLEMENTATION <- canonical pass, offline-only
 EXTERNAL AUTHORITY-ROOT CONTRACT          <- closed / consumed
 QNTY AUTHORITY-ROOT IMPLEMENTATION        <- merged + zero-money grant qualified
-V0F  INK DUST LIVE                        <- signed-swap / zero-money rehearsal prep current
+V0F  INK DUST LIVE                        <- Level-3 source transition current / production grant absent
 V0G  SOLANA DUST LIVE
 V0H  ROBINHOOD DUST LIVE
 V1   QntyLab-assisted ladder research
 ```
 
-No execution phase past Program B1 is authorized. `SIGNING_AUTHORIZED` and
-`LIVE_CAPITAL_AUTHORIZED` are `NO`, and V0H is not live.
+Ink V0F now has a reviewed Level-3 source ceiling on this transition branch,
+but no production Level-3 AuthorityRoot grant has been issued. QntySpot still
+cannot produce signatures, and production live capital remains unauthorized.
 
 ```
 DEFERRED_LATER:
@@ -89,7 +90,7 @@ SQLite execution authority surface, and the pre-live qualification matrix. It
 grants no runtime authority above `SHADOW` and changes no authority flag. See
 [docs/PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md](PROGRAM_B_PRELIVE_EXECUTION_CONTRACT_V0.md).
 
-## Program B1 — pre-live execution implementation (current)
+## Program B1 — pre-live execution implementation (merged prerequisite)
 
 Implemented as an offline transactional runtime over SQLite core plus the
 execution schema. It closes the post-submission release gate, extracts and
@@ -107,22 +108,23 @@ one exact taker, a 900-second maximum grant window, atomic overlap fencing, and
 a zero-money cross-repository receipt qualification. No production receipt has
 been issued.
 
-The current Ink V0F step extends the merged human-signing/approval-settlement
-path with exact externally signed swap-byte admission proof and a deterministic
-zero-money rehearsal transcript. The rehearsal accepts no transport or chain
-observation and its simulated reconciliation cannot be persisted as chain
-truth. The runtime source ceiling remains `RECONCILE_ONLY`; durable signed-byte
-admission, approval submission, swap submission, and live capital remain
-unreachable until a separate Level-3 authority transition.
+The current Ink V0F step raises only the reviewed source ceiling to
+`HUMAN_SIGNED_EXECUTION`. The already-merged human-signing,
+approval-settlement, exact signed-swap, and zero-money rehearsal protections
+remain unchanged. Effective Level-3 authority still requires a current
+independently verified grant bound to the exact implementation, taker, Ink
+network, venue, capital ceilings, and validity window. No production Level-3
+grant is provisioned by this transition.
 
 ## V0F / V0G / V0H — Dust live
 
 The first phases in which live external effects may become authorized, one
 venue at a time (Ink, Solana, Robinhood), starting at dust size. Ink V0F has a
-frozen 0.001 WETH maximum entry/cumulative envelope, but the current source
-ceiling is still `RECONCILE_ONLY`; signing and live capital remain disabled.
-A later explicit Level-3 phase must merge and then be rebound into a fresh
-AuthorityRoot grant before any human-signed execution can occur.
+frozen 0.001 WETH maximum entry/cumulative envelope and the source ceiling is
+now `HUMAN_SIGNED_EXECUTION`. QntySpot still cannot produce signatures.
+Production execution remains denied until this exact Level-3 implementation is
+merged, rebound into QntyAuthorityRoot, and covered by one fresh short-lived
+grant. A zero-money Level-3 rehearsal is required before any dust execution.
 
 ## V1 — QntyLab-assisted ladder research
 
