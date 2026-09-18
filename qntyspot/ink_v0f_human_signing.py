@@ -89,6 +89,7 @@ _SIGNED_APPROVAL_TOKEN = object()
 _APPROVAL_OBSERVATION_TOKEN = object()
 _APPROVAL_TRUTH_TOKEN = object()
 _APPROVAL_SETTLEMENT_TOKEN = object()
+_REVALIDATION_TOKEN = object()
 
 
 def _uint(value: Any, *, field: str, positive: bool = False) -> int:
@@ -1005,6 +1006,46 @@ class InkV0FSameAmountRevalidationV0:
     fresh_quote_output_atomic: int
     fresh_required_min_output_atomic: int
     schema: str = SAME_AMOUNT_REVALIDATION_SCHEMA
+    _token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _REVALIDATION_TOKEN:
+            raise SafeHaltError(
+                "same-amount revalidation must be produced by the live revalidator"
+            )
+        if self.schema != SAME_AMOUNT_REVALIDATION_SCHEMA:
+            raise EnvelopeValidationError("unknown same-amount revalidation schema")
+        for field_name in (
+            "market_observation_digest",
+            "router_observation_digest",
+            "allowance_observation_digest",
+            "signer_state_digest",
+        ):
+            _digest(getattr(self, field_name), field=field_name)
+        _uint(self.fresh_quote_output_atomic, field="fresh_quote_output_atomic")
+        _uint(
+            self.fresh_required_min_output_atomic,
+            field="fresh_required_min_output_atomic",
+        )
+        if type(self.swap_request) is not InkV0FSwapSigningRequestV0:
+            raise EnvelopeValidationError("revalidation swap request has the wrong type")
+
+    @property
+    def revalidation_id(self) -> str:
+        return digest_object(
+            {
+                "allowance_observation_digest": self.allowance_observation_digest,
+                "fresh_quote_output_atomic": str(self.fresh_quote_output_atomic),
+                "fresh_required_min_output_atomic": str(
+                    self.fresh_required_min_output_atomic
+                ),
+                "market_observation_digest": self.market_observation_digest,
+                "router_observation_digest": self.router_observation_digest,
+                "schema": self.schema,
+                "signer_state_digest": self.signer_state_digest,
+                "swap_scope_digest": self.swap_request.scope.scope_digest,
+            }
+        )
 
 
 def revalidate_ink_v0f_same_amount(
@@ -1109,4 +1150,5 @@ def revalidate_ink_v0f_same_amount(
         signer_state_digest=signer_state.digest,
         fresh_quote_output_atomic=quote.output_atomic,
         fresh_required_min_output_atomic=required_min,
+        _token=_REVALIDATION_TOKEN,
     )
