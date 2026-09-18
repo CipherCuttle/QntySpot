@@ -17,6 +17,7 @@ from qntyspot.ink import (
     WETH9_ADDRESS,
     InkMarketObservationV0,
     InkQuoteV0,
+    InkShadowAdapter,
 )
 from qntyspot.ink_v0f_risk import (
     AUTHORITY_ROOT_SOURCE_MERGE_SHA,
@@ -42,7 +43,7 @@ def verified_policy():
     return consume_ink_v0f_risk_artifact(ARTIFACT.read_bytes())
 
 
-def observation() -> InkMarketObservationV0:
+def observation(*, reserve0: int = 10**21, reserve1: int = 10**21) -> InkMarketObservationV0:
     return InkMarketObservationV0(
         schema="INK_MARKET_OBSERVATION_V0",
         chain_id=57_073,
@@ -55,8 +56,8 @@ def observation() -> InkMarketObservationV0:
         bytecode_present=True,
         bytecode_sha256=INKYSWAP_V2_BYTECODE_SHA256,
         bytecode_length=1,
-        reserve0_atomic=10**21,
-        reserve1_atomic=10**21,
+        reserve0_atomic=reserve0,
+        reserve1_atomic=reserve1,
         reserve_timestamp=1,
         provider_evidence=({}, {}),
         v2_fee_numerator=V2_FEE_NUMERATOR,
@@ -78,20 +79,8 @@ def bounds(*, max_input_atomic: int = 10**15, impact: int = 100, slippage: int =
     )
 
 
-def quote(obs: InkMarketObservationV0, *, input_atomic: int = 10**15, impact: Fraction = Fraction(100)) -> InkQuoteV0:
-    return InkQuoteV0(
-        side=Side.BUY,
-        input_atomic=input_atomic,
-        output_atomic=1,
-        reserve_in_atomic=10**21,
-        reserve_out_atomic=10**21,
-        average_price=Fraction(1),
-        spot_price=Fraction(1),
-        price_impact_bps=impact,
-        fee_atomic=Fraction(0),
-        observation_digest=obs.digest(),
-        common_block=obs.common_block,
-    )
+def quote(obs: InkMarketObservationV0, *, input_atomic: int = 10**15) -> InkQuoteV0:
+    return InkShadowAdapter._quote(obs, Side.BUY, input_atomic)
 
 
 def test_vendored_artifact_is_exact_external_authority_root_identity() -> None:
@@ -157,7 +146,7 @@ def test_quote_from_a_different_observation_fails_closed() -> None:
         ({"impact": 101}, 10**15, Fraction(100), "policy price-impact"),
         ({"slippage": 51}, 10**15, Fraction(100), "policy slippage"),
         ({}, 10**15 + 1, Fraction(100), "quote input"),
-        ({}, 10**15, Fraction(101), "quoted price impact"),
+        ({}, 10**15, Fraction(101), "canonical reserve-derived"),
     ),
 )
 def test_entry_widening_fails_closed(bound_kwargs, quote_input, quote_impact, message) -> None:
@@ -167,7 +156,11 @@ def test_entry_widening_fails_closed(bound_kwargs, quote_input, quote_impact, me
         assert_ink_v0f_entry_admissible(
             policy,
             observation=obs,
-            quote=quote(obs, input_atomic=quote_input, impact=quote_impact),
+            quote=(
+                replace(quote(obs, input_atomic=quote_input), price_impact_bps=quote_impact)
+                if quote_impact != quote(obs, input_atomic=quote_input).price_impact_bps
+                else quote(obs, input_atomic=quote_input)
+            ),
             bounds=bounds(**bound_kwargs),
             cumulative_entry_atomic_after=max(quote_input, 10**15),
             concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
@@ -192,7 +185,7 @@ def test_wrong_instrument_scope_and_concurrency_fail_closed() -> None:
         assert_ink_v0f_entry_admissible(
             policy,
             observation=obs,
-            quote=quote(obs, input_atomic=1, impact=Fraction(1)),
+            quote=quote(obs, input_atomic=1),
             bounds=wrong_bounds,
             cumulative_entry_atomic_after=1,
             concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
@@ -202,10 +195,26 @@ def test_wrong_instrument_scope_and_concurrency_fail_closed() -> None:
         assert_ink_v0f_entry_admissible(
             policy,
             observation=obs,
-            quote=quote(obs, input_atomic=1, impact=Fraction(1)),
+            quote=quote(obs, input_atomic=1),
             bounds=bounds(max_input_atomic=1, impact=1, slippage=1),
             cumulative_entry_atomic_after=1,
             concurrency_snapshot=PositionConcurrencySnapshotV0(1, 1, 1, 0),
+        )
+
+
+def test_canonical_reserve_derived_quote_above_impact_cap_fails_closed() -> None:
+    policy = verified_policy()
+    obs = observation(reserve0=5 * 10**16, reserve1=5 * 10**16)
+    q = quote(obs, input_atomic=10**15)
+    assert q.price_impact_bps > 100
+    with pytest.raises(LevelNotExecutableError, match="quoted price impact"):
+        assert_ink_v0f_entry_admissible(
+            policy,
+            observation=obs,
+            quote=q,
+            bounds=bounds(),
+            cumulative_entry_atomic_after=10**15,
+            concurrency_snapshot=PositionConcurrencySnapshotV0(0, 0, 0, 0),
         )
 
 

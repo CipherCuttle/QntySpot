@@ -262,6 +262,15 @@ def assert_ink_v0f_entry_admissible(
 
     if bounds.side is not Side.BUY or quote.side is not Side.BUY:
         raise LevelNotExecutableError("Ink V0F dust phase admits ENTRY BUY actions only")
+    canonical_quote = InkShadowAdapter._quote(
+        observation,
+        Side.BUY,
+        quote.input_atomic,
+    )
+    if quote != canonical_quote:
+        raise LevelNotExecutableError(
+            "Ink V0F quote does not match canonical reserve-derived quote"
+        )
     if bounds.input_instrument_id != policy.quote_instrument_id:
         raise LevelNotExecutableError("Ink V0F input instrument is outside the frozen scope")
     if bounds.output_instrument_id != policy.base_instrument_id:
