@@ -1,10 +1,10 @@
-"""Ink V0F live-read preflight and dormant Level-3 admission helpers.
+"""Ink V0F live-read preflight and grant-gated Level-3 admission helpers.
 
-This module adds no authority. Public RPC reads may verify the already frozen
-router and ERC-20 allowance state at the exact pool-observation block. Builders
-produce the existing generic execution-envelope / approval records, but the
-runtime entrypoints that persist them remain guarded by the binding source
-ceiling in :mod:`qntyspot.ledger.execution`.
+This module adds no authority by itself. Public RPC reads may verify the
+already frozen router and ERC-20 allowance state at the exact pool-observation
+block. Builders produce the existing generic execution-envelope / approval
+records; persistence remains gated by the Level-3 source ceiling intersected
+with a current exact external grant in :mod:`qntyspot.ledger.execution`.
 """
 
 from __future__ import annotations
