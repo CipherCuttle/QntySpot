@@ -308,6 +308,7 @@ def _program_b_report() -> dict[str, Any]:
         AuthorityLevel.SHADOW,
         AuthorityLevel.RECONCILE_ONLY,
         AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES,
+        AuthorityLevel.HUMAN_SIGNED_EXECUTION,
     }:
         raise SystemExit("authority continuity failed: unsupported source phase ceiling")
     ordered = sorted(AuthorityLevel)
@@ -424,12 +425,16 @@ def build_report() -> dict[str, Any]:
     report = {
         "authority": {
             "authority": (
-                "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
-                if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+                "INK_V0F_HUMAN_SIGNED_EXECUTION_PREGRANT"
+                if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
                 else (
-                    "ROBINHOOD_SUBMIT_EXACT_SIGNED_BYTES"
-                    if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
-                    else "ROBINHOOD_SHADOW_READ_ONLY"
+                    "ROBINHOOD_RECONCILE_ONLY_READ_ONLY"
+                    if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+                    else (
+                        "ROBINHOOD_SUBMIT_EXACT_SIGNED_BYTES"
+                        if PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+                        else "ROBINHOOD_SHADOW_READ_ONLY"
+                    )
                 )
             ),
             "live_capital_authorized": False,
