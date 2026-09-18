@@ -151,8 +151,8 @@ def test_the_declared_dependency_set_preserves_the_boundary() -> None:
         assert f'"{forbidden}' not in pyproject, f"{forbidden} must not be a dependency"
 
 
-def test_the_package_declares_its_phase_as_ink_v0f_reconcile_only() -> None:
-    assert qntyspot.AUTHORITY == "INK_V0F_RECONCILE_ONLY"
+def test_the_package_declares_level_three_pregrant_without_internal_signing() -> None:
+    assert qntyspot.AUTHORITY == "INK_V0F_HUMAN_SIGNED_EXECUTION_PREGRANT"
     assert qntyspot.NETWORK_AUTHORIZED is True
     assert qntyspot.SIGNING_AUTHORIZED is False
     assert qntyspot.LIVE_CAPITAL_AUTHORIZED is False
