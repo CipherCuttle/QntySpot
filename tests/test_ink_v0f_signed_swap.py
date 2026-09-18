@@ -191,9 +191,10 @@ def test_source_ceiling_stays_below_submission_and_level3() -> None:
     assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
 
-def test_direct_revalidation_construction_is_rejected() -> None:
+def test_direct_revalidation_construction_is_rejected(monkeypatch) -> None:
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     _, _, revalidation = _fixture(taker=taker)
     with pytest.raises(SafeHaltError, match="live revalidator"):
         InkV0FSameAmountRevalidationV0(
@@ -213,6 +214,7 @@ def test_exact_external_swap_bytes_are_admitted_without_reencoding(monkeypatch) 
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
 
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
@@ -237,6 +239,7 @@ def test_mutated_signed_swap_bytes_fail_closed(monkeypatch) -> None:
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     _, envelope, revalidation = _fixture(taker=taker)
 
     raw = bytearray(_sign_type2(revalidation.swap_request.eip1559_signing_fields(), key))
@@ -254,6 +257,7 @@ def test_signed_swap_admission_rejects_direct_caller_construction(monkeypatch) -
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     _, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
     admitted = validate_ink_v0f_signed_swap(
@@ -277,6 +281,7 @@ def test_signed_swap_rejects_stale_revalidation_and_envelope_drift(monkeypatch) 
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
 
@@ -329,6 +334,7 @@ def test_zero_money_rehearsal_has_no_transport_or_chain_truth_escape(monkeypatch
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
     admission = validate_ink_v0f_signed_swap(
@@ -365,6 +371,7 @@ def test_rehearsal_rejects_cross_action_scope(monkeypatch) -> None:
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
     admission = validate_ink_v0f_signed_swap(
@@ -401,6 +408,7 @@ def test_rehearsal_output_records_cannot_be_caller_minted(monkeypatch) -> None:
     key = keys.PrivateKey(bytes.fromhex("01" * 32))
     taker = "0x" + keccak256(key.public_key.to_bytes())[-20:].hex()
     monkeypatch.setattr(signed_swap_mod, "INK_V0F_TAKER_ADDRESS", taker)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", taker)
     sess, envelope, revalidation = _fixture(taker=taker)
     raw = _sign_type2(revalidation.swap_request.eip1559_signing_fields(), key)
     admission = validate_ink_v0f_signed_swap(
