@@ -120,12 +120,12 @@ def admit(env=None, **kwargs) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_phase_grants_only_exact_signed_bytes_authority() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+def test_the_phase_grants_only_reconcile_only_authority() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
     assert_phase_ceiling(AuthorityLevel.SHADOW)
     assert_phase_ceiling(AuthorityLevel.RECONCILE_ONLY)
     for level in AuthorityLevel:
-        if level <= AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES:
+        if level <= AuthorityLevel.RECONCILE_ONLY:
             continue
         with pytest.raises(AuthorityCeilingError, match="exceeds the granted phase ceiling"):
             assert_phase_ceiling(level)
@@ -143,12 +143,18 @@ def test_the_phase_grants_only_exact_signed_bytes_authority() -> None:
         Capability.OBSERVE_CHAIN,
     ],
 )
-def test_no_capability_above_exact_signed_bytes_is_reachable_without_a_grant(capability: Capability) -> None:
+def test_no_capability_above_reconcile_only_is_reachable_without_a_grant(capability: Capability) -> None:
     """A caller cannot buy authority by passing a higher level."""
     for level in AuthorityLevel:
-        if level in (AuthorityLevel.RECONCILE_ONLY, AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES):
+        if level is AuthorityLevel.RECONCILE_ONLY:
             with pytest.raises(AuthorityVerificationError, match="verified external grant"):
                 require_capability(capability, level)
+        elif level is AuthorityLevel.SHADOW:
+            if capability in LADDER[AuthorityLevel.SHADOW]:
+                require_capability(capability, level)
+            else:
+                with pytest.raises(AuthorityCeilingError):
+                    require_capability(capability, level)
         else:
             with pytest.raises(AuthorityCeilingError):
                 require_capability(capability, level)

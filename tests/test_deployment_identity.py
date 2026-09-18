@@ -206,4 +206,4 @@ def test_wrong_commit_shape_is_rejected() -> None:
 def test_identity_repair_does_not_change_the_current_implementation_phase() -> None:
     from qntyspot.execution_contract import AuthorityLevel, PHASE_GRANTED_AUTHORITY_LEVEL
 
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY

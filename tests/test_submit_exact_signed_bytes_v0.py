@@ -39,9 +39,10 @@ def scope(**changes: object) -> ExactSignedBytesScopeV0:
     return ExactSignedBytesScopeV0(**values)  # type: ignore[arg-type]
 
 
-def test_source_ceiling_is_level_two_without_construct_or_sign() -> None:
-    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES
-    assert Capability.SUBMIT_EXACT_BYTES in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+def test_exact_bytes_implementation_exists_but_current_source_ceiling_blocks_it() -> None:
+    assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.RECONCILE_ONLY
+    assert Capability.SUBMIT_EXACT_BYTES not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
+    assert Capability.SUBMIT_EXACT_BYTES in LADDER[AuthorityLevel.SUBMIT_EXACT_SIGNED_BYTES]
     assert Capability.CONSTRUCT_ENVELOPE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert Capability.PRODUCE_SIGNATURE not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
 
