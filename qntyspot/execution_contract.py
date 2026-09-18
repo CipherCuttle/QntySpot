@@ -16,11 +16,11 @@ reads the environment, reads a clock, or reaches a network. Every temporal
 input is an explicit argument.
 
 The binding source ceiling is ``PHASE_GRANTED_AUTHORITY_LEVEL =
-AuthorityLevel.RECONCILE_ONLY``. The Level-2 exact-signed-bytes implementation
-remains present for a future reviewed phase, but it is unreachable through the
-runtime authority gate today. This module cannot authorize signing, approval,
-transaction construction, submission, or capital deployment above the binding
-reconcile-only ceiling.
+AuthorityLevel.HUMAN_SIGNED_EXECUTION``. Runtime authority remains the
+intersection of this source ceiling and a current independently verified
+external grant. Level 3 may construct/authorize the already-reviewed bounded
+human-signing path and submit only exact externally signed bytes. It cannot
+produce a signature: ``PRODUCE_SIGNATURE`` remains Level 4 only.
 
 NAMING NOTE
 -----------
@@ -350,10 +350,11 @@ KILL_SWITCH_PRESERVED_CAPABILITIES: frozenset[Capability] = frozenset(
     }
 )
 
-#: The binding reviewed source ceiling. The independently implemented Level-2
-#: exact-signed-bytes path remains dormant until a later explicit phase change.
-#: Runtime actions also require a current, independently verified external grant.
-PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.RECONCILE_ONLY
+#: The binding reviewed Ink V0F source ceiling. Level 3 enables only the
+#: human-controlled signing path already implemented and reviewed. Every
+#: Level-1+ runtime action still requires a current, exact external grant.
+#: Signature production remains exclusively Level 4 and is outside this phase.
+PHASE_GRANTED_AUTHORITY_LEVEL = AuthorityLevel.HUMAN_SIGNED_EXECUTION
 
 assert set(LADDER) == set(AuthorityLevel), "the ladder must cover every level"
 assert all(
@@ -411,7 +412,8 @@ def assert_phase_ceiling(level: AuthorityLevel) -> None:
         raise AuthorityCeilingError(
             f"{level.name} exceeds the granted phase ceiling "
             f"{PHASE_GRANTED_AUTHORITY_LEVEL.name}; "
-            f"{CONTRACT_VERSION} grants no runtime authority above RECONCILE_ONLY"
+            f"{CONTRACT_VERSION} grants no runtime authority above "
+            f"{PHASE_GRANTED_AUTHORITY_LEVEL.name}"
         )
 
 
