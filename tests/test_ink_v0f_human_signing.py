@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from fractions import Fraction
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +9,7 @@ from eth_keys import keys
 
 import qntyspot.ink_v0f_human_signing as human
 from qntyspot.canon import sha256_hex
-from qntyspot.domain import IntentKind, IntentV0, EconomicBounds, Side
+from qntyspot.domain import EconomicBounds, IntentV0, LadderKind, Side
 from qntyspot.errors import EnvelopeValidationError, SafeHaltError
 from qntyspot.execution_contract import (
     ApprovalActionV0,
@@ -395,26 +396,27 @@ def _market() -> InkMarketObservationV0:
 
 def _intent() -> IntentV0:
     return IntentV0(
+        economic_action_id=ACTION_ID,
         policy_id=POLICY_ID,
-        cycle_id="cycle-1",
-        level_id="level-1",
         instrument_id="KRAKMASK",
         quote_instrument_id="WETH",
         network_id=f"evm:{INK_CHAIN_ID}",
+        cycle_id="cycle-1",
+        level_id="level-1",
         side=Side.BUY,
-        kind=IntentKind.ENTRY,
+        kind=LadderKind.ENTRY,
         bounds=EconomicBounds(
             side=Side.BUY,
             input_instrument_id="WETH",
             output_instrument_id="KRAKMASK",
             max_input_atomic=1_000,
             min_output_atomic=900,
-            limit_price="1",
+            limit_price=Fraction(1, 1),
             max_price_impact_bps=100,
             max_slippage_bps=50,
             deadline_epoch_s=DEADLINE,
         ),
-        created_at_epoch_s=1_800_000_000,
+        quote_exposure_atomic=1_000,
     )
 
 
