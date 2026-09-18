@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+import qntyspot.ink_v0f_preauth as preauth
+
 from qntyspot.canon import canonical_json_bytes
 from qntyspot.errors import EnvelopeValidationError, SafeHaltError
 from qntyspot.exact_signed_bytes import ExactSignedBytesScopeV0
@@ -144,7 +146,9 @@ def market_observation() -> InkMarketObservationV0:
     )
 
 
-def verifier(*, first: FakeRpc | None = None, second: FakeRpc | None = None):
+def verifier(monkeypatch, *, first: FakeRpc | None = None, second: FakeRpc | None = None):
+    monkeypatch.setattr(preauth, "INK_V0F_ROUTER_BYTECODE_SHA256", FAKE_CODE_HASH)
+    monkeypatch.setattr(preauth, "INK_V0F_ROUTER_BYTECODE_LENGTH", FAKE_CODE_LENGTH)
     a = first or FakeRpc(head=105)
     b = second or FakeRpc(head=104)
     return InkV0FLiveVerifier(
@@ -232,8 +236,8 @@ def test_selectors_are_exact() -> None:
     assert ERC20_ALLOWANCE_SELECTOR == keccak256(b"allowance(address,address)")[:4]
 
 
-def test_router_and_allowance_are_verified_at_market_common_block() -> None:
-    live, left, right = verifier()
+def test_router_and_allowance_are_verified_at_market_common_block(monkeypatch) -> None:
+    live, left, right = verifier(monkeypatch)
     market = market_observation()
     router_observation = live.observe_router_for_market(market)
     allowance = live.observe_allowance_for_market(market, token_address=WETH9_ADDRESS)
@@ -244,19 +248,19 @@ def test_router_and_allowance_are_verified_at_market_common_block() -> None:
     assert all(tag == "0x64" for tag in left.block_tags + right.block_tags)
 
 
-def test_router_bytecode_or_provider_disagreement_fails_closed() -> None:
+def test_router_bytecode_or_provider_disagreement_fails_closed(monkeypatch) -> None:
     bad = FakeRpc(code=b"\x60\x00")
-    live, _, _ = verifier(second=bad)
+    live, _, _ = verifier(monkeypatch, second=bad)
     with pytest.raises(SafeHaltError, match="bytecode"):
         live.observe_router_for_market(market_observation())
 
-    live, _, _ = verifier(second=FakeRpc(allowance=1))
+    live, _, _ = verifier(monkeypatch, second=FakeRpc(allowance=1))
     with pytest.raises(SafeHaltError, match="disagree"):
         live.observe_allowance_for_market(market_observation(), token_address=WETH9_ADDRESS)
 
 
-def test_stale_market_block_fails_closed() -> None:
-    live, _, _ = verifier(first=FakeRpc(head=200), second=FakeRpc(head=199))
+def test_stale_market_block_fails_closed(monkeypatch) -> None:
+    live, _, _ = verifier(monkeypatch, first=FakeRpc(head=200), second=FakeRpc(head=199))
     market = replace(
         market_observation(),
         provider_heads={"https://rpc-a.invalid": 200, "https://rpc-b.invalid": 199},
@@ -265,8 +269,8 @@ def test_stale_market_block_fails_closed() -> None:
         live.observe_router_for_market(market)
 
 
-def test_envelope_is_exactly_derived_from_preview_and_router_observation() -> None:
-    live, _, _ = verifier()
+def test_envelope_is_exactly_derived_from_preview_and_router_observation(monkeypatch) -> None:
+    live, _, _ = verifier(monkeypatch)
     p = preview()
     ro = live.observe_router_for_market(market_observation())
     env = build_ink_v0f_execution_envelope(p, ro, session())
@@ -289,8 +293,8 @@ def test_envelope_is_exactly_derived_from_preview_and_router_observation() -> No
         )
 
 
-def test_approval_requires_same_block_zero_prior_allowance_and_exact_amount() -> None:
-    live, _, _ = verifier()
+def test_approval_requires_same_block_zero_prior_allowance_and_exact_amount(monkeypatch) -> None:
+    live, _, _ = verifier(monkeypatch)
     p = preview()
     allowance = live.observe_allowance_for_market(
         market_observation(), token_address=WETH9_ADDRESS
