@@ -10,7 +10,7 @@ from eth_keys import keys
 import qntyspot.ink_v0f_human_signing as human
 from qntyspot.canon import sha256_hex
 from qntyspot.domain import EconomicBounds, IntentV0, LadderKind, Side
-from qntyspot.errors import EnvelopeValidationError, SafeHaltError
+from qntyspot.errors import ChainTruthError, EnvelopeValidationError, SafeHaltError
 from qntyspot.execution_contract import (
     ApprovalActionV0,
     AuthorityLevel,
@@ -247,6 +247,66 @@ def test_externally_signed_approval_bytes_are_recovered_and_exact(monkeypatch) -
         validate_ink_v0f_signed_approval(request, bytes(bad))
 
 
+def test_verified_fact_records_reject_direct_caller_construction() -> None:
+    sess, approval, envelope = approval_and_envelope()
+    request = build_ink_v0f_approval_signing_request(
+        approval=approval,
+        envelope=envelope,
+        session=sess,
+        approval_nonce=7,
+        gas_limit_ceiling=80_000,
+        max_fee_per_gas_ceiling=2_000_000_000,
+        max_priority_fee_per_gas_ceiling=100_000_000,
+        constructed_at_epoch_s=1,
+    )
+    parsed = ParsedExactSignedBytesV0(
+        transaction_type="eip-1559",
+        chain_id=INK_CHAIN_ID,
+        account_nonce=7,
+        gas_limit=50_000,
+        max_fee_per_gas=1,
+        max_priority_fee_per_gas=1,
+        target_address=WETH9_ADDRESS,
+        value_atomic=0,
+        calldata=bytes.fromhex(request.eip1559_signing_fields()["data"][2:]),
+        sender_address=request.scope.taker_address,
+        transaction_hash="0x" + "aa" * 32,
+    )
+    validated = ValidatedExactSignedBytesV0(
+        scope=request.scope,
+        parsed=parsed,
+        signed_bytes_sha256="bb" * 32,
+        signed_bytes_length=100,
+    )
+    with pytest.raises(EnvelopeValidationError, match="exact-byte validation"):
+        human.InkV0FSignedApprovalV0(request=request, validated=validated)
+
+    with pytest.raises(ChainTruthError, match="canonical RPC observation"):
+        InkV0FApprovalChainObservationV0(
+            provider_id="ink-rpc-a",
+            transaction_hash="0x" + "aa" * 32,
+            observed_at_epoch_s=1,
+            presence=ChainPresence.PENDING,
+            raw_evidence_sha256="cc" * 32,
+            head_block_number=1,
+            head_block_hash="0x" + "dd" * 32,
+        )
+
+    with pytest.raises(ChainTruthError, match="produced by reconciliation"):
+        InkV0FApprovalSettlementV0(
+            state=InkV0FApprovalSettlementState.SETTLED,
+            request_id=request.request_id,
+            approval_action_id=approval.approval_action_id,
+            economic_action_id=ACTION_ID,
+            transaction_hash="0x" + "aa" * 32,
+            expected_allowance_atomic=1_000,
+            observed_allowance_atomic=1_000,
+            allowance_observation_digest="dd" * 32,
+            chain_truth_evidence_digest="ee" * 32,
+            requires_revoke=False,
+        )
+
+
 def _signed_stub(request):
     parsed = ParsedExactSignedBytesV0(
         transaction_type="eip-1559",
@@ -267,7 +327,11 @@ def _signed_stub(request):
         signed_bytes_sha256="bb" * 32,
         signed_bytes_length=100,
     )
-    return human.InkV0FSignedApprovalV0(request=request, validated=validated)
+    return human.InkV0FSignedApprovalV0(
+        request=request,
+        validated=validated,
+        _token=human._SIGNED_APPROVAL_TOKEN,
+    )
 
 
 def _approval_observation(provider_id: str, *, status=ReceiptStatus.SUCCESS, block=100, head=103):
@@ -283,6 +347,7 @@ def _approval_observation(provider_id: str, *, status=ReceiptStatus.SUCCESS, blo
         head_block_number=head,
         head_block_hash="0x" + "ee" * 32,
         receipt_status=status,
+        _token=human._APPROVAL_OBSERVATION_TOKEN,
     )
 
 
@@ -434,6 +499,7 @@ def test_same_amount_revalidation_returns_frozen_swap_or_stops(monkeypatch) -> N
         allowance_observation_digest="ac" * 32,
         chain_truth_evidence_digest="ad" * 32,
         requires_revoke=False,
+        _token=human._APPROVAL_SETTLEMENT_TOKEN,
     )
     live = object.__new__(human.InkV0FLiveVerifier)
     market = _market()
