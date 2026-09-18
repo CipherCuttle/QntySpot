@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from ..canon import digest_object, parse_canonical_decimal, sha256_hex, strict_json_loads
-from ..domain import EconomicBounds, ReservationStatus, Side
+from ..domain import EconomicBounds, IntentV0, ReservationStatus, Side
 from ..errors import (
     AuthorityCeilingError,
     AuthorityVerificationError,
@@ -52,11 +52,9 @@ from ..execution_contract import (
     derive_transaction_hash,
 )
 if TYPE_CHECKING:
-    from ..ink_v0f_execution import InkV0FHumanSigningPreviewV0
-    from ..ink_v0f_preauth import (
-        InkV0FAllowanceObservationV0,
-        InkV0FRouterObservationV0,
-    )
+    from ..ink_v0f_execution import InkV0FRouterIdentityV0
+    from ..ink_v0f_preauth import InkV0FLiveVerifier
+    from ..ink_v0f_risk import InkV0FRiskPolicyV0
 from ..exact_signed_bytes import (
     ExactSignedBytesAdmissionV0,
     ExactSignedBytesScopeV0,
@@ -1341,18 +1339,25 @@ class ExecutionRuntime:
 
     def record_ink_v0f_execution_envelope(
         self,
-        envelope: ExecutionEnvelopeV0,
-        preview: InkV0FHumanSigningPreviewV0,
-        router_observation: InkV0FRouterObservationV0,
+        *,
+        live_verifier: "InkV0FLiveVerifier",
+        risk_policy: "InkV0FRiskPolicyV0",
+        router_identity: "InkV0FRouterIdentityV0",
+        intent: IntentV0,
         session: ExecutionSessionV0,
         verified_grant: VerifiedAuthorityGrantV0,
-        *,
+        account_nonce: int,
+        gas_limit_ceiling: int,
+        max_fee_per_gas_ceiling: int,
+        max_priority_fee_per_gas_ceiling: int,
+        constructed_at_epoch_s: int,
         now_epoch_s: int,
-    ) -> bool:
-        """Durably admit the exact Ink V0F envelope once Level 3 is authorized.
+    ) -> ExecutionEnvelopeV0:
+        """Re-read chain truth, derive, then durably admit one Ink envelope.
 
-        The capability check intentionally runs before any database mutation.
-        Under the current RECONCILE_ONLY source ceiling this method is dormant.
+        The Level-3 capability check runs before any network read or database
+        mutation. Under the current RECONCILE_ONLY source ceiling this method
+        is dormant.
         """
 
         self._authorize(
@@ -1361,15 +1366,51 @@ class ExecutionRuntime:
             Capability.CONSTRUCT_ENVELOPE,
             now_epoch_s=now_epoch_s,
         )
-        from ..ink_v0f_preauth import assert_ink_v0f_execution_envelope_admissible
+        stored_session = self._conn.execute(
+            "SELECT identity_digest FROM execution_sessions WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        if stored_session is None:
+            raise LedgerError("Ink V0F envelope requires a durable execution session")
+        if stored_session["identity_digest"] != session.identity_digest:
+            raise EnvelopeValidationError("stored session identity disagrees")
+        if self.ledger.intent_state(intent.economic_action_id) is not IntentState.RESERVED:
+            raise EnvelopeValidationError(
+                "Ink V0F execution envelope requires a durable reservation"
+            )
 
+        from ..ink_v0f_preauth import (
+            assert_ink_v0f_execution_envelope_admissible,
+            build_ink_v0f_execution_envelope,
+            derive_live_ink_v0f_preview,
+        )
+
+        live = derive_live_ink_v0f_preview(
+            live_verifier=live_verifier,
+            policy=risk_policy,
+            router_identity=router_identity,
+            ledger=self.ledger,
+            intent=intent,
+            session=session,
+            account_nonce=account_nonce,
+            gas_limit_ceiling=gas_limit_ceiling,
+            max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
+            max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
+            constructed_at_epoch_s=constructed_at_epoch_s,
+        )
+        envelope = build_ink_v0f_execution_envelope(
+            live.preview,
+            live.router_observation,
+            session,
+        )
         assert_ink_v0f_execution_envelope_admissible(
             envelope,
-            preview,
-            router_observation,
+            live.preview,
+            live.router_observation,
             session,
             now_epoch_s=now_epoch_s,
         )
+
         values = {
             "envelope_id": envelope.envelope_id,
             "session_id": envelope.session_id,
@@ -1392,7 +1433,9 @@ class ExecutionRuntime:
             "allowance_target": envelope.allowance_target,
             "account_nonce": envelope.account_nonce,
             "gas_limit_ceiling": envelope.gas_limit_ceiling,
-            "max_fee_per_gas_ceiling_atomic": str(envelope.max_fee_per_gas_ceiling_atomic),
+            "max_fee_per_gas_ceiling_atomic": str(
+                envelope.max_fee_per_gas_ceiling_atomic
+            ),
             "max_priority_fee_per_gas_ceiling_atomic": str(
                 envelope.max_priority_fee_per_gas_ceiling_atomic
             ),
@@ -1407,20 +1450,23 @@ class ExecutionRuntime:
             session_row = self._require_session(session.session_id, conn)
             if session_row["identity_digest"] != session.identity_digest:
                 raise EnvelopeValidationError("stored session identity disagrees")
-
             action_row = self._require_economic_intent(envelope.economic_action_id, conn)
             if IntentState(action_row["state"]) is not IntentState.RESERVED:
                 raise EnvelopeValidationError(
                     "Ink V0F execution envelope requires a durable reservation"
                 )
-            bounds = self._bounds_from_intent(action_row)
-            if envelope.max_input_atomic > bounds.max_input_atomic:
+            persisted_bounds = self._bounds_from_intent(action_row)
+            if persisted_bounds != intent.bounds:
+                raise EnvelopeValidationError(
+                    "Ink V0F intent bounds changed during live preflight"
+                )
+            if envelope.max_input_atomic > persisted_bounds.max_input_atomic:
                 raise EnvelopeValidationError(
                     "Ink V0F envelope input exceeds persisted economic bounds"
                 )
             required_output = -(
-                (-bounds.min_output_atomic * envelope.max_input_atomic)
-                // bounds.max_input_atomic
+                (-persisted_bounds.min_output_atomic * envelope.max_input_atomic)
+                // persisted_bounds.max_input_atomic
             )
             if envelope.min_output_atomic < required_output:
                 raise EnvelopeValidationError(
@@ -1444,7 +1490,6 @@ class ExecutionRuntime:
                 raise EnvelopeValidationError(
                     "Ink V0F envelope instruments differ from the persisted intent"
                 )
-
             if side is Side.BUY:
                 policy_row = conn.execute(
                     "SELECT per_order_cap_atomic, global_cap_atomic FROM policies "
@@ -1461,31 +1506,37 @@ class ExecutionRuntime:
                     verified_grant=verified_grant,
                     now_epoch_s=now_epoch_s,
                 )
-
             self._economic_external_action(
                 conn,
                 envelope.economic_action_id,
                 session_id=session.session_id,
             )
-            return self._insert_or_match(
+            self._insert_or_match(
                 conn,
                 "execution_envelopes",
                 "envelope_id",
                 envelope.envelope_id,
                 values,
             )
+        return envelope
 
     def record_ink_v0f_approval_action(
         self,
-        approval: ApprovalActionV0,
-        preview: InkV0FHumanSigningPreviewV0,
-        allowance_observation: InkV0FAllowanceObservationV0,
+        *,
+        live_verifier: "InkV0FLiveVerifier",
+        risk_policy: "InkV0FRiskPolicyV0",
+        router_identity: "InkV0FRouterIdentityV0",
+        intent: IntentV0,
         session: ExecutionSessionV0,
         verified_grant: VerifiedAuthorityGrantV0,
-        *,
+        account_nonce: int,
+        gas_limit_ceiling: int,
+        max_fee_per_gas_ceiling: int,
+        max_priority_fee_per_gas_ceiling: int,
+        constructed_at_epoch_s: int,
         now_epoch_s: int,
-    ) -> bool:
-        """Durably admit the exact first-live approval once Level 3 exists."""
+    ) -> ApprovalActionV0:
+        """Re-read chain truth, derive, then admit one exact approval action."""
 
         self._authorize(
             session,
@@ -1493,11 +1544,48 @@ class ExecutionRuntime:
             Capability.AUTHORIZE_APPROVAL,
             now_epoch_s=now_epoch_s,
         )
-        from ..ink_v0f_preauth import assert_ink_v0f_approval_admissible
+        stored_session = self._conn.execute(
+            "SELECT identity_digest FROM execution_sessions WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        if stored_session is None:
+            raise LedgerError("Ink V0F approval requires a durable execution session")
+        if stored_session["identity_digest"] != session.identity_digest:
+            raise EnvelopeValidationError("stored session identity disagrees")
+        if self.ledger.intent_state(intent.economic_action_id) is not IntentState.RESERVED:
+            raise EnvelopeValidationError("Ink V0F approval requires a durable reservation")
 
+        from ..ink_v0f_preauth import (
+            assert_ink_v0f_approval_admissible,
+            build_ink_v0f_approval_action,
+            derive_live_ink_v0f_preview,
+        )
+
+        live = derive_live_ink_v0f_preview(
+            live_verifier=live_verifier,
+            policy=risk_policy,
+            router_identity=router_identity,
+            ledger=self.ledger,
+            intent=intent,
+            session=session,
+            account_nonce=account_nonce,
+            gas_limit_ceiling=gas_limit_ceiling,
+            max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
+            max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
+            constructed_at_epoch_s=constructed_at_epoch_s,
+        )
+        allowance_observation = live_verifier.observe_allowance_for_market(
+            live.market_observation,
+            token_address=live.preview.approval.token_address,
+        )
+        approval = build_ink_v0f_approval_action(
+            live.preview,
+            allowance_observation,
+            session,
+        )
         assert_ink_v0f_approval_admissible(
             approval,
-            preview,
+            live.preview,
             allowance_observation,
             session,
             now_epoch_s=now_epoch_s,
@@ -1536,8 +1624,12 @@ class ExecutionRuntime:
                 raise EnvelopeValidationError(
                     "Ink V0F approval requires a durable reservation"
                 )
-            bounds = self._bounds_from_intent(action_row)
-            if approval.requested_allowance_atomic > bounds.max_input_atomic:
+            persisted_bounds = self._bounds_from_intent(action_row)
+            if persisted_bounds != intent.bounds:
+                raise EnvelopeValidationError(
+                    "Ink V0F intent bounds changed during live preflight"
+                )
+            if approval.requested_allowance_atomic > persisted_bounds.max_input_atomic:
                 raise EnvelopeValidationError(
                     "Ink V0F approval exceeds persisted economic bounds"
                 )
@@ -1552,7 +1644,6 @@ class ExecutionRuntime:
                 raise EnvelopeValidationError(
                     "Ink V0F approval token differs from the persisted intent"
                 )
-
             inserted = self._insert_or_match(
                 conn,
                 "approval_actions",
@@ -1574,7 +1665,7 @@ class ExecutionRuntime:
                 approval.approval_action_id,
                 external,
             )
-            return inserted
+        return approval
 
     def record_signed_transaction_metadata(
         self,

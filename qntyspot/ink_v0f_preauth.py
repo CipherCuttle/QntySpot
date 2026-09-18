@@ -24,10 +24,15 @@ from .errors import (
 from .execution_contract import ApprovalActionV0, ExecutionEnvelopeV0, ExecutionSessionV0
 from .ink import (
     INK_CHAIN_ID,
+    INK_RPC_ENDPOINTS,
+    INKYSWAP_V2_BYTECODE_SHA256,
     INKYSWAP_V2_FACTORY,
+    INKYSWAP_V2_POOL,
     KRAKMASK_ADDRESS,
     WETH9_ADDRESS,
     InkMarketObservationV0,
+    InkQuoteV0,
+    InkShadowAdapter,
     JsonRpcClient,
 )
 from .ink_v0f_execution import (
@@ -37,8 +42,11 @@ from .ink_v0f_execution import (
     INK_V0F_TAKER_ADDRESS,
     InkV0FHumanSigningPreviewV0,
     InkV0FRouterIdentityV0,
+    build_ink_v0f_human_signing_preview,
 )
+from .ink_v0f_risk import InkV0FRiskPolicyV0
 from .keccak import keccak256
+from .ledger.store import SpotLedger
 
 ROUTER_FACTORY_SELECTOR = keccak256(b"factory()")[:4]
 ROUTER_WETH_SELECTOR = keccak256(b"WETH()")[:4]
@@ -197,6 +205,10 @@ class InkV0FLiveVerifier:
     ) -> None:
         if len(providers) != 2:
             raise SafeHaltError("Ink V0F live verifier requires exactly two RPC providers")
+        if tuple(provider.endpoint for provider in providers) != INK_RPC_ENDPOINTS:
+            raise SafeHaltError(
+                "Ink V0F live verifier requires the canonical Ink RPC endpoints"
+            )
         if type(router_identity) is not InkV0FRouterIdentityV0:
             raise AuthorityVerificationError("Ink V0F live verifier requires a verified router identity")
         if (
@@ -215,6 +227,17 @@ class InkV0FLiveVerifier:
         self.router_identity = router_identity
         self.max_head_lag_blocks = max_head_lag_blocks
         self.max_observation_age_blocks = max_observation_age_blocks
+
+    def observe_market(self) -> InkMarketObservationV0:
+        """Read the frozen pool from the canonical two providers."""
+
+        adapter = InkShadowAdapter(
+            self.providers,
+            expected_bytecode_sha256=INKYSWAP_V2_BYTECODE_SHA256,
+            max_head_lag_blocks=self.max_head_lag_blocks,
+            max_observation_age_blocks=self.max_observation_age_blocks,
+        )
+        return adapter.observe()
 
     def _heads_for_market(self, market: InkMarketObservationV0) -> list[int]:
         if type(market) is not InkMarketObservationV0:
@@ -361,6 +384,79 @@ class InkV0FLiveVerifier:
             },
             provider_evidence=tuple(evidence),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InkV0FLivePreviewV0:
+    market_observation: InkMarketObservationV0
+    quote: InkQuoteV0
+    router_observation: InkV0FRouterObservationV0
+    preview: InkV0FHumanSigningPreviewV0
+
+    def __post_init__(self) -> None:
+        if self.quote.observation_digest != self.market_observation.digest():
+            raise SafeHaltError("Ink V0F live quote is not bound to its market observation")
+        if self.router_observation.common_block != self.market_observation.common_block:
+            raise SafeHaltError("Ink V0F live router observation is not on the market block")
+        if self.preview.quote_observation_digest != self.market_observation.digest():
+            raise SafeHaltError("Ink V0F live preview is not bound to the market observation")
+        if self.preview.quote_common_block != self.market_observation.common_block:
+            raise SafeHaltError("Ink V0F live preview is not on the market block")
+
+
+def derive_live_ink_v0f_preview(
+    *,
+    live_verifier: InkV0FLiveVerifier,
+    policy: InkV0FRiskPolicyV0,
+    router_identity: InkV0FRouterIdentityV0,
+    ledger: SpotLedger,
+    intent: IntentV0,
+    session: ExecutionSessionV0,
+    account_nonce: int,
+    gas_limit_ceiling: int,
+    max_fee_per_gas_ceiling: int,
+    max_priority_fee_per_gas_ceiling: int,
+    constructed_at_epoch_s: int,
+) -> InkV0FLivePreviewV0:
+    """Re-read market/router truth and deterministically rebuild the preview."""
+
+    if type(live_verifier) is not InkV0FLiveVerifier:
+        raise AuthorityVerificationError("Ink V0F live preview requires the canonical live verifier")
+    if live_verifier.router_identity != router_identity:
+        raise AuthorityVerificationError("Ink V0F live verifier/router identity mismatch")
+    market = live_verifier.observe_market()
+    effective_impact_bps = min(
+        policy.max_price_impact_bps,
+        intent.bounds.max_price_impact_bps,
+    )
+    selected_input = InkShadowAdapter.impact_capped_input_atomic(
+        market,
+        intent.bounds.side,
+        desired_input_atomic=intent.bounds.max_input_atomic,
+        max_price_impact_bps=effective_impact_bps,
+    )
+    quote = InkShadowAdapter._quote(market, intent.bounds.side, selected_input)
+    router_observation = live_verifier.observe_router_for_market(market)
+    preview = build_ink_v0f_human_signing_preview(
+        policy=policy,
+        router=router_identity,
+        observation=market,
+        quote=quote,
+        ledger=ledger,
+        intent=intent,
+        session=session,
+        account_nonce=account_nonce,
+        gas_limit_ceiling=gas_limit_ceiling,
+        max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
+        max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
+        constructed_at_epoch_s=constructed_at_epoch_s,
+    )
+    return InkV0FLivePreviewV0(
+        market_observation=market,
+        quote=quote,
+        router_observation=router_observation,
+        preview=preview,
+    )
 
 
 def build_ink_v0f_execution_envelope(

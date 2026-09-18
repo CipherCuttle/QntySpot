@@ -46,3 +46,23 @@ swap. Non-zero standing allowance fails closed for this first dust phase.
 The runtime persistence entrypoints remain guarded by
 `CONSTRUCT_ENVELOPE` / `AUTHORIZE_APPROVAL`. Since the binding source
 ceiling is still Level 1, these entrypoints are unreachable in this phase.
+
+
+## Level-3 persistence trust boundary
+
+The durable runtime does not accept a caller-built preview, router observation,
+or allowance observation. Once Level 3 is separately authorized, the runtime
+entrypoint must first pass the effective-authority gate and then:
+
+1. re-read the frozen pool through the canonical two Ink RPC endpoints;
+2. choose impact-capped input from the durable intent using the stricter local
+   and external impact ceiling;
+3. recompute the V2 quote;
+4. verify the router at the same market block;
+5. rebuild the human-signing preview from durable ledger state;
+6. for approvals, re-read allowance at that same block;
+7. re-check the durable reservation/bounds inside the write transaction before
+   committing the envelope or approval.
+
+This prevents a preconstructed Python record from substituting for live venue
+verification at the eventual Level-3 persistence boundary.

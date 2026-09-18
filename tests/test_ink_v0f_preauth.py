@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from dataclasses import replace
 
@@ -21,6 +22,7 @@ from qntyspot.execution_contract import (
 from qntyspot.ledger import ExecutionRuntime
 from qntyspot.ink import (
     INK_CHAIN_ID,
+    INK_RPC_ENDPOINTS,
     INKYSWAP_V2_FACTORY,
     INKYSWAP_V2_POOL,
     KRAKMASK_ADDRESS,
@@ -133,7 +135,7 @@ def market_observation() -> InkMarketObservationV0:
         token0=KRAKMASK_ADDRESS,
         token1=WETH9_ADDRESS,
         common_block=100,
-        provider_heads={"https://rpc-a.invalid": 105, "https://rpc-b.invalid": 104},
+        provider_heads={INK_RPC_ENDPOINTS[0]: 105, INK_RPC_ENDPOINTS[1]: 104},
         bytecode_present=True,
         bytecode_sha256="11" * 32,
         bytecode_length=1,
@@ -153,8 +155,8 @@ def verifier(monkeypatch, *, first: FakeRpc | None = None, second: FakeRpc | Non
     b = second or FakeRpc(head=104)
     return InkV0FLiveVerifier(
         (
-            JsonRpcClient("https://rpc-a.invalid", transport=a),
-            JsonRpcClient("https://rpc-b.invalid", transport=b),
+            JsonRpcClient(INK_RPC_ENDPOINTS[0], transport=a),
+            JsonRpcClient(INK_RPC_ENDPOINTS[1], transport=b),
         ),
         fake_router_identity(),
     ), a, b
@@ -263,7 +265,7 @@ def test_stale_market_block_fails_closed(monkeypatch) -> None:
     live, _, _ = verifier(monkeypatch, first=FakeRpc(head=200), second=FakeRpc(head=199))
     market = replace(
         market_observation(),
-        provider_heads={"https://rpc-a.invalid": 200, "https://rpc-b.invalid": 199},
+        provider_heads={INK_RPC_ENDPOINTS[0]: 200, INK_RPC_ENDPOINTS[1]: 199},
     )
     with pytest.raises(SafeHaltError, match="too old"):
         live.observe_router_for_market(market)
@@ -318,3 +320,20 @@ def test_preauth_runtime_methods_remain_dormant_at_level_one() -> None:
     assert Capability.AUTHORIZE_APPROVAL not in LADDER[PHASE_GRANTED_AUTHORITY_LEVEL]
     assert hasattr(ExecutionRuntime, "record_ink_v0f_execution_envelope")
     assert hasattr(ExecutionRuntime, "record_ink_v0f_approval_action")
+
+
+def test_persistence_api_cannot_accept_caller_built_preview_or_router_observation() -> None:
+    envelope_params = inspect.signature(
+        ExecutionRuntime.record_ink_v0f_execution_envelope
+    ).parameters
+    approval_params = inspect.signature(
+        ExecutionRuntime.record_ink_v0f_approval_action
+    ).parameters
+    for params in (envelope_params, approval_params):
+        assert "preview" not in params
+        assert "router_observation" not in params
+        assert "allowance_observation" not in params
+        assert "live_verifier" in params
+        assert "risk_policy" in params
+        assert "router_identity" in params
+        assert "intent" in params
