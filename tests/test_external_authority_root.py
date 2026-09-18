@@ -355,14 +355,15 @@ def test_higher_external_grant_cannot_escape_shadow_source_ceiling(
         )
 
 
-def test_current_level_three_source_ceiling_clips_a_higher_external_grant(
+def test_current_level_three_source_ceiling_clips_higher_non_ink_runtime_scope(
     trusted_root: TrustedAuthorityRootV0,
 ) -> None:
     high = _receipt(AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER)
+    sess = _session(high)
     verified = verify_authority_grant(
         receipt=high,
         trusted_root=trusted_root,
-        session=_session(high),
+        session=sess,
         now_epoch_s=NOW,
     )
     assert PHASE_GRANTED_AUTHORITY_LEVEL is AuthorityLevel.HUMAN_SIGNED_EXECUTION
@@ -371,14 +372,25 @@ def test_current_level_three_source_ceiling_clips_a_higher_external_grant(
         verified_grant=verified,
         now_epoch_s=NOW,
     ) is AuthorityLevel.HUMAN_SIGNED_EXECUTION
+
+    with pytest.raises(AuthorityVerificationError, match="exact execution session"):
+        effective_capabilities(
+            source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+            verified_grant=verified,
+            now_epoch_s=NOW,
+        )
+
     permitted = effective_capabilities(
         source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
         verified_grant=verified,
         now_epoch_s=NOW,
+        session=sess,
     )
-    assert Capability.SUBMIT_EXACT_BYTES in permitted
-    assert Capability.CONSTRUCT_ENVELOPE in permitted
-    assert Capability.AUTHORIZE_APPROVAL in permitted
+    assert permitted == LADDER[AuthorityLevel.RECONCILE_ONLY]
+    assert Capability.RECONCILE in permitted
+    assert Capability.SUBMIT_EXACT_BYTES not in permitted
+    assert Capability.CONSTRUCT_ENVELOPE not in permitted
+    assert Capability.AUTHORIZE_APPROVAL not in permitted
     assert Capability.PRODUCE_SIGNATURE not in permitted
 
 
