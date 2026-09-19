@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ import pytest
 import qntyspot.ink_v0f_native as native
 from qntyspot.domain import Side
 from qntyspot.economics import build_intent
-from qntyspot.errors import SafeHaltError
+from qntyspot.errors import EnvelopeValidationError, SafeHaltError
 from qntyspot.execution_contract import ExecutionSessionV0
 from qntyspot.ink import (
     INK_CHAIN_ID,
@@ -325,6 +326,14 @@ def test_live_native_revalidation_preserves_frozen_transaction(monkeypatch) -> N
     assert fields["data"] == "0x" + preview.calldata.hex()
     assert revalidation.preview.scope.scope_digest == preview.scope.scope_digest
 
+    with pytest.raises(EnvelopeValidationError, match="frozen envelope identity"):
+        native.validate_ink_v0f_native_signed_buy(
+            revalidation,
+            replace(envelope, deadline_epoch_s=envelope.deadline_epoch_s + 1),
+            b"not-signed-bytes",
+            admitted_at_epoch_s=NOW + 3,
+        )
+
 
 
 def test_native_revalidation_refuses_balance_below_input_plus_gas(monkeypatch) -> None:
@@ -388,5 +397,28 @@ def test_native_revalidation_refuses_balance_below_input_plus_gas(monkeypatch) -
             intent=intent,
             session=sess,
             envelope=envelope,
+            now_epoch_s=NOW + 2,
+        )
+
+
+
+def test_native_revalidation_refuses_cross_action_envelope_before_rpc() -> None:
+    ledger, _, intent, risk, router, _, sess, _, envelope = build_preview_and_envelope()
+    verifier = InkV0FLiveVerifier(
+        (
+            JsonRpcClient(INK_RPC_ENDPOINTS[0], transport=lambda _: b""),
+            JsonRpcClient(INK_RPC_ENDPOINTS[1], transport=lambda _: b""),
+        ),
+        router,
+    )
+    with pytest.raises(SafeHaltError, match="another economic action"):
+        native.revalidate_ink_v0f_native_same_amount(
+            live_verifier=verifier,
+            risk_policy=risk,
+            router_identity=router,
+            ledger=ledger,
+            intent=intent,
+            session=sess,
+            envelope=replace(envelope, economic_action_id="aa" * 32),
             now_epoch_s=NOW + 2,
         )
