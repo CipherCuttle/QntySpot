@@ -510,7 +510,12 @@ def test_full_cap_reservation_is_not_double_counted_during_preauth(
     assert ledger.held_atomic() == cap
 
     live, _, _ = verifier(monkeypatch)
-    monkeypatch.setattr(live, "observe_market", lambda: market_observation())
+    constrained_market = replace(
+        market_observation(),
+        reserve0_atomic=10**17,
+        reserve1_atomic=10**17,
+    )
+    monkeypatch.setattr(live, "observe_market", lambda: constrained_market)
     risk = InkV0FRiskPolicyV0(
         repository_identity="CipherCuttle/QntySpot",
         network_id="evm:57073",
@@ -542,7 +547,7 @@ def test_full_cap_reservation_is_not_double_counted_during_preauth(
         now_epoch_s=1_800_000_001,
     )
     assert approval.requested_allowance_atomic == envelope.max_input_atomic
-    assert envelope.max_input_atomic <= cap
+    assert 0 < envelope.max_input_atomic < cap
     assert ledger.held_atomic() == cap
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM approval_actions"
