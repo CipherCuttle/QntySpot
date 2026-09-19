@@ -302,3 +302,75 @@ def assert_ink_v0f_entry_admissible(
         raise LevelNotExecutableError("Ink V0F cumulative entry capital exceeds the dust cap")
 
     assert_new_entry_concurrency(policy.concurrency, concurrency_snapshot)
+
+
+
+def assert_ink_v0f_exit_admissible(
+    policy: InkV0FRiskPolicyV0,
+    *,
+    observation: InkMarketObservationV0,
+    quote: InkQuoteV0,
+    bounds: EconomicBounds,
+    settled_inventory_base_atomic: int,
+) -> None:
+    """Bind one proposed EXIT to canonical Ink evidence and settled inventory."""
+
+    if type(policy) is not InkV0FRiskPolicyV0:
+        raise AuthorityVerificationError("Ink V0F policy object is not verified")
+    if type(observation) is not InkMarketObservationV0:
+        raise AuthorityVerificationError("Ink V0F exit requires an Ink market observation")
+    if type(quote) is not InkQuoteV0:
+        raise AuthorityVerificationError("Ink V0F exit requires an Ink quote")
+    if type(bounds) is not EconomicBounds:
+        raise AuthorityVerificationError("Ink V0F exit requires committed economic bounds")
+    if InkShadowAdapter.venue_id != policy.venue_id:
+        raise AuthorityVerificationError("Ink adapter venue identity differs from frozen risk")
+
+    if observation.chain_id != 57_073:
+        raise LevelNotExecutableError("Ink V0F exit observation is outside frozen network")
+    if observation.pool_address != policy.pool_address:
+        raise LevelNotExecutableError("Ink V0F exit observation is outside frozen pool")
+    expected_base_address = policy.base_instrument_id.rsplit(":", 1)[1]
+    expected_quote_address = policy.quote_instrument_id.rsplit(":", 1)[1]
+    if (
+        observation.token0 != expected_base_address
+        or observation.token1 != expected_quote_address
+    ):
+        raise LevelNotExecutableError("Ink V0F exit token pair is outside frozen scope")
+    if (
+        quote.observation_digest != observation.digest()
+        or quote.common_block != observation.common_block
+    ):
+        raise LevelNotExecutableError("Ink V0F exit quote is not bound to observation")
+    if bounds.side is not Side.SELL or quote.side is not Side.SELL:
+        raise LevelNotExecutableError("Ink V0F exit requires SELL")
+    canonical_quote = InkShadowAdapter._quote(
+        observation,
+        Side.SELL,
+        quote.input_atomic,
+    )
+    if quote != canonical_quote:
+        raise LevelNotExecutableError("Ink V0F exit quote does not match canonical reserve-derived quote")
+    if bounds.input_instrument_id != policy.base_instrument_id:
+        raise LevelNotExecutableError("Ink V0F exit input instrument is outside frozen scope")
+    if bounds.output_instrument_id != policy.quote_instrument_id:
+        raise LevelNotExecutableError("Ink V0F exit output instrument is outside frozen scope")
+    if bounds.max_price_impact_bps > policy.max_price_impact_bps:
+        raise LevelNotExecutableError("Ink V0F exit price-impact ceiling exceeds frozen risk")
+    if bounds.max_slippage_bps > policy.max_slippage_bps:
+        raise LevelNotExecutableError("Ink V0F exit slippage ceiling exceeds frozen risk")
+    if quote.input_atomic <= 0 or quote.input_atomic > bounds.max_input_atomic:
+        raise LevelNotExecutableError("Ink V0F exit quote input exceeds committed bounds")
+    if (
+        quote.price_impact_bps < 0
+        or quote.price_impact_bps > policy.max_price_impact_bps
+        or quote.price_impact_bps > bounds.max_price_impact_bps
+    ):
+        raise LevelNotExecutableError("Ink V0F exit quoted impact exceeds admissible ceiling")
+    if (
+        type(settled_inventory_base_atomic) is not int
+        or isinstance(settled_inventory_base_atomic, bool)
+        or settled_inventory_base_atomic < quote.input_atomic
+    ):
+        raise LevelNotExecutableError("Ink V0F exit exceeds settled base inventory")
+

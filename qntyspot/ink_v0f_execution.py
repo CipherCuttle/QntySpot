@@ -35,6 +35,7 @@ from .ink_v0f_risk import (
     INK_V0F_VENUE_ID,
     InkV0FRiskPolicyV0,
     assert_ink_v0f_entry_admissible,
+    assert_ink_v0f_exit_admissible,
 )
 from .keccak import keccak256
 from .ledger.store import SpotLedger

@@ -41,6 +41,8 @@ def test_historical_deployment_identity_artifact_is_preserved() -> None:
             "qntyspot/ink_v0f_preauth.py",
             "qntyspot/ink_v0f_human_signing.py",
             "qntyspot/ink_v0f_signed_swap.py",
+            "qntyspot/ink_v0f_native.py",
+            "qntyspot/ink_v0f_native_sell.py",
             "qntyspot/ink_v0f_risk.py",
             "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json",
             "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.sha256",
@@ -122,6 +124,18 @@ def test_current_identity_includes_ink_v0f_signed_swap_rehearsal() -> None:
     identity = build_identity(ROOT, CANONICAL_COMMIT)
     paths = [item["path"] for item in identity["implementation_identity"]["file_manifest"]]
     assert "qntyspot/ink_v0f_signed_swap.py" in paths
+
+
+def test_current_identity_includes_ink_v0f_native_buy() -> None:
+    identity = build_identity(ROOT, CANONICAL_COMMIT)
+    paths = [item["path"] for item in identity["implementation_identity"]["file_manifest"]]
+    assert "qntyspot/ink_v0f_native.py" in paths
+
+
+def test_current_identity_includes_ink_v0f_native_sell() -> None:
+    identity = build_identity(ROOT, CANONICAL_COMMIT)
+    paths = [item["path"] for item in identity["implementation_identity"]["file_manifest"]]
+    assert "qntyspot/ink_v0f_native_sell.py" in paths
 
 
 def test_identity_is_independent_of_host_path_and_timestamps(tmp_path: Path) -> None:
