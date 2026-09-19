@@ -117,10 +117,12 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
 
 
 def _decimal_text(value: Decimal) -> str:
-    # QntySpot canonical decimals permit at most 30 fractional digits.
-    # Round only policy display/bound values; live reserve-derived quote math
-    # remains exact and the frozen 50-bps output floor remains authoritative.
-    quantum = Decimal(1).scaleb(-30)
+    # Policy trigger prices are later widened by basis-point arithmetic.
+    # Leave two decimal places of canonical headroom so a 50-bps (1/200)
+    # multiplier still serializes within QntySpot's 30-fractional-digit limit.
+    # Live reserve-derived quote math remains exact and the frozen 50-bps
+    # output floor remains authoritative.
+    quantum = Decimal(1).scaleb(-28)
     rounded = value.quantize(quantum, rounding=ROUND_HALF_EVEN)
     text = format(rounded, "f").rstrip("0").rstrip(".")
     return text if text else "0"
