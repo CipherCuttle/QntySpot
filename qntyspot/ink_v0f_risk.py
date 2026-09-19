@@ -350,7 +350,7 @@ def assert_ink_v0f_exit_admissible(
         quote.input_atomic,
     )
     if quote != canonical_quote:
-        raise LevelNotExecutableError("Ink V0F exit quote is not canonical")
+        raise LevelNotExecutableError("Ink V0F exit quote does not match canonical reserve-derived quote")
     if bounds.input_instrument_id != policy.base_instrument_id:
         raise LevelNotExecutableError("Ink V0F exit input instrument is outside frozen scope")
     if bounds.output_instrument_id != policy.quote_instrument_id:
