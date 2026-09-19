@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from dataclasses import fields
@@ -56,9 +57,21 @@ EXPECTED_TRUST_CONFIG_DIGEST = (
 EXPECTED_MAX_INPUT_ATOMIC = 10**15
 VENUE_ID = "inkyswap-v2-ink-mainnet"
 
-ROOT = Path(__file__).resolve().parents[1]
-ROUTER_ARTIFACT = ROOT / "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json"
-RISK_ARTIFACT = ROOT / "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json"
+def _assert_bound_qntyspot_root(root: Path) -> None:
+    if not root.is_dir():
+        raise RuntimeError("explicit QntySpot root is not a directory")
+    try:
+        head = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception as exc:
+        raise RuntimeError("explicit QntySpot root is not a readable Git checkout") from exc
+    if head != BOUND_REPOSITORY_COMMIT:
+        raise RuntimeError(
+            f"QntySpot worktree HEAD {head} is not bound commit {BOUND_REPOSITORY_COMMIT}"
+        )
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -82,12 +95,17 @@ def _session_object(session: ExecutionSessionV0) -> dict[str, object]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--qntyspot-root", required=True)
     parser.add_argument("--authority-root", required=True)
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--ledger", required=True)
     args = parser.parse_args()
 
     now = int(time.time())
+    qntyspot_root = Path(args.qntyspot_root).resolve()
+    _assert_bound_qntyspot_root(qntyspot_root)
+    router_artifact = qntyspot_root / "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json"
+    risk_artifact = qntyspot_root / "artifacts/authority_root/INK_V0F_DUST_RISK_POLICY_V0.json"
     authority_root = Path(args.authority_root).resolve()
     receipt_path = Path(args.receipt).resolve()
     ledger_path = Path(args.ledger).resolve()
@@ -131,8 +149,8 @@ def main() -> int:
         anchor_bytes=anchor_path.read_bytes(),
     )
 
-    router_identity = consume_ink_v0f_router_artifact(ROUTER_ARTIFACT.read_bytes())
-    risk_policy = consume_ink_v0f_risk_artifact(RISK_ARTIFACT.read_bytes())
+    router_identity = consume_ink_v0f_router_artifact(router_artifact.read_bytes())
+    risk_policy = consume_ink_v0f_risk_artifact(risk_artifact.read_bytes())
     providers = tuple(JsonRpcClient(endpoint) for endpoint in INK_RPC_ENDPOINTS)
     live = InkV0FLiveVerifier(providers, router_identity)
 
@@ -305,6 +323,7 @@ def main() -> int:
 
     state = {
         "schema": "qntyspot.ops.ink_v0f_native_first_live.prepared.v0",
+        "qntyspot_root": str(qntyspot_root),
         "authority_root": str(authority_root),
         "receipt": str(receipt_path),
         "ledger": str(ledger_path),
