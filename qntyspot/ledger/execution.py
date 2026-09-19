@@ -1573,10 +1573,16 @@ class ExecutionRuntime:
                     raise LedgerError(
                         "Ink V0F durable reservation exceeds canonical held capital"
                     )
-                other_held_atomic = total_held_atomic - current_reservation_atomic
+                if envelope.max_input_atomic > current_reservation_atomic:
+                    raise AuthorityCeilingError(
+                        "Ink V0F preauth input exceeds the current durable reservation"
+                    )
+                held_excluding_requested_atomic = (
+                    total_held_atomic - envelope.max_input_atomic
+                )
                 assert_effective_capital_within(
                     requested_atomic=envelope.max_input_atomic,
-                    held_atomic=other_held_atomic,
+                    held_atomic=held_excluding_requested_atomic,
                     local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
                     local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
                     verified_grant=verified_grant,
