@@ -22,6 +22,7 @@ from qntyspot.execution_contract import (
     AuthorityLevel,
     AuthorityPolicyRefV0,
     ExecutionSessionV0,
+    FinalityPolicyV0,
 )
 from qntyspot.ink import (
     INK_CHAIN_ID,
@@ -559,3 +560,119 @@ def test_native_buy_preauth_is_durable_and_has_zero_approval_rows(monkeypatch) -
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM approval_actions"
     ).fetchone()[0] == 0
+
+
+
+def _durable_native_preauth_for_exact_bytes(monkeypatch):
+    runtime, ledger, intent, sess, verified = authorized_runtime_for_native_buy()
+    risk = consume_ink_v0f_risk_artifact(RISK_ARTIFACT.read_bytes())
+    router = consume_ink_v0f_router_artifact(ROUTER_ARTIFACT.read_bytes())
+    obs = observation()
+    verifier = InkV0FLiveVerifier(
+        (
+            JsonRpcClient(INK_RPC_ENDPOINTS[0], transport=lambda _: b""),
+            JsonRpcClient(INK_RPC_ENDPOINTS[1], transport=lambda _: b""),
+        ),
+        router,
+    )
+    ro = router_observation(router, obs)
+    monkeypatch.setattr(InkV0FLiveVerifier, "observe_market", lambda self: obs)
+    monkeypatch.setattr(
+        InkV0FLiveVerifier,
+        "observe_router_for_market",
+        lambda self, market: ro,
+    )
+    envelope = runtime.record_ink_v0f_native_buy_preauth(
+        live_verifier=verifier,
+        risk_policy=risk,
+        router_identity=router,
+        intent=intent,
+        session=sess,
+        verified_grant=verified,
+        account_nonce=0,
+        gas_limit_ceiling=250_000,
+        max_fee_per_gas_ceiling=2_000_000_000,
+        max_priority_fee_per_gas_ceiling=100_000_000,
+        constructed_at_epoch_s=NOW + 1,
+        now_epoch_s=NOW + 1,
+    )
+    return runtime, ledger, intent, sess, envelope
+
+
+def test_exact_bytes_scope_must_match_durable_authorized_native_envelope(monkeypatch) -> None:
+    runtime, ledger, intent, _sess, envelope = _durable_native_preauth_for_exact_bytes(
+        monkeypatch
+    )
+    row = ledger.connection.execute(
+        "SELECT * FROM execution_envelopes WHERE economic_action_id = ?",
+        (intent.economic_action_id,),
+    ).fetchone()
+    assert row is not None
+    scope = runtime._exact_scope_from_authorized_envelope(row)
+    resolved = runtime._authorized_envelope_for_exact_scope(
+        ledger.connection,
+        scope,
+    )
+    assert resolved["envelope_id"] == envelope.envelope_id
+
+    with pytest.raises(EnvelopeValidationError, match="durable AUTHORIZED envelope"):
+        runtime._authorized_envelope_for_exact_scope(
+            ledger.connection,
+            replace(scope, calldata_sha256="00" * 32),
+        )
+
+
+def test_exact_bytes_truth_resolves_null_row_link_to_authorized_envelope(monkeypatch) -> None:
+    runtime, ledger, intent, sess, envelope = _durable_native_preauth_for_exact_bytes(
+        monkeypatch
+    )
+    envelope_row = ledger.connection.execute(
+        "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
+        (envelope.envelope_id,),
+    ).fetchone()
+    assert envelope_row is not None
+    scope = runtime._exact_scope_from_authorized_envelope(envelope_row)
+
+    signed_id = "exact-native-live-test"
+    ledger.connection.execute(
+        """
+        INSERT INTO signed_transactions (
+            signed_transaction_id, external_action_id, session_id, envelope_id,
+            approval_action_id, origin, chain_id, taker_address, account_nonce,
+            raw_signed_sha256, raw_signed_length, transaction_hash, scope_digest,
+            signer_identity, frozen_at_epoch_s
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            signed_id,
+            intent.economic_action_id,
+            sess.session_id,
+            None,
+            None,
+            "EXTERNAL_SIGNED_BYTES",
+            sess.chain_id,
+            sess.taker_address,
+            envelope.account_nonce,
+            "ab" * 32,
+            1,
+            "0x" + "cd" * 32,
+            scope.scope_digest,
+            "evm-recovered:" + sess.taker_address,
+            NOW + 2,
+        ),
+    )
+
+    _truth, binding, resolved, _expectation = runtime._truth_for_action(
+        ledger.connection,
+        intent.economic_action_id,
+        signed_id=signed_id,
+        external_ref_id=None,
+        finality=FinalityPolicyV0(
+            min_confirmation_depth=1,
+            min_agreeing_providers=1,
+        ),
+    )
+    assert binding["origin"] == "EXTERNAL_SIGNED_BYTES"
+    assert binding["envelope_id"] is None
+    assert resolved is not None
+    assert resolved["envelope_id"] == envelope.envelope_id

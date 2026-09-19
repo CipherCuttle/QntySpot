@@ -630,6 +630,56 @@ class ExecutionRuntime:
                 values,
             )
 
+    @staticmethod
+    def _exact_scope_from_authorized_envelope(
+        envelope: Mapping[str, Any],
+    ) -> ExactSignedBytesScopeV0:
+        if envelope["lifecycle"] != "AUTHORIZED":
+            raise LedgerError("exact signed-byte path requires an AUTHORIZED envelope")
+        return ExactSignedBytesScopeV0(
+            session_id=envelope["session_id"],
+            session_identity_digest=envelope["session_identity_digest"],
+            economic_action_id=envelope["economic_action_id"],
+            authority_policy_digest=envelope["authority_policy_digest"],
+            chain_id=envelope["chain_id"],
+            taker_address=envelope["taker_address"],
+            target_address=envelope["transaction_to"],
+            min_value_atomic=int(envelope["transaction_value_atomic"]),
+            max_value_atomic=int(envelope["transaction_value_atomic"]),
+            calldata_sha256=envelope["calldata_sha256"],
+            calldata_length=envelope["calldata_length"],
+            account_nonce=envelope["account_nonce"],
+            gas_limit_ceiling=envelope["gas_limit_ceiling"],
+            max_fee_per_gas_ceiling=int(
+                envelope["max_fee_per_gas_ceiling_atomic"]
+            ),
+            max_priority_fee_per_gas_ceiling=int(
+                envelope["max_priority_fee_per_gas_ceiling_atomic"]
+            ),
+        )
+
+    def _authorized_envelope_for_exact_scope(
+        self,
+        conn: sqlite3.Connection,
+        scope: ExactSignedBytesScopeV0,
+    ) -> Mapping[str, Any]:
+        rows = conn.execute(
+            "SELECT * FROM execution_envelopes "
+            "WHERE economic_action_id = ? AND lifecycle = 'AUTHORIZED'",
+            (scope.economic_action_id,),
+        ).fetchall()
+        if len(rows) != 1:
+            raise LedgerError(
+                "exact signed-byte admission requires exactly one AUTHORIZED envelope"
+            )
+        envelope = rows[0]
+        expected_scope = self._exact_scope_from_authorized_envelope(envelope)
+        if expected_scope.scope_digest != scope.scope_digest:
+            raise EnvelopeValidationError(
+                "exact signed-byte scope differs from the durable AUTHORIZED envelope"
+            )
+        return envelope
+
     def admit_exact_signed_bytes(
         self,
         scope: ExactSignedBytesScopeV0,
@@ -682,6 +732,33 @@ class ExecutionRuntime:
             ).fetchone()
             if external is None or external["kind"] != "ECONOMIC":
                 raise LedgerError("exact signed-byte admission requires an economic action")
+            if external["session_id"] != session.session_id:
+                raise AuthorityVerificationError(
+                    "exact signed-byte economic action is bound to another session"
+                )
+            envelope = self._authorized_envelope_for_exact_scope(conn, scope)
+            if validated.parsed.target_address != envelope["transaction_to"]:
+                raise EnvelopeValidationError(
+                    "exact signed bytes target differs from durable envelope"
+                )
+            if validated.parsed.value_atomic != int(
+                envelope["transaction_value_atomic"]
+            ):
+                raise EnvelopeValidationError(
+                    "exact signed bytes value differs from durable envelope"
+                )
+            if sha256_hex(validated.parsed.calldata) != envelope["calldata_sha256"]:
+                raise EnvelopeValidationError(
+                    "exact signed bytes calldata differs from durable envelope"
+                )
+            if len(validated.parsed.calldata) != envelope["calldata_length"]:
+                raise EnvelopeValidationError(
+                    "exact signed bytes calldata length differs from durable envelope"
+                )
+            if validated.parsed.account_nonce != envelope["account_nonce"]:
+                raise EnvelopeValidationError(
+                    "exact signed bytes nonce differs from durable envelope"
+                )
             existing = conn.execute(
                 "SELECT * FROM signed_transactions WHERE external_action_id = ?",
                 (scope.economic_action_id,),
@@ -2362,10 +2439,45 @@ class ExecutionRuntime:
             ).fetchone()
             if binding is None or binding["external_action_id"] != action_id:
                 raise LedgerError("signed transaction is not bound to the external action")
-            envelope = conn.execute(
-                "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
-                (binding["envelope_id"],),
-            ).fetchone()
+            if binding["envelope_id"] is not None:
+                envelope = conn.execute(
+                    "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
+                    (binding["envelope_id"],),
+                ).fetchone()
+            elif binding["origin"] == "EXTERNAL_SIGNED_BYTES":
+                rows = conn.execute(
+                    "SELECT * FROM execution_envelopes "
+                    "WHERE economic_action_id = ? AND lifecycle = 'AUTHORIZED'",
+                    (action_id,),
+                ).fetchall()
+                if len(rows) != 1:
+                    raise LedgerError(
+                        "exact signed transaction requires exactly one AUTHORIZED envelope"
+                    )
+                envelope = rows[0]
+                if envelope["session_id"] != binding["session_id"]:
+                    raise AuthorityVerificationError(
+                        "exact signed transaction session differs from durable envelope"
+                    )
+                if envelope["chain_id"] != binding["chain_id"]:
+                    raise AuthorityVerificationError(
+                        "exact signed transaction chain differs from durable envelope"
+                    )
+                if envelope["taker_address"] != binding["taker_address"]:
+                    raise AuthorityVerificationError(
+                        "exact signed transaction taker differs from durable envelope"
+                    )
+                if envelope["account_nonce"] != binding["account_nonce"]:
+                    raise AuthorityVerificationError(
+                        "exact signed transaction nonce differs from durable envelope"
+                    )
+                expected_scope = self._exact_scope_from_authorized_envelope(envelope)
+                if expected_scope.scope_digest != binding["scope_digest"]:
+                    raise AuthorityVerificationError(
+                        "exact signed transaction scope differs from durable envelope"
+                    )
+            else:
+                envelope = None
             if envelope is None:
                 raise LedgerError("economic signed transaction has no envelope")
             acknowledged = conn.execute(
