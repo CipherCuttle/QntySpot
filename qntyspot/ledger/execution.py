@@ -1563,9 +1563,20 @@ class ExecutionRuntime:
                 ).fetchone()
                 if policy_row is None:
                     raise LedgerError("Ink V0F preauth policy is not admitted")
+                total_held_atomic = self.ledger.held_atomic()
+                current_reservation_atomic = int(action_row["quote_exposure_atomic"])
+                if current_reservation_atomic <= 0:
+                    raise LedgerError(
+                        "Ink V0F BUY preauth requires a positive durable reservation"
+                    )
+                if current_reservation_atomic > total_held_atomic:
+                    raise LedgerError(
+                        "Ink V0F durable reservation exceeds canonical held capital"
+                    )
+                other_held_atomic = total_held_atomic - current_reservation_atomic
                 assert_effective_capital_within(
                     requested_atomic=envelope.max_input_atomic,
-                    held_atomic=self.ledger.held_atomic(),
+                    held_atomic=other_held_atomic,
                     local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
                     local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
                     verified_grant=verified_grant,
