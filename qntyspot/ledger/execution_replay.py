@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from ..canon import digest_object
 from ..errors import LedgerError, ReplayDivergenceError
+from ..exact_signed_bytes import ExactSignedTransactionRecordV0
 from ..execution_contract import (
     ApprovalActionV0,
     ExecutionEnvelopeV0,
@@ -99,7 +100,6 @@ def _validated_reverted_bindings(snapshot: Mapping[str, Any]) -> frozenset[str]:
     signed_by_action = {
         row["external_action_id"]: row
         for row in snapshot["tables"]["signed_transactions"]
-        if row["envelope_id"] is not None
     }
     external_by_action = {
         row["external_action_id"]: row
@@ -153,6 +153,46 @@ def _validated_reverted_bindings(snapshot: Mapping[str, Any]) -> frozenset[str]:
             )
             bindings.add(row["external_action_id"])
     return frozenset(bindings)
+
+
+def _validate_exact_signed_envelope_bindings(snapshot: Mapping[str, Any]) -> None:
+    """Require every exact-byte fact to name and match its frozen envelope."""
+    envelopes = {
+        row["envelope_id"]: row
+        for row in snapshot["tables"]["execution_envelopes"]
+    }
+    for row in snapshot["tables"]["signed_transactions"]:
+        if row["origin"] != "EXTERNAL_SIGNED_BYTES":
+            continue
+        _require(
+            row["envelope_id"] is not None,
+            "signed_transactions: exact-byte row has no durable envelope link",
+        )
+        envelope = envelopes.get(row["envelope_id"])
+        _require(
+            envelope is not None,
+            "signed_transactions: exact-byte envelope does not exist",
+        )
+        try:
+            expected_scope = ExecutionRuntime._exact_scope_from_authorized_envelope(
+                envelope
+            )
+        except (KeyError, TypeError, ValueError, LedgerError) as exc:
+            raise ReplayDivergenceError(
+                f"signed_transactions: malformed exact-byte envelope: {exc}"
+            ) from exc
+        _require(
+            expected_scope.scope_digest == row["scope_digest"],
+            "signed_transactions: exact-byte scope differs from durable envelope",
+        )
+        _require(
+            envelope["economic_action_id"] == row["external_action_id"]
+            and envelope["session_id"] == row["session_id"]
+            and envelope["chain_id"] == row["chain_id"]
+            and envelope["taker_address"] == row["taker_address"]
+            and envelope["account_nonce"] == row["account_nonce"],
+            "signed_transactions: exact-byte envelope binding disagrees",
+        )
 
 
 def _validate_settlement_states(target: SpotLedger) -> None:
@@ -281,21 +321,38 @@ def _validate_identity(table: str, row: Mapping[str, Any]) -> None:
                 record.external_transaction_ref_id == row["external_transaction_ref_id"],
                 f"{table}: external transaction reference id mismatch",
             )
-        elif table == "signed_transactions" and row["envelope_id"] is not None:
-            record = SignedTransactionRecordV0(
-                envelope_id=row["envelope_id"],
-                raw_signed_sha256=row["raw_signed_sha256"],
-                raw_signed_length=row["raw_signed_length"],
-                transaction_hash=row["transaction_hash"],
-                chain_id=row["chain_id"],
-                account_nonce=row["account_nonce"],
-                taker_address=row["taker_address"],
-                signer_identity=row["signer_identity"],
-            )
-            _require(
-                record.signed_transaction_id == row["signed_transaction_id"],
-                f"{table}: signed transaction id mismatch",
-            )
+        elif table == "signed_transactions":
+            if row["origin"] == "EXTERNAL_SIGNED_BYTES":
+                record = ExactSignedTransactionRecordV0(
+                    economic_action_id=row["external_action_id"],
+                    scope_digest=row["scope_digest"],
+                    signed_bytes_sha256=row["raw_signed_sha256"],
+                    signed_bytes_length=row["raw_signed_length"],
+                    transaction_hash=row["transaction_hash"],
+                    chain_id=row["chain_id"],
+                    account_nonce=row["account_nonce"],
+                    taker_address=row["taker_address"],
+                    signer_identity=row["signer_identity"],
+                )
+                _require(
+                    record.signed_transaction_id == row["signed_transaction_id"],
+                    f"{table}: exact signed transaction id mismatch",
+                )
+            elif row["envelope_id"] is not None:
+                record = SignedTransactionRecordV0(
+                    envelope_id=row["envelope_id"],
+                    raw_signed_sha256=row["raw_signed_sha256"],
+                    raw_signed_length=row["raw_signed_length"],
+                    transaction_hash=row["transaction_hash"],
+                    chain_id=row["chain_id"],
+                    account_nonce=row["account_nonce"],
+                    taker_address=row["taker_address"],
+                    signer_identity=row["signer_identity"],
+                )
+                _require(
+                    record.signed_transaction_id == row["signed_transaction_id"],
+                    f"{table}: signed transaction id mismatch",
+                )
         elif table == "submission_attempts":
             record = SubmissionAttemptV0(
                 signed_transaction_id=row["signed_transaction_id"],
@@ -331,6 +388,7 @@ def replay_execution_into(target: SpotLedger, source: SpotLedger) -> None:
     ).fetchone()[0] != 0:
         raise LedgerError("execution replay target must be empty")
     source_state = execution_snapshot(source)
+    _validate_exact_signed_envelope_bindings(source_state)
     with target._write() as conn:  # noqa: SLF001 - replay is one authority surface
         for table in _COPY_ORDER:
             for raw in source_state["tables"][table]:
