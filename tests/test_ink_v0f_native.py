@@ -181,7 +181,7 @@ def session(policy_id: str) -> ExecutionSessionV0:
         taker_address=INK_V0F_TAKER_ADDRESS,
         network_id=f"evm:{INK_CHAIN_ID}",
         venue_id="inkyswap-v2-ink-mainnet",
-        venue_adapter_version="ink-v0f-native",
+        venue_adapter_version="ink-v0f",
         started_at_epoch_s=NOW,
         session_ordinal=0,
     )
