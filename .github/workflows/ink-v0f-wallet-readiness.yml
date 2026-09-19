@@ -1,0 +1,94 @@
+name: ink-v0f-wallet-readiness
+
+on:
+  push:
+    branches:
+      - agent/ink-v0f-wallet-readiness-wrap-v0
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wallet-readiness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read Ink wallet readiness from two providers
+        shell: python
+        run: |
+          import json
+          import urllib.request
+
+          wallet = "0x3e604be3293d930069d0805e85379e0ca5fa01cb"
+          weth = "0x4200000000000000000000000000000000000006"
+          providers = (
+              "https://rpc-gel.inkonchain.com",
+              "https://rpc-qnd.inkonchain.com",
+          )
+
+          def rpc(url, method, params):
+              body = json.dumps({
+                  "jsonrpc": "2.0",
+                  "id": 1,
+                  "method": method,
+                  "params": params,
+              }).encode()
+              req = urllib.request.Request(
+                  url,
+                  data=body,
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=20) as resp:
+                  payload = json.load(resp)
+              if "error" in payload:
+                  raise RuntimeError(f"{url} {method}: {payload['error']}")
+              return payload["result"]
+
+          def qty(v):
+              return int(v, 16)
+
+          selector = "70a08231"
+          owner_word = wallet[2:].lower().rjust(64, "0")
+          balance_of = "0x" + selector + owner_word
+
+          rows = []
+          for provider in providers:
+              chain_id = qty(rpc(provider, "eth_chainId", []))
+              block = qty(rpc(provider, "eth_blockNumber", []))
+              native = qty(rpc(provider, "eth_getBalance", [wallet, "latest"]))
+              nonce = qty(rpc(provider, "eth_getTransactionCount", [wallet, "latest"]))
+              weth_balance = qty(rpc(provider, "eth_call", [{
+                  "to": weth,
+                  "data": balance_of,
+              }, "latest"]))
+              rows.append({
+                  "provider": provider,
+                  "chain_id": chain_id,
+                  "block": block,
+                  "native_wei": native,
+                  "weth_wei": weth_balance,
+                  "nonce": nonce,
+              })
+
+          fields = ("chain_id", "native_wei", "weth_wei", "nonce")
+          for field in fields:
+              if rows[0][field] != rows[1][field]:
+                  raise RuntimeError(f"providers disagree on {field}: {rows}")
+
+          native = rows[0]["native_wei"]
+          weth_balance = rows[0]["weth_wei"]
+          target = 10**15
+          result = {
+              "schema": "qntyspot.ink_v0f.wallet_readiness.v0",
+              "wallet": wallet,
+              "weth": weth,
+              "provider_rows": rows,
+              "target_wrap_wei": target,
+              "native_eth": format(native / 10**18, ".18f"),
+              "weth_eth": format(weth_balance / 10**18, ".18f"),
+              "needs_wrap": weth_balance < target,
+              "native_covers_exact_wrap": native >= target,
+              "native_remaining_after_exact_wrap_wei": native - target if native >= target else None,
+          }
+          print("INK_V0F_WALLET_READINESS=" + json.dumps(result, sort_keys=True, separators=(",", ":")))
