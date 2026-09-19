@@ -50,7 +50,9 @@ hash. ``EXECUTION_SCHEMA_VERSION`` is independently versioned from the core
 ``SCHEMA_VERSION``. Version 2 adds the append-only external transaction
 reference and alternate chain-observation binding. Version 3 adds an
 explicit external-signed origin for exact-byte admission while preserving
-historical envelope and approval rows.
+historical envelope and approval rows. Version 4 repairs the legacy
+signed-transaction XOR. Version 5 requires externally signed economic
+transactions to carry their durable authorized envelope link.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ __all__ = [
     "EXECUTION_SCHEMA_VERSION_V1",
     "EXECUTION_SCHEMA_VERSION_V2",
     "EXECUTION_SCHEMA_VERSION_V3",
+    "EXECUTION_SCHEMA_VERSION_V4",
     "EXECUTION_SCHEMA_SQL",
     "EXECUTION_TABLES",
     "EXECUTION_TABLES_V1",
@@ -72,6 +75,7 @@ __all__ = [
     "migrate_execution_schema_v1_to_v2",
     "migrate_execution_schema_v2_to_v3",
     "migrate_execution_schema_v3_to_v4",
+    "migrate_execution_schema_v4_to_v5",
     "validate_execution_schema_shape",
     "read_execution_schema_version",
 ]
@@ -79,7 +83,8 @@ __all__ = [
 EXECUTION_SCHEMA_VERSION_V1 = 1
 EXECUTION_SCHEMA_VERSION_V2 = 2
 EXECUTION_SCHEMA_VERSION_V3 = 3
-EXECUTION_SCHEMA_VERSION = 4
+EXECUTION_SCHEMA_VERSION_V4 = 4
+EXECUTION_SCHEMA_VERSION = 5
 
 EXECUTION_TABLES_V1 = (
     "execution_sessions",
@@ -144,7 +149,7 @@ CREATE TABLE signed_transactions (
     frozen_at_epoch_s     INTEGER NOT NULL CHECK (frozen_at_epoch_s >= 0),
     CHECK (
         origin IN ('ENVELOPE','APPROVAL')
-        OR (origin = 'EXTERNAL_SIGNED_BYTES' AND envelope_id IS NULL AND approval_action_id IS NULL)
+        OR (origin = 'EXTERNAL_SIGNED_BYTES' AND envelope_id IS NOT NULL AND approval_action_id IS NULL)
     ),
     UNIQUE (chain_id, taker_address, account_nonce)
 ) STRICT;
@@ -656,9 +661,6 @@ END;
 CREATE TRIGGER signed_transactions_kind_guard
 BEFORE INSERT ON signed_transactions
 BEGIN
-    SELECT CASE WHEN NEW.origin = 'EXTERNAL_SIGNED_BYTES' AND EXISTS (
-        SELECT 1 FROM execution_envelopes WHERE envelope_id = NEW.envelope_id
-    ) THEN RAISE(ABORT, 'external signed origin cannot name an envelope') END;
     SELECT CASE WHEN NEW.origin = 'ENVELOPE'
         AND NEW.envelope_id IS NULL AND NEW.approval_action_id IS NULL
         THEN RAISE(ABORT, 'signed transaction subtype is missing') END;
@@ -917,6 +919,26 @@ _SIGNED_TRANSACTION_LEGACY_COLUMNS = tuple(
     column for column in _SIGNED_TRANSACTION_COLUMNS if column not in {"origin", "scope_digest"}
 )
 _LEGACY_SIGNED_TRANSACTION_XOR = "CHECK ((ENVELOPE_ID IS NULL) <> (APPROVAL_ACTION_ID IS NULL))"
+_V4_EXTERNAL_SIGNED_NULL_ONLY = (
+    "ORIGIN = 'EXTERNAL_SIGNED_BYTES' AND ENVELOPE_ID IS NULL AND APPROVAL_ACTION_ID IS NULL"
+)
+
+
+def _assert_no_unlinked_external_signed_bytes(conn: sqlite3.Connection) -> None:
+    """Refuse to infer an envelope after exact signed bytes were admitted."""
+    columns = set(_signed_transactions_columns(conn))
+    if "origin" not in columns:
+        return
+    count = conn.execute(
+        "SELECT COUNT(*) FROM signed_transactions "
+        "WHERE origin = 'EXTERNAL_SIGNED_BYTES' AND envelope_id IS NULL"
+    ).fetchone()[0]
+    if int(count) != 0:
+        raise LedgerError(
+            "execution schema contains unlinked EXTERNAL_SIGNED_BYTES rows; "
+            "refusing post-admission envelope inference"
+        )
+
 
 
 def _signed_transactions_create_sql(conn: sqlite3.Connection) -> str:
@@ -935,17 +957,17 @@ def _signed_transactions_columns(conn: sqlite3.Connection) -> tuple[str, ...]:
 def validate_execution_schema_shape(conn: sqlite3.Connection) -> None:
     """Fail closed unless the current version can admit every signed origin."""
     if _signed_transactions_columns(conn) != _SIGNED_TRANSACTION_COLUMNS:
-        raise LedgerError("signed_transactions columns do not match execution schema v4")
+        raise LedgerError("signed_transactions columns do not match execution schema v5")
     sql = " ".join(_signed_transactions_create_sql(conn).upper().split())
     if _LEGACY_SIGNED_TRANSACTION_XOR in sql:
-        raise LedgerError("execution schema v4 retains the legacy signed-transaction XOR")
+        raise LedgerError("execution schema v5 retains the legacy signed-transaction XOR")
     required = (
         "ORIGIN IN ('ENVELOPE','APPROVAL','EXTERNAL_SIGNED_BYTES')",
-        "ORIGIN = 'EXTERNAL_SIGNED_BYTES' AND ENVELOPE_ID IS NULL AND APPROVAL_ACTION_ID IS NULL",
+        "ORIGIN = 'EXTERNAL_SIGNED_BYTES' AND ENVELOPE_ID IS NOT NULL AND APPROVAL_ACTION_ID IS NULL",
         "UNIQUE (CHAIN_ID, TAKER_ADDRESS, ACCOUNT_NONCE)",
     )
     if any(fragment not in sql for fragment in required):
-        raise LedgerError("signed_transactions constraints do not match execution schema v4")
+        raise LedgerError("signed_transactions constraints do not match execution schema v5")
     trigger_names = {
         row[0]
         for row in conn.execute(
@@ -988,7 +1010,12 @@ def _rebuild_signed_transactions(conn: sqlite3.Connection) -> None:
     }:
         raise LedgerError("signed_transactions has an unsupported migration shape")
     before_count = conn.execute("SELECT COUNT(*) FROM signed_transactions").fetchone()[0]
-    before_digest = _row_digest(conn, "signed_transactions", _SIGNED_TRANSACTION_LEGACY_COLUMNS)
+    digest_columns = (
+        _SIGNED_TRANSACTION_COLUMNS
+        if set(columns) == set(_SIGNED_TRANSACTION_COLUMNS)
+        else _SIGNED_TRANSACTION_LEGACY_COLUMNS
+    )
+    before_digest = _row_digest(conn, "signed_transactions", digest_columns)
     conn.execute(
         "CREATE TEMP TABLE signed_transactions_migration_backup AS "
         "SELECT * FROM signed_transactions"
@@ -1022,7 +1049,7 @@ def _rebuild_signed_transactions(conn: sqlite3.Connection) -> None:
             "FROM signed_transactions_migration_backup"
         )
     after_count = conn.execute("SELECT COUNT(*) FROM signed_transactions").fetchone()[0]
-    after_digest = _row_digest(conn, "signed_transactions", _SIGNED_TRANSACTION_LEGACY_COLUMNS)
+    after_digest = _row_digest(conn, "signed_transactions", digest_columns)
     if after_count != before_count or after_digest != before_digest:
         raise LedgerError("signed_transactions migration changed historical rows")
     conn.execute("DROP TABLE signed_transactions_migration_backup")
@@ -1042,7 +1069,51 @@ def migrate_execution_schema_v3_to_v4(conn: sqlite3.Connection) -> None:
     conn.execute("BEGIN IMMEDIATE")
     try:
         sql = " ".join(_signed_transactions_create_sql(conn).upper().split())
+        if (
+            _LEGACY_SIGNED_TRANSACTION_XOR in sql
+            or _V4_EXTERNAL_SIGNED_NULL_ONLY in sql
+        ):
+            _assert_no_unlinked_external_signed_bytes(conn)
+            _rebuild_signed_transactions(conn)
+        else:
+            validate_execution_schema_shape(conn)
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
+            (str(EXECUTION_SCHEMA_VERSION_V4),),
+        )
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_authority'",
+            ("B2_SUBMIT_EXACT_SIGNED_BYTES: external bytes only; no construction or signing",),
+        )
+        if conn.execute("PRAGMA foreign_key_check").fetchall():
+            raise LedgerError("execution schema migration introduced foreign-key violations")
+        if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+            raise LedgerError("execution schema migration failed integrity_check")
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+    migrate_execution_schema_v4_to_v5(conn)
+
+
+def migrate_execution_schema_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """Require a durable envelope link for every newly admissible external byte row."""
+    if read_execution_schema_version(conn) != EXECUTION_SCHEMA_VERSION_V4:
+        raise SchemaVersionError("migration requires execution schema version 4")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise LedgerError("execution schema migration requires foreign keys enabled")
+    conn.execute("PRAGMA foreign_keys = OFF")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 0:
+        raise LedgerError("SQLite refused controlled migration foreign-key suspension")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        sql = " ".join(_signed_transactions_create_sql(conn).upper().split())
         if _LEGACY_SIGNED_TRANSACTION_XOR in sql:
+            raise LedgerError("execution schema v4 unexpectedly retains the legacy XOR")
+        if _V4_EXTERNAL_SIGNED_NULL_ONLY in sql:
+            _assert_no_unlinked_external_signed_bytes(conn)
             _rebuild_signed_transactions(conn)
         else:
             validate_execution_schema_shape(conn)
@@ -1052,7 +1123,10 @@ def migrate_execution_schema_v3_to_v4(conn: sqlite3.Connection) -> None:
         )
         conn.execute(
             "UPDATE schema_meta SET value = ? WHERE key = 'execution_authority'",
-            ("B2_SUBMIT_EXACT_SIGNED_BYTES: external bytes only; no construction or signing",),
+            (
+                "B2_SUBMIT_EXACT_SIGNED_BYTES: external bytes require durable envelope; "
+                "no construction or signing",
+            ),
         )
         if conn.execute("PRAGMA foreign_key_check").fetchall():
             raise LedgerError("execution schema migration introduced foreign-key violations")
@@ -1222,6 +1296,9 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
                 return
             if version == EXECUTION_SCHEMA_VERSION_V3:
                 migrate_execution_schema_v3_to_v4(conn)
+                return
+            if version == EXECUTION_SCHEMA_VERSION_V4:
+                migrate_execution_schema_v4_to_v5(conn)
                 return
         raise LedgerError(f"execution schema already applied: {collisions}")
     conn.execute("PRAGMA recursive_triggers = ON")

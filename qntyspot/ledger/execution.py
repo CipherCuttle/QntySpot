@@ -76,6 +76,7 @@ from .execution_schema import (
     migrate_execution_schema_v1_to_v2,
     migrate_execution_schema_v2_to_v3,
     migrate_execution_schema_v3_to_v4,
+    migrate_execution_schema_v4_to_v5,
     read_execution_schema_version,
     validate_execution_schema_shape,
 )
@@ -253,6 +254,8 @@ class ExecutionRuntime:
                 migrate_execution_schema_v2_to_v3(self._conn)
             elif version == 3:
                 migrate_execution_schema_v3_to_v4(self._conn)
+            elif version == 4:
+                migrate_execution_schema_v4_to_v5(self._conn)
         if read_execution_schema_version(self._conn) != EXECUTION_SCHEMA_VERSION:
             raise LedgerError("unsupported execution schema version")
         validate_execution_schema_shape(self._conn)
@@ -769,6 +772,7 @@ class ExecutionRuntime:
                     or existing["raw_signed_sha256"] != record.signed_bytes_sha256
                     or existing["transaction_hash"] != record.transaction_hash
                     or existing["scope_digest"] != record.scope_digest
+                    or existing["envelope_id"] != envelope["envelope_id"]
                 ):
                     raise LedgerError("one economic action cannot bind different signed bytes")
                 return ExactSignedBytesAdmissionV0(signed_bytes, record, validated)
@@ -776,7 +780,7 @@ class ExecutionRuntime:
                 "signed_transaction_id": record.signed_transaction_id,
                 "external_action_id": scope.economic_action_id,
                 "session_id": session.session_id,
-                "envelope_id": None,
+                "envelope_id": envelope["envelope_id"],
                 "approval_action_id": None,
                 "origin": "EXTERNAL_SIGNED_BYTES",
                 "chain_id": record.chain_id,
@@ -919,6 +923,21 @@ class ExecutionRuntime:
             if row["external_action_id"] != action_id:
                 raise AuthorityVerificationError(
                     "signed transaction is not bound to the expected economic action"
+                )
+            if row["envelope_id"] is None:
+                raise SafeHaltError(
+                    "exact-byte submission requires a durable execution-envelope link"
+                )
+            envelope = self._authorized_envelope_for_exact_scope(
+                conn, admission.validated.scope
+            )
+            if row["envelope_id"] != envelope["envelope_id"]:
+                raise AuthorityVerificationError(
+                    "signed transaction envelope differs from the admitted exact-byte scope"
+                )
+            if row["scope_digest"] != admission.record.scope_digest:
+                raise AuthorityVerificationError(
+                    "durable signed-byte scope digest disagrees with the admission"
                 )
             intent = self._require_economic_intent(action_id, conn)
             state = IntentState(intent["state"])
@@ -1093,6 +1112,25 @@ class ExecutionRuntime:
                 raise LedgerError("resume requires an EXTERNAL_SIGNED_BYTES origin")
             if signed["session_id"] != session.session_id:
                 raise AuthorityVerificationError("signed transaction is bound to another session")
+            if signed["envelope_id"] is None:
+                raise SafeHaltError(
+                    "resume requires a durable execution-envelope link"
+                )
+            envelope = conn.execute(
+                "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
+                (signed["envelope_id"],),
+            ).fetchone()
+            if envelope is None:
+                raise LedgerError("resume signed transaction names an unknown envelope")
+            expected_scope = self._exact_scope_from_authorized_envelope(envelope)
+            if expected_scope.scope_digest != signed["scope_digest"]:
+                raise AuthorityVerificationError(
+                    "resume signed-byte scope differs from its durable envelope"
+                )
+            if expected_scope.economic_action_id != economic_action_id:
+                raise AuthorityVerificationError(
+                    "resume envelope is bound to another economic action"
+                )
             expected_facts = {
                 "raw_signed_sha256": signed_bytes_sha256,
                 "transaction_hash": transaction_hash,
@@ -2439,45 +2477,16 @@ class ExecutionRuntime:
             ).fetchone()
             if binding is None or binding["external_action_id"] != action_id:
                 raise LedgerError("signed transaction is not bound to the external action")
-            if binding["envelope_id"] is not None:
-                envelope = conn.execute(
-                    "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
-                    (binding["envelope_id"],),
-                ).fetchone()
-            elif binding["origin"] == "EXTERNAL_SIGNED_BYTES":
-                rows = conn.execute(
-                    "SELECT * FROM execution_envelopes "
-                    "WHERE economic_action_id = ? AND lifecycle = 'AUTHORIZED'",
-                    (action_id,),
-                ).fetchall()
-                if len(rows) != 1:
-                    raise LedgerError(
-                        "exact signed transaction requires exactly one AUTHORIZED envelope"
-                    )
-                envelope = rows[0]
-                if envelope["session_id"] != binding["session_id"]:
-                    raise AuthorityVerificationError(
-                        "exact signed transaction session differs from durable envelope"
-                    )
-                if envelope["chain_id"] != binding["chain_id"]:
-                    raise AuthorityVerificationError(
-                        "exact signed transaction chain differs from durable envelope"
-                    )
-                if envelope["taker_address"] != binding["taker_address"]:
-                    raise AuthorityVerificationError(
-                        "exact signed transaction taker differs from durable envelope"
-                    )
-                if envelope["account_nonce"] != binding["account_nonce"]:
-                    raise AuthorityVerificationError(
-                        "exact signed transaction nonce differs from durable envelope"
-                    )
+            envelope = conn.execute(
+                "SELECT * FROM execution_envelopes WHERE envelope_id = ?",
+                (binding["envelope_id"],),
+            ).fetchone()
+            if binding["origin"] == "EXTERNAL_SIGNED_BYTES" and envelope is not None:
                 expected_scope = self._exact_scope_from_authorized_envelope(envelope)
                 if expected_scope.scope_digest != binding["scope_digest"]:
                     raise AuthorityVerificationError(
                         "exact signed transaction scope differs from durable envelope"
                     )
-            else:
-                envelope = None
             if envelope is None:
                 raise LedgerError("economic signed transaction has no envelope")
             acknowledged = conn.execute(

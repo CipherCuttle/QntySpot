@@ -51,6 +51,7 @@ from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
 
 from test_external_authority_root import _receipt, _root_for, _session
+from test_execution_schema import envelope_row, insert
 from test_submit_exact_signed_bytes_v0 import RAW
 
 pytestmark = pytest.mark.skipif(
@@ -108,6 +109,9 @@ def _admission(action_id: str, session) -> ExactSignedBytesAdmissionV0:
         calldata_sha256=CALLDATA_SHA256,
         calldata_length=0,
         account_nonce=0,
+        gas_limit_ceiling=100_000,
+        max_fee_per_gas_ceiling=20_000_000,
+        max_priority_fee_per_gas_ceiling=20_000_000,
     )
     parsed = ParsedExactSignedBytesV0(
         transaction_type="eip-1559",
@@ -146,6 +150,10 @@ def _insert_signed_row(
     ledger, action_id: str, session, admission, *, raw_sha: str = RAW_SHA256
 ) -> None:
     conn = ledger.connection
+    envelope_id = conn.execute(
+        "SELECT envelope_id FROM execution_envelopes WHERE economic_action_id = ?",
+        (action_id,),
+    ).fetchone()[0]
     conn.execute(
         """
         INSERT INTO signed_transactions (
@@ -159,7 +167,7 @@ def _insert_signed_row(
             admission.record.signed_transaction_id,
             action_id,
             session.session_id,
-            None,
+            envelope_id,
             None,
             "EXTERNAL_SIGNED_BYTES",
             session.chain_id,
@@ -215,6 +223,31 @@ def _surface(
         intent.economic_action_id, session=session, verified_grant=grant, now_epoch_s=NOW
     )
     admission = _admission(intent.economic_action_id, session)
+    scope = admission.validated.scope
+    insert(
+        ledger.connection,
+        "execution_envelopes",
+        **envelope_row(
+            intent,
+            session_id=session.session_id,
+            session_identity_digest=session.identity_digest,
+            economic_action_id=intent.economic_action_id,
+            chain_id=session.chain_id,
+            taker_address=session.taker_address,
+            transaction_to=scope.target_address,
+            transaction_value_atomic=str(scope.max_value_atomic),
+            calldata_sha256=scope.calldata_sha256,
+            calldata_length=scope.calldata_length,
+            account_nonce=scope.account_nonce,
+            gas_limit_ceiling=scope.gas_limit_ceiling,
+            max_fee_per_gas_ceiling_atomic=str(scope.max_fee_per_gas_ceiling),
+            max_priority_fee_per_gas_ceiling_atomic=str(
+                scope.max_priority_fee_per_gas_ceiling
+            ),
+            authority_policy_digest=session.authority_policy_digest,
+            lifecycle="AUTHORIZED",
+        ),
+    )
     if signed_row:
         _insert_signed_row(
             ledger, intent.economic_action_id, session, admission, raw_sha=raw_sha

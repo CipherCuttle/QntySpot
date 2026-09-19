@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 import qntyspot.ink_v0f_native as native
+import qntyspot.ledger.execution as execution_runtime_module
 from qntyspot.authority_root import (
     AuthorityGrantReceiptV0,
     load_trusted_authority_root,
@@ -17,7 +18,11 @@ from qntyspot.authority_root import (
 from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.domain import Side
 from qntyspot.economics import build_intent
-from qntyspot.errors import EnvelopeValidationError, SafeHaltError
+from qntyspot.errors import EnvelopeValidationError, ReplayDivergenceError, SafeHaltError
+from qntyspot.exact_signed_bytes import (
+    ParsedExactSignedBytesV0,
+    ValidatedExactSignedBytesV0,
+)
 from qntyspot.execution_contract import (
     AuthorityLevel,
     AuthorityPolicyRefV0,
@@ -49,7 +54,7 @@ from qntyspot.ink_v0f_preauth import (
     InkV0FRouterObservationV0,
 )
 from qntyspot.ink_v0f_risk import consume_ink_v0f_risk_artifact
-from qntyspot.ledger import open_ledger
+from qntyspot.ledger import open_ledger, reconstruct_execution
 from qntyspot.ledger.execution import ExecutionRuntime
 from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
@@ -596,11 +601,11 @@ def _durable_native_preauth_for_exact_bytes(monkeypatch):
         constructed_at_epoch_s=NOW + 1,
         now_epoch_s=NOW + 1,
     )
-    return runtime, ledger, intent, sess, envelope
+    return runtime, ledger, intent, sess, verified, envelope
 
 
 def test_exact_bytes_scope_must_match_durable_authorized_native_envelope(monkeypatch) -> None:
-    runtime, ledger, intent, _sess, envelope = _durable_native_preauth_for_exact_bytes(
+    runtime, ledger, intent, _sess, _verified, envelope = _durable_native_preauth_for_exact_bytes(
         monkeypatch
     )
     row = ledger.connection.execute(
@@ -622,8 +627,8 @@ def test_exact_bytes_scope_must_match_durable_authorized_native_envelope(monkeyp
         )
 
 
-def test_exact_bytes_truth_resolves_null_row_link_to_authorized_envelope(monkeypatch) -> None:
-    runtime, ledger, intent, sess, envelope = _durable_native_preauth_for_exact_bytes(
+def test_exact_bytes_admission_persists_envelope_and_submission_keeps_bytes(monkeypatch) -> None:
+    runtime, ledger, intent, sess, verified, envelope = _durable_native_preauth_for_exact_bytes(
         monkeypatch
     )
     envelope_row = ledger.connection.execute(
@@ -633,7 +638,102 @@ def test_exact_bytes_truth_resolves_null_row_link_to_authorized_envelope(monkeyp
     assert envelope_row is not None
     scope = runtime._exact_scope_from_authorized_envelope(envelope_row)
 
-    signed_id = "exact-native-live-test"
+    signed_bytes = b"test-only-external-signed-bytes"
+    calldata = b"x" * envelope.calldata_length
+    signed_digest = sha256_hex(signed_bytes)
+    transaction_hash = "0x" + "cd" * 32
+    validated = ValidatedExactSignedBytesV0(
+        scope=scope,
+        parsed=ParsedExactSignedBytesV0(
+            transaction_type="eip-1559",
+            chain_id=sess.chain_id,
+            account_nonce=envelope.account_nonce,
+            gas_limit=envelope.gas_limit_ceiling,
+            max_fee_per_gas=envelope.max_fee_per_gas_ceiling_atomic,
+            max_priority_fee_per_gas=envelope.max_priority_fee_per_gas_ceiling_atomic,
+            target_address=envelope.transaction_to,
+            value_atomic=envelope.transaction_value_atomic,
+            calldata=calldata,
+            sender_address=sess.taker_address,
+            transaction_hash=transaction_hash,
+        ),
+        signed_bytes_sha256=signed_digest,
+        signed_bytes_length=len(signed_bytes),
+    )
+    monkeypatch.setattr(
+        execution_runtime_module,
+        "validate_exact_signed_bytes",
+        lambda raw, supplied_scope: validated,
+    )
+    real_sha256_hex = sha256_hex
+    monkeypatch.setattr(
+        execution_runtime_module,
+        "sha256_hex",
+        lambda value: (
+            envelope.calldata_sha256
+            if value == calldata
+            else signed_digest
+            if value == signed_bytes
+            else real_sha256_hex(value)
+        ),
+    )
+
+    admission = runtime.admit_exact_signed_bytes(
+        scope,
+        signed_bytes,
+        sess,
+        verified,
+        frozen_at_epoch_s=NOW + 2,
+    )
+    persisted = ledger.connection.execute(
+        "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
+        (admission.record.signed_transaction_id,),
+    ).fetchone()
+    assert persisted is not None
+    assert persisted["origin"] == "EXTERNAL_SIGNED_BYTES"
+    assert persisted["envelope_id"] == envelope.envelope_id
+
+    _truth, binding, resolved, _expectation = runtime._truth_for_action(
+        ledger.connection,
+        intent.economic_action_id,
+        signed_id=admission.record.signed_transaction_id,
+        external_ref_id=None,
+        finality=FinalityPolicyV0(
+            min_confirmation_depth=1,
+            min_agreeing_providers=1,
+        ),
+    )
+    assert binding["envelope_id"] == envelope.envelope_id
+    assert resolved is not None
+    assert resolved["envelope_id"] == envelope.envelope_id
+
+    class FakeTransport:
+        def __init__(self) -> None:
+            self.seen: list[bytes] = []
+
+        def submit_exact_signed_bytes(self, raw: bytes) -> str:
+            self.seen.append(raw)
+            return transaction_hash
+
+    transport = FakeTransport()
+    runtime.submit_exact_signed_bytes(
+        admission,
+        transport,
+        sess,
+        verified,
+        provider_id="test-provider",
+        submitted_at_epoch_s=NOW + 3,
+    )
+    assert transport.seen == [signed_bytes]
+
+
+def test_exact_byte_scope_mismatch_fails_before_persistent_replay_target(
+    monkeypatch, tmp_path
+) -> None:
+    runtime, ledger, intent, sess, _verified, envelope = _durable_native_preauth_for_exact_bytes(
+        monkeypatch
+    )
+    target = tmp_path / "must-not-exist.sqlite3"
     ledger.connection.execute(
         """
         INSERT INTO signed_transactions (
@@ -644,35 +744,27 @@ def test_exact_bytes_truth_resolves_null_row_link_to_authorized_envelope(monkeyp
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
-            signed_id,
+            "66" * 32,
             intent.economic_action_id,
             sess.session_id,
-            None,
+            envelope.envelope_id,
             None,
             "EXTERNAL_SIGNED_BYTES",
             sess.chain_id,
             sess.taker_address,
             envelope.account_nonce,
-            "ab" * 32,
+            "67" * 32,
             1,
-            "0x" + "cd" * 32,
-            scope.scope_digest,
+            "0x" + "68" * 32,
+            "69" * 32,
             "evm-recovered:" + sess.taker_address,
             NOW + 2,
         ),
     )
 
-    _truth, binding, resolved, _expectation = runtime._truth_for_action(
-        ledger.connection,
-        intent.economic_action_id,
-        signed_id=signed_id,
-        external_ref_id=None,
-        finality=FinalityPolicyV0(
-            min_confirmation_depth=1,
-            min_agreeing_providers=1,
-        ),
-    )
-    assert binding["origin"] == "EXTERNAL_SIGNED_BYTES"
-    assert binding["envelope_id"] is None
-    assert resolved is not None
-    assert resolved["envelope_id"] == envelope.envelope_id
+    with pytest.raises(
+        ReplayDivergenceError,
+        match="exact-byte scope differs from durable envelope",
+    ):
+        reconstruct_execution(ledger, path=str(target))
+    assert not target.exists()

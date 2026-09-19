@@ -16,10 +16,12 @@ from qntyspot.ledger.execution_schema import (
     EXECUTION_SCHEMA_VERSION,
     EXECUTION_SCHEMA_VERSION_V2,
     EXECUTION_SCHEMA_VERSION_V3,
+    EXECUTION_SCHEMA_VERSION_V4,
     EXECUTION_TABLES,
     apply_execution_schema,
     migrate_execution_schema_v2_to_v3,
     migrate_execution_schema_v3_to_v4,
+    migrate_execution_schema_v4_to_v5,
     read_execution_schema_version,
 )
 from test_execution_schema import (
@@ -256,10 +258,21 @@ def test_repaired_schema_accepts_external_origin_but_keeps_identity_guards(armed
         approval_action_id=None,
         session_id=SESSION_ID,
     )
+    external_envelope_id = "51" * 32
+    insert(
+        conn,
+        "execution_envelopes",
+        **envelope_row(
+            external_intent,
+            envelope_id=external_envelope_id,
+            account_nonce=9,
+            calldata_sha256="52" * 32,
+        ),
+    )
     valid = signed_row(
         external_intent.economic_action_id,
         signed_transaction_id="40" * 32,
-        envelope_id=None,
+        envelope_id=external_envelope_id,
         approval_action_id=None,
         origin="EXTERNAL_SIGNED_BYTES",
         scope_digest="41" * 32,
@@ -333,6 +346,80 @@ def test_repaired_schema_accepts_external_origin_but_keeps_identity_guards(armed
         )
 
 
+def test_v4_refuses_post_admission_envelope_inference(armed) -> None:
+    ledger, policy, cycle_id, _intent = _surface(armed)
+    conn = ledger.connection
+
+    from qntyspot.economics import build_intent
+
+    external_intent = build_intent(policy, cycle_id, policy.level("E2"), now_epoch_s=NOW)
+    ledger.create_intent(external_intent, now_epoch_s=NOW)
+    insert(
+        conn,
+        "external_actions",
+        external_action_id=external_intent.economic_action_id,
+        kind="ECONOMIC",
+        economic_action_id=external_intent.economic_action_id,
+        approval_action_id=None,
+        session_id=SESSION_ID,
+    )
+    insert(
+        conn,
+        "execution_envelopes",
+        **envelope_row(
+            external_intent,
+            envelope_id="61" * 32,
+            account_nonce=9,
+            calldata_sha256="62" * 32,
+        ),
+    )
+
+    current_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='signed_transactions'"
+    ).fetchone()[0]
+    v4_sql = current_sql.replace(
+        "envelope_id IS NOT NULL AND approval_action_id IS NULL",
+        "envelope_id IS NULL AND approval_action_id IS NULL",
+    )
+    assert v4_sql != current_sql
+
+    conn.execute("PRAGMA foreign_keys=OFF")
+    _drop_execution_triggers(conn)
+    conn.execute("DROP TABLE signed_transactions")
+    conn.execute(v4_sql)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute(
+        "UPDATE schema_meta SET value=? WHERE key='execution_schema_version'",
+        (str(EXECUTION_SCHEMA_VERSION_V4),),
+    )
+    insert(
+        conn,
+        "signed_transactions",
+        **signed_row(
+            external_intent.economic_action_id,
+            signed_transaction_id="63" * 32,
+            envelope_id=None,
+            approval_action_id=None,
+            origin="EXTERNAL_SIGNED_BYTES",
+            scope_digest="64" * 32,
+            account_nonce=9,
+            raw_signed_sha256="65" * 32,
+            transaction_hash="0x" + "b3" * 32,
+        ),
+    )
+
+    with pytest.raises(
+        LedgerError,
+        match="refusing post-admission envelope inference",
+    ):
+        migrate_execution_schema_v4_to_v5(conn)
+    assert read_execution_schema_version(conn) == EXECUTION_SCHEMA_VERSION_V4
+    assert conn.execute(
+        "SELECT envelope_id FROM signed_transactions WHERE signed_transaction_id=?",
+        ("63" * 32,),
+    ).fetchone()[0] is None
+
+
 def test_repair_rolls_back_if_shape_is_unsupported(armed) -> None:
     ledger, _policy, _cycle_id, _intent = _surface(armed)
     conn = ledger.connection
@@ -345,7 +432,7 @@ def test_repair_rolls_back_if_shape_is_unsupported(armed) -> None:
         "UPDATE schema_meta SET value=? WHERE key='execution_schema_version'",
         (str(EXECUTION_SCHEMA_VERSION_V3),),
     )
-    with pytest.raises(LedgerError, match="columns do not match execution schema v4"):
+    with pytest.raises(LedgerError, match="columns do not match execution schema v5"):
         migrate_execution_schema_v3_to_v4(conn)
     assert read_execution_schema_version(conn) == EXECUTION_SCHEMA_VERSION_V3
 
