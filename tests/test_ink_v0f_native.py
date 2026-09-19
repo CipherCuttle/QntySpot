@@ -249,6 +249,7 @@ def test_caller_built_native_revalidation_is_rejected() -> None:
             market_observation_digest="11" * 32,
             router_observation_digest="22" * 32,
             signer_state_digest="33" * 32,
+            native_balance_observation_digest="44" * 32,
             fresh_quote_output_atomic=preview.quoted_output_atomic,
             fresh_required_min_output_atomic=preview.amount_out_min_atomic,
             common_block=preview.quote_common_block,
@@ -283,6 +284,14 @@ def test_live_native_revalidation_preserves_frozen_transaction(monkeypatch) -> N
         block_hash="0x" + "44" * 32,
         provider_evidence=({}, {}),
     )
+    balance_obs = native.InkV0FNativeBalanceObservationV0(
+        common_block=obs.common_block,
+        balance_atomic=3 * 10**15,
+        provider_evidence=(
+            {"endpoint": INK_RPC_ENDPOINTS[0], "balance_atomic": 3 * 10**15},
+            {"endpoint": INK_RPC_ENDPOINTS[1], "balance_atomic": 3 * 10**15},
+        ),
+    )
     monkeypatch.setattr(InkV0FLiveVerifier, "observe_market", lambda self: obs)
     monkeypatch.setattr(
         InkV0FLiveVerifier,
@@ -293,6 +302,11 @@ def test_live_native_revalidation_preserves_frozen_transaction(monkeypatch) -> N
         native,
         "observe_ink_v0f_signer_state_for_market",
         lambda verifier, market: signer_obs,
+    )
+    monkeypatch.setattr(
+        native,
+        "observe_ink_v0f_native_balance_for_market",
+        lambda verifier, market: balance_obs,
     )
 
     revalidation = native.revalidate_ink_v0f_native_same_amount(
@@ -310,3 +324,69 @@ def test_live_native_revalidation_preserves_frozen_transaction(monkeypatch) -> N
     assert fields["nonce"] == envelope.account_nonce
     assert fields["data"] == "0x" + preview.calldata.hex()
     assert revalidation.preview.scope.scope_digest == preview.scope.scope_digest
+
+
+
+def test_native_revalidation_refuses_balance_below_input_plus_gas(monkeypatch) -> None:
+    ledger, _, intent, risk, router, obs, sess, _, envelope = build_preview_and_envelope()
+    verifier = InkV0FLiveVerifier(
+        (
+            JsonRpcClient(INK_RPC_ENDPOINTS[0], transport=lambda _: b""),
+            JsonRpcClient(INK_RPC_ENDPOINTS[1], transport=lambda _: b""),
+        ),
+        router,
+    )
+    router_obs = InkV0FRouterObservationV0(
+        chain_id=INK_CHAIN_ID,
+        router_address=router.address,
+        common_block=obs.common_block,
+        provider_heads=dict(obs.provider_heads),
+        bytecode_sha256=router.deployed_bytecode_sha256,
+        bytecode_length=router.deployed_bytecode_length,
+        factory_address=router.factory_address,
+        weth_address=router.weth_address,
+        provider_evidence=({}, {}),
+    )
+    signer_obs = InkV0FSignerStateObservationV0(
+        common_block=obs.common_block,
+        account_nonce=envelope.account_nonce,
+        base_fee_per_gas=1,
+        block_hash="0x" + "55" * 32,
+        provider_evidence=({}, {}),
+    )
+    too_low = native.InkV0FNativeBalanceObservationV0(
+        common_block=obs.common_block,
+        balance_atomic=envelope.transaction_value_atomic,
+        provider_evidence=(
+            {"endpoint": INK_RPC_ENDPOINTS[0], "balance_atomic": envelope.transaction_value_atomic},
+            {"endpoint": INK_RPC_ENDPOINTS[1], "balance_atomic": envelope.transaction_value_atomic},
+        ),
+    )
+    monkeypatch.setattr(InkV0FLiveVerifier, "observe_market", lambda self: obs)
+    monkeypatch.setattr(
+        InkV0FLiveVerifier,
+        "observe_router_for_market",
+        lambda self, market: router_obs,
+    )
+    monkeypatch.setattr(
+        native,
+        "observe_ink_v0f_signer_state_for_market",
+        lambda verifier, market: signer_obs,
+    )
+    monkeypatch.setattr(
+        native,
+        "observe_ink_v0f_native_balance_for_market",
+        lambda verifier, market: too_low,
+    )
+
+    with pytest.raises(SafeHaltError, match="worst-case gas"):
+        native.revalidate_ink_v0f_native_same_amount(
+            live_verifier=verifier,
+            risk_policy=risk,
+            router_identity=router,
+            ledger=ledger,
+            intent=intent,
+            session=sess,
+            envelope=envelope,
+            now_epoch_s=NOW + 2,
+        )
