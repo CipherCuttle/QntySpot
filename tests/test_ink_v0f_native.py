@@ -639,7 +639,7 @@ def test_exact_bytes_admission_persists_envelope_and_submission_keeps_bytes(monk
     scope = runtime._exact_scope_from_authorized_envelope(envelope_row)
 
     signed_bytes = b"test-only-external-signed-bytes"
-    calldata = b"test-only-native-buy-calldata"
+    calldata = b"x" * envelope.calldata_length
     signed_digest = sha256_hex(signed_bytes)
     transaction_hash = "0x" + "cd" * 32
     validated = ValidatedExactSignedBytesV0(
