@@ -16,7 +16,7 @@ import tempfile
 import sys
 import time
 from dataclasses import fields
-from decimal import Decimal, getcontext
+from decimal import Decimal, ROUND_HALF_EVEN, getcontext
 from pathlib import Path
 
 import qntyspot
@@ -117,9 +117,12 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
+    # QntySpot canonical decimals permit at most 30 fractional digits.
+    # Round only policy display/bound values; live reserve-derived quote math
+    # remains exact and the frozen 50-bps output floor remains authoritative.
+    quantum = Decimal(1).scaleb(-30)
+    rounded = value.quantize(quantum, rounding=ROUND_HALF_EVEN)
+    text = format(rounded, "f").rstrip("0").rstrip(".")
     return text if text else "0"
 
 
