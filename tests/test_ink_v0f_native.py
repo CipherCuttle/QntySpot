@@ -1,15 +1,28 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 import qntyspot.ink_v0f_native as native
+from qntyspot.authority_root import (
+    AuthorityGrantReceiptV0,
+    load_trusted_authority_root,
+    verify_authority_grant,
+)
+from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.domain import Side
 from qntyspot.economics import build_intent
 from qntyspot.errors import EnvelopeValidationError, SafeHaltError
-from qntyspot.execution_contract import ExecutionSessionV0
+from qntyspot.execution_contract import (
+    AuthorityLevel,
+    AuthorityPolicyRefV0,
+    ExecutionSessionV0,
+)
 from qntyspot.ink import (
     INK_CHAIN_ID,
     INK_RPC_ENDPOINTS,
@@ -36,6 +49,7 @@ from qntyspot.ink_v0f_preauth import (
 )
 from qntyspot.ink_v0f_risk import consume_ink_v0f_risk_artifact
 from qntyspot.ledger import open_ledger
+from qntyspot.ledger.execution import ExecutionRuntime
 from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
 
@@ -64,6 +78,20 @@ def observation() -> InkMarketObservationV0:
         provider_evidence=({}, {}),
         v2_fee_numerator=V2_FEE_NUMERATOR,
         v2_fee_denominator=V2_FEE_DENOMINATOR,
+    )
+
+
+def router_observation(router, obs: InkMarketObservationV0) -> InkV0FRouterObservationV0:
+    return InkV0FRouterObservationV0(
+        chain_id=INK_CHAIN_ID,
+        router_address=router.address,
+        common_block=obs.common_block,
+        provider_heads=dict(obs.provider_heads),
+        bytecode_sha256=router.deployed_bytecode_sha256,
+        bytecode_length=router.deployed_bytecode_length,
+        factory_address=router.factory_address,
+        weth_address=router.weth_address,
+        provider_evidence=({}, {}),
     )
 
 
@@ -182,6 +210,7 @@ def build_preview_and_envelope():
     )
     envelope = native.build_ink_v0f_native_execution_envelope(
         preview,
+        router_observation(router, obs),
         policy=risk,
         session=sess,
     )
@@ -224,10 +253,12 @@ def test_native_buy_has_exact_value_and_no_approval() -> None:
 def test_native_envelope_tamper_fails() -> None:
     from dataclasses import replace
 
-    _, _, _, risk, _, _, sess, preview, envelope = build_preview_and_envelope()
+    _, _, _, risk, router, obs, sess, preview, envelope = build_preview_and_envelope()
+    ro = router_observation(router, obs)
     native.assert_ink_v0f_native_execution_envelope_admissible(
         envelope,
         preview,
+        ro,
         policy=risk,
         session=sess,
         now_epoch_s=NOW + 2,
@@ -236,6 +267,7 @@ def test_native_envelope_tamper_fails() -> None:
         native.assert_ink_v0f_native_execution_envelope_admissible(
             replace(envelope, transaction_value_atomic=envelope.max_input_atomic - 1),
             preview,
+            ro,
             policy=risk,
             session=sess,
             now_epoch_s=NOW + 2,
@@ -267,17 +299,7 @@ def test_live_native_revalidation_preserves_frozen_transaction(monkeypatch) -> N
         ),
         router,
     )
-    router_obs = InkV0FRouterObservationV0(
-        chain_id=INK_CHAIN_ID,
-        router_address=router.address,
-        common_block=obs.common_block,
-        provider_heads=dict(obs.provider_heads),
-        bytecode_sha256=router.deployed_bytecode_sha256,
-        bytecode_length=router.deployed_bytecode_length,
-        factory_address=router.factory_address,
-        weth_address=router.weth_address,
-        provider_evidence=({}, {}),
-    )
+    router_obs = router_observation(router, obs)
     signer_obs = InkV0FSignerStateObservationV0(
         common_block=obs.common_block,
         account_nonce=envelope.account_nonce,
@@ -345,17 +367,7 @@ def test_native_revalidation_refuses_balance_below_input_plus_gas(monkeypatch) -
         ),
         router,
     )
-    router_obs = InkV0FRouterObservationV0(
-        chain_id=INK_CHAIN_ID,
-        router_address=router.address,
-        common_block=obs.common_block,
-        provider_heads=dict(obs.provider_heads),
-        bytecode_sha256=router.deployed_bytecode_sha256,
-        bytecode_length=router.deployed_bytecode_length,
-        factory_address=router.factory_address,
-        weth_address=router.weth_address,
-        provider_evidence=({}, {}),
-    )
+    router_obs = router_observation(router, obs)
     signer_obs = InkV0FSignerStateObservationV0(
         common_block=obs.common_block,
         account_nonce=envelope.account_nonce,
@@ -422,3 +434,128 @@ def test_native_revalidation_refuses_cross_action_envelope_before_rpc() -> None:
             envelope=replace(envelope, economic_action_id="aa" * 32),
             now_epoch_s=NOW + 2,
         )
+
+
+
+def authorized_runtime_for_native_buy():
+    ledger = open_ledger()
+    policy = parse_policy(policy_doc())
+    ledger.admit_policy(policy)
+    cycle_id = ledger.open_cycle(policy, 0, now_epoch_s=NOW)
+    intent = build_intent(policy, cycle_id, policy.level("E1"), now_epoch_s=NOW)
+    ledger.create_intent(intent, now_epoch_s=NOW)
+    for state in (
+        IntentState.TRIGGERED,
+        IntentState.QUOTE_PINNED,
+        IntentState.SIMULATED,
+    ):
+        ledger.transition(intent.economic_action_id, state, now_epoch_s=NOW)
+
+    key = Ed25519PrivateKey.from_private_bytes(
+        hashlib.sha256(b"ink-v0f-native-preauth-test").digest()
+    )
+    anchor = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    fingerprint = sha256_hex(anchor)
+    authority = AuthorityPolicyRefV0(
+        authority_root_id="qnty-authority-root-v0",
+        granted_level=AuthorityLevel.HUMAN_SIGNED_EXECUTION,
+        permitted_repository_commit="11" * 20,
+        permitted_implementation_digest="22" * 32,
+        permitted_network_id="evm:57073",
+        permitted_taker_address=INK_V0F_TAKER_ADDRESS,
+        permitted_venue_id="inkyswap-v2-ink-mainnet",
+        max_reservation_atomic=10**15,
+        max_cumulative_atomic=10**15,
+        not_before_epoch_s=NOW,
+        not_after_epoch_s=NOW + 900,
+    )
+    unsigned = AuthorityGrantReceiptV0(
+        root_id="qnty-authority-root-v0",
+        public_key_fingerprint=fingerprint,
+        signature_algorithm="Ed25519",
+        authority_epoch=6,
+        serial=1,
+        issued_at_epoch_s=NOW,
+        authority_policy=authority,
+        signature=b"\x00" * 64,
+    )
+    receipt = replace(unsigned, signature=key.sign(unsigned.signed_body_bytes))
+    trust_bytes = canonical_json_bytes(
+        {
+            "minimum_authority_epoch": 1,
+            "public_key_fingerprint": fingerprint,
+            "root_id": "qnty-authority-root-v0",
+            "schema": "qntyspot.authority_root.v0.trust_config",
+            "signature_algorithm": "Ed25519",
+            "trust_config_version": 1,
+        }
+    )
+    trusted = load_trusted_authority_root(
+        trust_bytes,
+        expected_config_digest=sha256_hex(trust_bytes),
+        anchor_bytes=anchor,
+    )
+    sess = replace(
+        session(policy.policy_id),
+        authority_policy_digest=receipt.authority_policy_digest,
+    )
+    verified = verify_authority_grant(
+        receipt=receipt,
+        trusted_root=trusted,
+        session=sess,
+        now_epoch_s=NOW,
+    )
+    runtime = ExecutionRuntime(ledger)
+    runtime.create_execution_session(sess, verified, now_epoch_s=NOW)
+    runtime.reserve_action(
+        intent.economic_action_id,
+        session=sess,
+        verified_grant=verified,
+        now_epoch_s=NOW,
+    )
+    return runtime, ledger, intent, sess, verified
+
+
+def test_native_buy_preauth_is_durable_and_has_zero_approval_rows(monkeypatch) -> None:
+    runtime, ledger, intent, sess, verified = authorized_runtime_for_native_buy()
+    risk = consume_ink_v0f_risk_artifact(RISK_ARTIFACT.read_bytes())
+    router = consume_ink_v0f_router_artifact(ROUTER_ARTIFACT.read_bytes())
+    obs = observation()
+    verifier = InkV0FLiveVerifier(
+        (
+            JsonRpcClient(INK_RPC_ENDPOINTS[0], transport=lambda _: b""),
+            JsonRpcClient(INK_RPC_ENDPOINTS[1], transport=lambda _: b""),
+        ),
+        router,
+    )
+    ro = router_observation(router, obs)
+    monkeypatch.setattr(InkV0FLiveVerifier, "observe_market", lambda self: obs)
+    monkeypatch.setattr(
+        InkV0FLiveVerifier,
+        "observe_router_for_market",
+        lambda self, market: ro,
+    )
+
+    envelope = runtime.record_ink_v0f_native_buy_preauth(
+        live_verifier=verifier,
+        risk_policy=risk,
+        router_identity=router,
+        intent=intent,
+        session=sess,
+        verified_grant=verified,
+        account_nonce=0,
+        gas_limit_ceiling=250_000,
+        max_fee_per_gas_ceiling=2_000_000_000,
+        max_priority_fee_per_gas_ceiling=100_000_000,
+        constructed_at_epoch_s=NOW + 1,
+        now_epoch_s=NOW + 1,
+    )
+    assert envelope.transaction_value_atomic == envelope.max_input_atomic
+    assert envelope.allowance_target is None
+    assert ledger.held_atomic() == 10**15
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM execution_envelopes"
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM approval_actions"
+    ).fetchone()[0] == 0
