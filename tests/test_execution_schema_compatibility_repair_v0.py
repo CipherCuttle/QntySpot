@@ -256,10 +256,21 @@ def test_repaired_schema_accepts_external_origin_but_keeps_identity_guards(armed
         approval_action_id=None,
         session_id=SESSION_ID,
     )
+    external_envelope_id = "51" * 32
+    insert(
+        conn,
+        "execution_envelopes",
+        **envelope_row(
+            external_intent,
+            envelope_id=external_envelope_id,
+            account_nonce=9,
+            calldata_sha256="52" * 32,
+        ),
+    )
     valid = signed_row(
         external_intent.economic_action_id,
         signed_transaction_id="40" * 32,
-        envelope_id=None,
+        envelope_id=external_envelope_id,
         approval_action_id=None,
         origin="EXTERNAL_SIGNED_BYTES",
         scope_digest="41" * 32,
@@ -345,7 +356,7 @@ def test_repair_rolls_back_if_shape_is_unsupported(armed) -> None:
         "UPDATE schema_meta SET value=? WHERE key='execution_schema_version'",
         (str(EXECUTION_SCHEMA_VERSION_V3),),
     )
-    with pytest.raises(LedgerError, match="columns do not match execution schema v4"):
+    with pytest.raises(LedgerError, match="columns do not match execution schema v5"):
         migrate_execution_schema_v3_to_v4(conn)
     assert read_execution_schema_version(conn) == EXECUTION_SCHEMA_VERSION_V3
 
