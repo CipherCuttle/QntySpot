@@ -12,11 +12,14 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tempfile
 import sys
 import time
 from dataclasses import fields
 from decimal import Decimal, getcontext
 from pathlib import Path
+
+import qntyspot
 
 from qntyspot.authority_root import (
     AuthorityGrantReceiptV0,
@@ -66,11 +69,50 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
+        dirty = subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
     except Exception as exc:
         raise RuntimeError("explicit QntySpot root is not a readable Git checkout") from exc
     if head != BOUND_REPOSITORY_COMMIT:
         raise RuntimeError(
             f"QntySpot worktree HEAD {head} is not bound commit {BOUND_REPOSITORY_COMMIT}"
+        )
+    if dirty.strip():
+        raise RuntimeError("bound QntySpot worktree has tracked modifications")
+
+    imported = Path(qntyspot.__file__).resolve()
+    try:
+        imported.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"qntyspot import {imported} is outside explicit bound worktree {root}"
+        ) from exc
+
+    identity_script = root / "scripts/derive_deployment_identity.py"
+    with tempfile.TemporaryDirectory(prefix="qntyspot-identity-") as tmp:
+        output = Path(tmp) / "identity.json"
+        subprocess.run(
+            [
+                sys.executable,
+                str(identity_script),
+                "--root",
+                str(root),
+                "--repository-commit",
+                BOUND_REPOSITORY_COMMIT,
+                "--output",
+                str(output),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        identity = json.loads(output.read_text(encoding="utf-8"))
+    if identity.get("implementation_digest") != BOUND_IMPLEMENTATION_DIGEST:
+        raise RuntimeError(
+            "recomputed QntySpot implementation digest differs from AuthorityRoot binding"
         )
 
 
