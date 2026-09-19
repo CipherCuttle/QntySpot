@@ -583,6 +583,88 @@ class InkV0FNativeSameAmountRevalidationV0:
         return self.preview.eip1559_signing_fields()
 
 
+def _assert_native_runtime_envelope_binding(
+    *,
+    envelope: ExecutionEnvelopeV0,
+    intent: IntentV0,
+    session: ExecutionSessionV0,
+    router_identity: InkV0FRouterIdentityV0,
+    now_epoch_s: int,
+) -> None:
+    if type(envelope) is not ExecutionEnvelopeV0:
+        raise AuthorityVerificationError("native revalidation requires canonical envelope")
+    if type(intent) is not IntentV0:
+        raise AuthorityVerificationError("native revalidation requires canonical intent")
+    if type(session) is not ExecutionSessionV0:
+        raise AuthorityVerificationError("native revalidation requires canonical session")
+    if envelope.session_id != session.session_id:
+        raise SafeHaltError("native envelope belongs to another session")
+    if envelope.session_identity_digest != session.identity_digest:
+        raise SafeHaltError("native envelope session identity differs")
+    if envelope.economic_action_id != intent.economic_action_id:
+        raise SafeHaltError("native envelope belongs to another economic action")
+    if envelope.authority_policy_digest != session.authority_policy_digest:
+        raise SafeHaltError("native envelope authority differs from session")
+    if envelope.chain_id != INK_CHAIN_ID or envelope.chain_id != session.chain_id:
+        raise SafeHaltError("native envelope chain differs from session")
+    if (
+        envelope.taker_address != INK_V0F_TAKER_ADDRESS
+        or envelope.taker_address != session.taker_address
+    ):
+        raise SafeHaltError("native envelope taker differs from session")
+    if envelope.transaction_to != router_identity.address:
+        raise SafeHaltError("native envelope targets another router")
+    if envelope.allowance_target is not None:
+        raise SafeHaltError("native BUY unexpectedly names an allowance target")
+    if envelope.input_instrument_id != intent.bounds.input_instrument_id:
+        raise SafeHaltError("native envelope input instrument differs from intent")
+    if envelope.output_instrument_id != intent.bounds.output_instrument_id:
+        raise SafeHaltError("native envelope output instrument differs from intent")
+    if envelope.max_input_atomic > intent.bounds.max_input_atomic:
+        raise SafeHaltError("native envelope input exceeds committed intent")
+    if envelope.transaction_value_atomic != envelope.max_input_atomic:
+        raise SafeHaltError("native BUY value differs from frozen input")
+    if envelope.deadline_epoch_s > intent.bounds.deadline_epoch_s:
+        raise SafeHaltError("native envelope outlives committed intent")
+    if now_epoch_s >= envelope.deadline_epoch_s:
+        raise SafeHaltError("native BUY deadline expired")
+
+
+def _assert_native_envelope_matches_revalidation(
+    envelope: ExecutionEnvelopeV0,
+    preview: InkV0FNativeBuyPreviewV0,
+) -> None:
+    scope = preview.scope
+    if (
+        envelope.session_id != scope.session_id
+        or envelope.session_identity_digest != scope.session_identity_digest
+        or envelope.economic_action_id != scope.economic_action_id
+        or envelope.authority_policy_digest != scope.authority_policy_digest
+        or envelope.chain_id != scope.chain_id
+        or envelope.taker_address != scope.taker_address
+        or envelope.input_instrument_id
+        != "evm:57073:" + WETH9_ADDRESS
+        or envelope.output_instrument_id
+        != "evm:57073:" + KRAKMASK_ADDRESS
+        or envelope.max_input_atomic != preview.amount_in_native_atomic
+        or envelope.min_output_atomic != preview.amount_out_min_atomic
+        or envelope.transaction_to != scope.target_address
+        or envelope.transaction_value_atomic != preview.amount_in_native_atomic
+        or envelope.allowance_target is not None
+        or envelope.calldata_sha256 != scope.calldata_sha256
+        or envelope.calldata_length != scope.calldata_length
+        or envelope.account_nonce != scope.account_nonce
+        or envelope.gas_limit_ceiling != scope.gas_limit_ceiling
+        or envelope.max_fee_per_gas_ceiling_atomic != scope.max_fee_per_gas_ceiling
+        or envelope.max_priority_fee_per_gas_ceiling_atomic
+        != scope.max_priority_fee_per_gas_ceiling
+        or envelope.deadline_epoch_s != preview.deadline_epoch_s
+    ):
+        raise EnvelopeValidationError(
+            "native revalidation differs from frozen envelope identity"
+        )
+
+
 def revalidate_ink_v0f_native_same_amount(
     *,
     live_verifier: InkV0FLiveVerifier,
@@ -601,12 +683,13 @@ def revalidate_ink_v0f_native_same_amount(
     now = _uint(now_epoch_s, field="now")
     if intent.side is not Side.BUY:
         raise SafeHaltError("native revalidation only supports BUY")
-    if envelope.allowance_target is not None:
-        raise SafeHaltError("native BUY unexpectedly names an allowance target")
-    if envelope.transaction_value_atomic != envelope.max_input_atomic:
-        raise SafeHaltError("native BUY value differs from frozen input")
-    if now >= envelope.deadline_epoch_s:
-        raise SafeHaltError("native BUY deadline expired")
+    _assert_native_runtime_envelope_binding(
+        envelope=envelope,
+        intent=intent,
+        session=session,
+        router_identity=router_identity,
+        now_epoch_s=now,
+    )
 
     market = live_verifier.observe_market()
     router = live_verifier.observe_router_for_market(market)
@@ -721,21 +804,10 @@ def validate_ink_v0f_native_signed_buy(
         raise EnvelopeValidationError("native admission predates revalidation")
     if admitted - revalidation.revalidated_at_epoch_s > MAX_REVALIDATION_TO_ADMISSION_S:
         raise SafeHaltError("native same-amount revalidation is too old")
-    if admitted >= envelope.deadline_epoch_s:
-        raise SafeHaltError("native signed BUY is at or past deadline")
-
     preview = revalidation.preview
-    if (
-        envelope.economic_action_id != preview.scope.economic_action_id
-        or envelope.session_identity_digest != preview.scope.session_identity_digest
-        or envelope.authority_policy_digest != preview.scope.authority_policy_digest
-        or envelope.transaction_to != preview.scope.target_address
-        or envelope.transaction_value_atomic != preview.amount_in_native_atomic
-        or envelope.calldata_sha256 != preview.scope.calldata_sha256
-        or envelope.calldata_length != preview.scope.calldata_length
-        or envelope.account_nonce != preview.scope.account_nonce
-    ):
-        raise EnvelopeValidationError("native revalidation differs from frozen envelope")
+    _assert_native_envelope_matches_revalidation(envelope, preview)
+    if admitted >= preview.deadline_epoch_s:
+        raise SafeHaltError("native signed BUY is at or past frozen deadline")
     validated = validate_exact_signed_bytes(signed_bytes, preview.scope)
     if validated.parsed.transaction_type != "eip-1559":
         raise EnvelopeValidationError("native Ink V0F accepts EIP-1559 only")
