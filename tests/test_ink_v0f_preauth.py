@@ -4,22 +4,32 @@ import hashlib
 import inspect
 import json
 from dataclasses import replace
+from fractions import Fraction
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 import qntyspot.ink_v0f_preauth as preauth
 
-from qntyspot.canon import canonical_json_bytes
+from qntyspot.authority_root import (
+    AuthorityGrantReceiptV0,
+    load_trusted_authority_root,
+    verify_authority_grant,
+)
+from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.errors import EnvelopeValidationError, SafeHaltError
 from qntyspot.exact_signed_bytes import ExactSignedBytesScopeV0
 from qntyspot.execution_contract import (
     LADDER,
     PHASE_GRANTED_AUTHORITY_LEVEL,
     AuthorityLevel,
+    AuthorityPolicyRefV0,
     Capability,
     ExecutionSessionV0,
 )
-from qntyspot.ledger import ExecutionRuntime
+from qntyspot.economics import build_intent
+from qntyspot.ledger import ExecutionRuntime, open_ledger
 from qntyspot.ink import (
     INK_CHAIN_ID,
     INK_RPC_ENDPOINTS,
@@ -54,6 +64,10 @@ from qntyspot.ink_v0f_preauth import (
 )
 from qntyspot.keccak import keccak256
 from qntyspot.domain import Side
+from qntyspot.ink_v0f_risk import InkV0FRiskPolicyV0
+from qntyspot.prelive_economics import DustLiveConcurrencyV0
+from qntyspot.policy import parse_policy
+from qntyspot.states import IntentState
 
 
 FAKE_CODE = bytes.fromhex("60016000556002600055")
@@ -337,6 +351,205 @@ def test_persistence_api_cannot_accept_caller_built_preauth_facts() -> None:
     assert "risk_policy" in params
     assert "router_identity" in params
     assert "intent" in params
+
+
+def test_full_cap_reservation_is_not_double_counted_during_preauth(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    cap = 10**15
+    doc = {
+        "schema": "qntyspot.policy.v0",
+        "policy_name": "ink-v0f-preauth-cap-regression",
+        "side": "BUY",
+        "base": {
+            "ref": {
+                "namespace": "evm",
+                "chain_id": INK_CHAIN_ID,
+                "contract_address": KRAKMASK_ADDRESS,
+            },
+            "decimals": 18,
+            "display_symbol": "KRAKMASK",
+        },
+        "quote": {
+            "ref": {
+                "namespace": "evm",
+                "chain_id": INK_CHAIN_ID,
+                "contract_address": WETH9_ADDRESS,
+            },
+            "decimals": 18,
+            "display_symbol": "WETH",
+        },
+        "entry_ladder": {
+            "levels": [
+                {"level_id": "E1", "trigger_price": "1", "input_amount": "0.001"}
+            ]
+        },
+        "exit_ladder": {
+            "levels": [
+                {"level_id": "X1", "trigger_price": "2", "input_ratio": "1"}
+            ]
+        },
+        "capital": {
+            "allocation_quote": "0.001",
+            "per_order_cap_quote": "0.001",
+            "per_instrument_cap_quote": "0.001",
+            "per_network_cap_quote": "0.001",
+            "global_portfolio_cap_quote": "0.001",
+            "reserved_cash_quote": "0",
+        },
+        "limits": {
+            "max_executable_price": "2",
+            "min_executable_price": "0.5",
+            "max_price_impact_bps": 100,
+            "max_slippage_bps": 50,
+        },
+        "timing": {
+            "valid_from_epoch_s": 1_799_999_900,
+            "expiry_epoch_s": 1_800_003_600,
+            "quote_ttl_s": 30,
+        },
+        "reentry": {
+            "max_cycles": 1,
+            "rearm_hysteresis_bps": 200,
+            "rearm_cooldown_s": 600,
+        },
+    }
+    policy = parse_policy(doc)
+    ledger = open_ledger(str(tmp_path / "preauth-cap.sqlite3"))
+    ledger.admit_policy(policy)
+    cycle_id = ledger.open_cycle(policy, 0, now_epoch_s=1_800_000_000)
+    intent = build_intent(
+        policy,
+        cycle_id,
+        policy.level("E1"),
+        now_epoch_s=1_800_000_000,
+    )
+    assert intent.quote_exposure_atomic == cap
+    ledger.create_intent(intent, now_epoch_s=1_800_000_000)
+    for state in (
+        IntentState.TRIGGERED,
+        IntentState.QUOTE_PINNED,
+        IntentState.SIMULATED,
+    ):
+        ledger.transition(intent.economic_action_id, state, now_epoch_s=1_800_000_000)
+
+    authority_key = Ed25519PrivateKey.from_private_bytes(
+        hashlib.sha256(b"ink-v0f-preauth-cap-regression").digest()
+    )
+    anchor = authority_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    fingerprint = sha256_hex(anchor)
+    authority = AuthorityPolicyRefV0(
+        authority_root_id="qnty-authority-root-v0",
+        granted_level=AuthorityLevel.HUMAN_SIGNED_EXECUTION,
+        permitted_repository_commit="11" * 20,
+        permitted_implementation_digest="22" * 32,
+        permitted_network_id="evm:57073",
+        permitted_taker_address=INK_V0F_TAKER_ADDRESS,
+        permitted_venue_id="inkyswap-v2-ink-mainnet",
+        max_reservation_atomic=cap,
+        max_cumulative_atomic=cap,
+        not_before_epoch_s=1_800_000_000,
+        not_after_epoch_s=1_800_000_900,
+    )
+    unsigned = AuthorityGrantReceiptV0(
+        root_id="qnty-authority-root-v0",
+        public_key_fingerprint=fingerprint,
+        signature_algorithm="Ed25519",
+        authority_epoch=1,
+        serial=1,
+        issued_at_epoch_s=1_800_000_000,
+        authority_policy=authority,
+        signature=b"\x00" * 64,
+    )
+    receipt = replace(
+        unsigned,
+        signature=authority_key.sign(unsigned.signed_body_bytes),
+    )
+    trust_bytes = canonical_json_bytes(
+        {
+            "minimum_authority_epoch": 1,
+            "public_key_fingerprint": fingerprint,
+            "root_id": "qnty-authority-root-v0",
+            "schema": "qntyspot.authority_root.v0.trust_config",
+            "signature_algorithm": "Ed25519",
+            "trust_config_version": 1,
+        }
+    )
+    root = load_trusted_authority_root(
+        trust_bytes,
+        expected_config_digest=sha256_hex(trust_bytes),
+        anchor_bytes=anchor,
+    )
+    sess = replace(
+        session(),
+        repository_commit="11" * 20,
+        implementation_digest="22" * 32,
+        policy_id=policy.policy_id,
+        authority_policy_digest=receipt.authority_policy_digest,
+    )
+    verified = verify_authority_grant(
+        receipt=receipt,
+        trusted_root=root,
+        session=sess,
+        now_epoch_s=1_800_000_000,
+    )
+
+    runtime = ExecutionRuntime(ledger)
+    runtime.create_execution_session(
+        sess,
+        verified,
+        now_epoch_s=1_800_000_000,
+    )
+    runtime.reserve_action(
+        intent.economic_action_id,
+        session=sess,
+        verified_grant=verified,
+        now_epoch_s=1_800_000_000,
+    )
+    assert ledger.held_atomic() == cap
+
+    live, _, _ = verifier(monkeypatch)
+    monkeypatch.setattr(live, "observe_market", lambda: market_observation())
+    risk = InkV0FRiskPolicyV0(
+        repository_identity="CipherCuttle/QntySpot",
+        network_id="evm:57073",
+        venue_id="inkyswap-v2-ink-mainnet",
+        pool_address=INKYSWAP_V2_POOL,
+        base_instrument_id=f"evm:57073:{KRAKMASK_ADDRESS}",
+        quote_instrument_id=f"evm:57073:{WETH9_ADDRESS}",
+        max_entry_atomic=cap,
+        max_cumulative_entry_atomic=cap,
+        concurrency=DustLiveConcurrencyV0(1, 1, 1, 1),
+        max_price_impact_bps=100,
+        max_slippage_bps=50,
+        max_grant_duration_s=900,
+        profit_recycle_ratio=Fraction(0, 1),
+        banked_profit_ratio=Fraction(1, 1),
+    )
+    approval, envelope = runtime.record_ink_v0f_preauth_bundle(
+        live_verifier=live,
+        risk_policy=risk,
+        router_identity=fake_router_identity(),
+        intent=intent,
+        session=sess,
+        verified_grant=verified,
+        account_nonce=7,
+        gas_limit_ceiling=250_000,
+        max_fee_per_gas_ceiling=2_000_000_000,
+        max_priority_fee_per_gas_ceiling=100_000_000,
+        constructed_at_epoch_s=1_800_000_001,
+        now_epoch_s=1_800_000_001,
+    )
+    assert approval.requested_allowance_atomic == envelope.max_input_atomic
+    assert envelope.max_input_atomic <= cap
+    assert ledger.held_atomic() == cap
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM approval_actions"
+    ).fetchone()[0] == 1
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM execution_envelopes"
+    ).fetchone()[0] == 1
 
 
 def test_atomic_bundle_contract_freezes_one_exact_input_amount(monkeypatch) -> None:
