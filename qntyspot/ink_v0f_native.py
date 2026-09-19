@@ -9,7 +9,7 @@ This module never signs and never broadcasts.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .canon import digest_object, sha256_hex
@@ -55,6 +55,7 @@ SWAP_EXACT_ETH_FOR_TOKENS_SELECTOR = keccak256(
 NATIVE_BUY_PREVIEW_SCHEMA = "qntyspot.ink_v0f.native_buy_preview.v0"
 NATIVE_REVALIDATION_SCHEMA = "qntyspot.ink_v0f.native_same_amount_revalidation.v0"
 MAX_REVALIDATION_TO_ADMISSION_S = 120
+_NATIVE_REVALIDATION_TOKEN = object()
 
 
 def _uint(value: Any, *, field: str, positive: bool = False) -> int:
@@ -455,8 +456,11 @@ class InkV0FNativeSameAmountRevalidationV0:
     common_block: int
     revalidated_at_epoch_s: int
     schema: str = NATIVE_REVALIDATION_SCHEMA
+    _token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._token is not _NATIVE_REVALIDATION_TOKEN:
+            raise SafeHaltError("native revalidation must be produced by live revalidator")
         if self.schema != NATIVE_REVALIDATION_SCHEMA:
             raise EnvelopeValidationError("unknown native revalidation schema")
         if type(self.preview) is not InkV0FNativeBuyPreviewV0:
@@ -613,6 +617,7 @@ def revalidate_ink_v0f_native_same_amount(
         fresh_required_min_output_atomic=required_min,
         common_block=market.common_block,
         revalidated_at_epoch_s=now,
+        _token=_NATIVE_REVALIDATION_TOKEN,
     )
 
 
