@@ -13,66 +13,64 @@ jobs:
   wallet-readiness:
     runs-on: ubuntu-latest
     steps:
-      - name: Read Ink wallet readiness from two providers
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install QntySpot
+        run: python -m pip install -e .
+
+      - name: Read Ink wallet readiness from canonical providers
         shell: python
         run: |
           import json
-          import urllib.request
+
+          from qntyspot.ink import INK_CHAIN_ID, INK_RPC_ENDPOINTS, JsonRpcClient
 
           wallet = "0x3e604be3293d930069d0805e85379e0ca5fa01cb"
           weth = "0x4200000000000000000000000000000000000006"
-          providers = (
-              "https://rpc-gel.inkonchain.com",
-              "https://rpc-qnd.inkonchain.com",
-          )
-
-          def rpc(url, method, params):
-              body = json.dumps({
-                  "jsonrpc": "2.0",
-                  "id": 1,
-                  "method": method,
-                  "params": params,
-              }).encode()
-              req = urllib.request.Request(
-                  url,
-                  data=body,
-                  headers={"Content-Type": "application/json"},
-                  method="POST",
-              )
-              with urllib.request.urlopen(req, timeout=20) as resp:
-                  payload = json.load(resp)
-              if "error" in payload:
-                  raise RuntimeError(f"{url} {method}: {payload['error']}")
-              return payload["result"]
 
           def qty(v):
+              if not isinstance(v, str) or not v.startswith("0x"):
+                  raise RuntimeError(f"non-canonical quantity: {v!r}")
               return int(v, 16)
+
+          clients = [JsonRpcClient(endpoint, max_retries=2) for endpoint in INK_RPC_ENDPOINTS]
+          chain_ids = [qty(client.request("eth_chainId", [])) for client in clients]
+          if chain_ids != [INK_CHAIN_ID, INK_CHAIN_ID]:
+              raise RuntimeError(f"wrong chain ids: {chain_ids}")
+
+          heads = [qty(client.request("eth_blockNumber", [])) for client in clients]
+          if abs(heads[0] - heads[1]) > 8:
+              raise RuntimeError(f"provider head lag too large: {heads}")
+          common_block = min(heads)
+          block_tag = hex(common_block)
 
           selector = "70a08231"
           owner_word = wallet[2:].lower().rjust(64, "0")
           balance_of = "0x" + selector + owner_word
 
           rows = []
-          for provider in providers:
-              chain_id = qty(rpc(provider, "eth_chainId", []))
-              block = qty(rpc(provider, "eth_blockNumber", []))
-              native = qty(rpc(provider, "eth_getBalance", [wallet, "latest"]))
-              nonce = qty(rpc(provider, "eth_getTransactionCount", [wallet, "latest"]))
-              weth_balance = qty(rpc(provider, "eth_call", [{
+          for client, head in zip(clients, heads):
+              native = qty(client.request("eth_getBalance", [wallet, block_tag]))
+              nonce = qty(client.request("eth_getTransactionCount", [wallet, block_tag]))
+              weth_balance = qty(client.request("eth_call", [{
                   "to": weth,
                   "data": balance_of,
-              }, "latest"]))
+              }, block_tag]))
               rows.append({
-                  "provider": provider,
-                  "chain_id": chain_id,
-                  "block": block,
+                  "provider": client.endpoint,
+                  "head": head,
+                  "common_block": common_block,
+                  "chain_id": INK_CHAIN_ID,
                   "native_wei": native,
                   "weth_wei": weth_balance,
                   "nonce": nonce,
               })
 
-          fields = ("chain_id", "native_wei", "weth_wei", "nonce")
-          for field in fields:
+          for field in ("native_wei", "weth_wei", "nonce"):
               if rows[0][field] != rows[1][field]:
                   raise RuntimeError(f"providers disagree on {field}: {rows}")
 
@@ -85,8 +83,9 @@ jobs:
               "weth": weth,
               "provider_rows": rows,
               "target_wrap_wei": target,
-              "native_eth": format(native / 10**18, ".18f"),
-              "weth_eth": format(weth_balance / 10**18, ".18f"),
+              "native_wei": native,
+              "weth_wei": weth_balance,
+              "nonce": rows[0]["nonce"],
               "needs_wrap": weth_balance < target,
               "native_covers_exact_wrap": native >= target,
               "native_remaining_after_exact_wrap_wei": native - target if native >= target else None,
