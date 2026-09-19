@@ -49,6 +49,7 @@ SOURCE_PATHS = (
     "qntyspot/ink_v0f_human_signing.py",
     "qntyspot/ink_v0f_signed_swap.py",
     "qntyspot/ink_v0f_native.py",
+    "qntyspot/ink_v0f_native_sell.py",
     "qntyspot/ink_v0f_risk.py",
     "qntyspot/keccak.py",
     "qntyspot/ledger/__init__.py",
@@ -71,9 +72,14 @@ SOURCE_PATHS = (
     "qntyspot/states.py",
     "qntyspot/status.py",
 )
-PRE_INK_V0F_NATIVE_SOURCE_PATHS = tuple(
+PRE_INK_V0F_NATIVE_SELL_SOURCE_PATHS = tuple(
     path
     for path in SOURCE_PATHS
+    if path != "qntyspot/ink_v0f_native_sell.py"
+)
+PRE_INK_V0F_NATIVE_SOURCE_PATHS = tuple(
+    path
+    for path in PRE_INK_V0F_NATIVE_SELL_SOURCE_PATHS
     if path != "qntyspot/ink_v0f_native.py"
 )
 PRE_INK_V0F_SIGNED_SWAP_SOURCE_PATHS = tuple(
@@ -227,6 +233,10 @@ def _source_manifest(root: Path) -> list[dict[str, str]]:
         # Preserve the pre-native-ETH runtime identity while binding the
         # payable first-live BUY path into current deployment identity.
         manifest_paths = PRE_INK_V0F_NATIVE_SOURCE_PATHS
+    elif not (root / "qntyspot/ink_v0f_native_sell.py").exists():
+        # Preserve the native-BUY-only identity while binding native ETH
+        # settlement for SELL into current deployment identity.
+        manifest_paths = PRE_INK_V0F_NATIVE_SELL_SOURCE_PATHS
     else:
         manifest_paths = SOURCE_PATHS
     expected_package_paths = {path for path in manifest_paths if path.startswith("qntyspot/")}
