@@ -10,7 +10,7 @@ This module never signs and never broadcasts.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 from .canon import digest_object, sha256_hex
 from .domain import IntentV0, Side
@@ -56,6 +56,79 @@ NATIVE_BUY_PREVIEW_SCHEMA = "qntyspot.ink_v0f.native_buy_preview.v0"
 NATIVE_REVALIDATION_SCHEMA = "qntyspot.ink_v0f.native_same_amount_revalidation.v0"
 MAX_REVALIDATION_TO_ADMISSION_S = 120
 _NATIVE_REVALIDATION_TOKEN = object()
+
+
+def _rpc_quantity(value: Any, *, field: str) -> int:
+    if not isinstance(value, str) or not value.startswith("0x") or len(value) < 3:
+        raise SafeHaltError(f"{field} is not a canonical RPC quantity")
+    body = value[2:]
+    if any(char not in "0123456789abcdef" for char in body):
+        raise SafeHaltError(f"{field} is not lowercase hexadecimal")
+    if len(body) > 1 and body[0] == "0":
+        raise SafeHaltError(f"{field} has leading zeroes")
+    return int(body, 16)
+
+
+@dataclass(frozen=True, slots=True)
+class InkV0FNativeBalanceObservationV0:
+    common_block: int
+    balance_atomic: int
+    provider_evidence: tuple[Mapping[str, Any], Mapping[str, Any]]
+    schema: str = "qntyspot.ink_v0f.native_balance_observation.v0"
+
+    def __post_init__(self) -> None:
+        _uint(self.common_block, field="native balance common block")
+        _uint(self.balance_atomic, field="native balance")
+        if len(self.provider_evidence) != 2:
+            raise SafeHaltError("native balance observation requires two providers")
+
+    @property
+    def digest(self) -> str:
+        return digest_object(
+            {
+                "balance_atomic": str(self.balance_atomic),
+                "common_block": self.common_block,
+                "provider_evidence": [dict(item) for item in self.provider_evidence],
+                "schema": self.schema,
+            }
+        )
+
+
+def observe_ink_v0f_native_balance_for_market(
+    live_verifier: InkV0FLiveVerifier,
+    market: InkMarketObservationV0,
+) -> InkV0FNativeBalanceObservationV0:
+    if type(live_verifier) is not InkV0FLiveVerifier:
+        raise AuthorityVerificationError("native balance requires canonical verifier")
+    if type(market) is not InkMarketObservationV0:
+        raise AuthorityVerificationError("native balance requires canonical market")
+    # Reuse the verifier's provider/head binding before reading at the exact
+    # market common block.
+    live_verifier._heads_for_market(market)
+    block_tag = hex(market.common_block)
+    rows = []
+    for provider in live_verifier.providers:
+        try:
+            raw = provider.request(
+                "eth_getBalance",
+                [INK_V0F_TAKER_ADDRESS, block_tag],
+            )
+        except Exception as exc:
+            raise SafeHaltError(f"native balance RPC read failed: {exc}") from exc
+        balance = _rpc_quantity(raw, field="eth_getBalance")
+        rows.append(
+            {
+                "balance_atomic": balance,
+                "endpoint": provider.endpoint,
+            }
+        )
+    if rows[0]["balance_atomic"] != rows[1]["balance_atomic"]:
+        raise SafeHaltError("Ink V0F providers disagree on native balance")
+    return InkV0FNativeBalanceObservationV0(
+        common_block=market.common_block,
+        balance_atomic=int(rows[0]["balance_atomic"]),
+        provider_evidence=(rows[0], rows[1]),
+    )
 
 
 def _uint(value: Any, *, field: str, positive: bool = False) -> int:
@@ -451,6 +524,7 @@ class InkV0FNativeSameAmountRevalidationV0:
     market_observation_digest: str
     router_observation_digest: str
     signer_state_digest: str
+    native_balance_observation_digest: str
     fresh_quote_output_atomic: int
     fresh_required_min_output_atomic: int
     common_block: int
@@ -469,6 +543,7 @@ class InkV0FNativeSameAmountRevalidationV0:
             (self.market_observation_digest, "market observation digest"),
             (self.router_observation_digest, "router observation digest"),
             (self.signer_state_digest, "signer state digest"),
+            (self.native_balance_observation_digest, "native balance observation digest"),
         ):
             if (
                 type(value) is not str
@@ -495,6 +570,7 @@ class InkV0FNativeSameAmountRevalidationV0:
                     self.fresh_required_min_output_atomic
                 ),
                 "market_observation_digest": self.market_observation_digest,
+                "native_balance_observation_digest": self.native_balance_observation_digest,
                 "preview_digest": self.preview.preview_digest,
                 "revalidated_at_epoch_s": self.revalidated_at_epoch_s,
                 "router_observation_digest": self.router_observation_digest,
@@ -535,12 +611,21 @@ def revalidate_ink_v0f_native_same_amount(
     market = live_verifier.observe_market()
     router = live_verifier.observe_router_for_market(market)
     signer_state = observe_ink_v0f_signer_state_for_market(live_verifier, market)
+    native_balance = observe_ink_v0f_native_balance_for_market(live_verifier, market)
     if router.router_address != router_identity.address:
         raise SafeHaltError("fresh router differs from frozen router")
     if signer_state.account_nonce != envelope.account_nonce:
         raise SafeHaltError("fresh taker nonce differs from frozen native BUY nonce")
     if signer_state.base_fee_per_gas > envelope.max_fee_per_gas_ceiling_atomic:
         raise SafeHaltError("fresh base fee exceeds frozen fee ceiling")
+    worst_case_gas_atomic = (
+        envelope.gas_limit_ceiling * envelope.max_fee_per_gas_ceiling_atomic
+    )
+    required_native_atomic = envelope.transaction_value_atomic + worst_case_gas_atomic
+    if native_balance.balance_atomic < required_native_atomic:
+        raise SafeHaltError(
+            "native balance cannot cover frozen input plus worst-case gas ceiling"
+        )
 
     quote = InkShadowAdapter._quote(market, Side.BUY, envelope.max_input_atomic)
     concurrency = _concurrency_snapshot_from_ledger(
@@ -613,6 +698,7 @@ def revalidate_ink_v0f_native_same_amount(
         market_observation_digest=market.digest(),
         router_observation_digest=router.digest,
         signer_state_digest=signer_state.digest,
+        native_balance_observation_digest=native_balance.digest,
         fresh_quote_output_atomic=quote.output_atomic,
         fresh_required_min_output_atomic=required_min,
         common_block=market.common_block,
