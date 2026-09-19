@@ -405,10 +405,11 @@ def replay_execution_into(target: SpotLedger, source: SpotLedger) -> None:
 
 def reconstruct_execution(source: SpotLedger, *, path: str = ":memory:") -> SpotLedger:
     """Rebuild core and execution projections from canonical committed facts."""
+    source_state = execution_snapshot(source)
+    _validate_exact_signed_envelope_bindings(source_state)
+    reverted_bindings = _validated_reverted_bindings(source_state)
     target = open_ledger(path)
     apply_execution_schema(target.connection)
-    source_state = execution_snapshot(source)
-    reverted_bindings = _validated_reverted_bindings(source_state)
     replay_into(
         target,
         canonical_policies=source.canonical_policies(),
