@@ -43,7 +43,11 @@ from .ink_v0f_execution import (
     amount_out_min_atomic,
 )
 from .ink_v0f_human_signing import observe_ink_v0f_signer_state_for_market
-from .ink_v0f_preauth import INK_V0F_QUOTE_ID, InkV0FLiveVerifier
+from .ink_v0f_preauth import (
+    INK_V0F_QUOTE_ID,
+    InkV0FLiveVerifier,
+    InkV0FRouterObservationV0,
+)
 from .ink_v0f_risk import InkV0FRiskPolicyV0, assert_ink_v0f_entry_admissible
 from .keccak import keccak256
 from .ledger.store import SpotLedger
@@ -364,6 +368,15 @@ def build_ink_v0f_native_buy_preview(
         raise AuthorityVerificationError("native Ink V0F session differs from frozen risk")
     if session.policy_id != intent.policy_id:
         raise AuthorityVerificationError("native Ink V0F session policy differs from intent")
+    if type(observation) is not InkMarketObservationV0:
+        raise AuthorityVerificationError("native Ink V0F preview requires canonical market")
+    if type(quote) is not InkQuoteV0 or quote.side is not Side.BUY:
+        raise AuthorityVerificationError("native Ink V0F preview requires canonical BUY quote")
+    if (
+        quote.observation_digest != observation.digest()
+        or quote.common_block != observation.common_block
+    ):
+        raise SafeHaltError("native Ink V0F quote is not bound to its market observation")
 
     row = _durable_intent_row(ledger, intent)
     if row["network_id"] != policy.network_id:
@@ -439,6 +452,7 @@ def build_ink_v0f_native_buy_preview(
 
 def build_ink_v0f_native_execution_envelope(
     preview: InkV0FNativeBuyPreviewV0,
+    router_observation: InkV0FRouterObservationV0,
     *,
     policy: InkV0FRiskPolicyV0,
     session: ExecutionSessionV0,
@@ -449,6 +463,12 @@ def build_ink_v0f_native_execution_envelope(
         raise AuthorityVerificationError("native envelope requires verified risk")
     if type(session) is not ExecutionSessionV0:
         raise AuthorityVerificationError("native envelope requires execution session")
+    if type(router_observation) is not InkV0FRouterObservationV0:
+        raise AuthorityVerificationError("native envelope requires live router observation")
+    if router_observation.router_address != preview.router_address:
+        raise EnvelopeValidationError("native router observation targets another router")
+    if router_observation.common_block != preview.quote_common_block:
+        raise EnvelopeValidationError("native router observation is not on quote block")
     if preview.scope.session_id != session.session_id:
         raise EnvelopeValidationError("native preview belongs to another session")
     if preview.scope.session_identity_digest != session.identity_digest:
@@ -460,6 +480,7 @@ def build_ink_v0f_native_execution_envelope(
         {
             "funding_mode": NATIVE_ETH_FUNDING_MODE,
             "preview_digest": preview.preview_digest,
+            "router_observation_digest": router_observation.digest,
             "schema": "qntyspot.ink_v0f.native_envelope_plan.v0",
         }
     )
@@ -497,6 +518,7 @@ def build_ink_v0f_native_execution_envelope(
 def assert_ink_v0f_native_execution_envelope_admissible(
     envelope: ExecutionEnvelopeV0,
     preview: InkV0FNativeBuyPreviewV0,
+    router_observation: InkV0FRouterObservationV0,
     *,
     policy: InkV0FRiskPolicyV0,
     session: ExecutionSessionV0,
@@ -504,6 +526,7 @@ def assert_ink_v0f_native_execution_envelope_admissible(
 ) -> None:
     expected = build_ink_v0f_native_execution_envelope(
         preview,
+        router_observation,
         policy=policy,
         session=session,
     )
