@@ -31,7 +31,6 @@ jobs:
           print(json.dumps({
               "repository_commit":"af5edb2eaf9e6ab55a8295da4a9cb5f2e7d549b6",
               "implementation_digest":obj["implementation_digest"],
-              "artifact_digest":obj["artifact_digest"],
           }, sort_keys=True, separators=(",",":")))
           PY
       - name: Run live read-only Ink V0F router and allowance preflight
