@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import tempfile
 import sys
@@ -132,6 +133,37 @@ def _state_path(ledger_path: Path) -> Path:
     return ledger_path.with_suffix(ledger_path.suffix + ".prepared.json")
 
 
+def _claim_fresh_episode_paths(ledger_path: Path, state_path: Path) -> None:
+    """Atomically reserve both durable paths before any live observation."""
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    ledger_fd: int | None = None
+    state_fd: int | None = None
+    try:
+        ledger_fd = os.open(ledger_path, flags, 0o600)
+        os.close(ledger_fd)
+        ledger_fd = None
+        state_fd = os.open(state_path, flags, 0o600)
+        os.close(state_fd)
+        state_fd = None
+    except FileExistsError as exc:
+        if ledger_fd is not None:
+            os.close(ledger_fd)
+        if state_fd is not None:
+            os.close(state_fd)
+        # If this process created the ledger claim but could not claim the
+        # state path, remove only our still-empty ledger placeholder.
+        try:
+            if ledger_path.is_file() and ledger_path.stat().st_size == 0:
+                ledger_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise RuntimeError(
+            "refusing to reuse or race an existing first-live ledger/state path; "
+            "choose a fresh path"
+        ) from exc
+
+
 def _envelope_object(envelope: ExecutionEnvelopeV0) -> dict[str, object]:
     return {field.name: getattr(envelope, field.name) for field in fields(envelope)}
 
@@ -158,10 +190,7 @@ def main() -> int:
     ledger_path = Path(args.ledger).resolve()
     state_path = _state_path(ledger_path)
 
-    if ledger_path.exists() or state_path.exists():
-        raise RuntimeError(
-            "refusing to reuse an existing first-live ledger/state path; choose a fresh path"
-        )
+    _claim_fresh_episode_paths(ledger_path, state_path)
     if not receipt_path.is_file():
         raise RuntimeError("explicit AuthorityRoot receipt path is not a file")
 
@@ -289,7 +318,6 @@ def main() -> int:
     }
 
     policy = parse_policy(policy_doc)
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger = open_ledger(str(ledger_path))
     ledger.admit_policy(policy)
     cycle_id = ledger.open_cycle(policy, 0, now_epoch_s=now)
