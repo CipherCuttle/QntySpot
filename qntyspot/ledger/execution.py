@@ -1624,6 +1624,249 @@ class ExecutionRuntime:
             )
         return approval, envelope
 
+    def record_ink_v0f_native_buy_preauth(
+        self,
+        *,
+        live_verifier: "InkV0FLiveVerifier",
+        risk_policy: "InkV0FRiskPolicyV0",
+        router_identity: "InkV0FRouterIdentityV0",
+        intent: IntentV0,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        account_nonce: int,
+        gas_limit_ceiling: int,
+        max_fee_per_gas_ceiling: int,
+        max_priority_fee_per_gas_ceiling: int,
+        constructed_at_epoch_s: int,
+        now_epoch_s: int,
+    ) -> ExecutionEnvelopeV0:
+        """Atomically derive and persist one no-approval native-ETH BUY envelope."""
+
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.CONSTRUCT_ENVELOPE,
+            now_epoch_s=now_epoch_s,
+        )
+        stored_session = self._conn.execute(
+            "SELECT identity_digest FROM execution_sessions WHERE session_id = ?",
+            (session.session_id,),
+        ).fetchone()
+        if stored_session is None:
+            raise LedgerError(
+                "native Ink V0F preauth requires a durable execution session"
+            )
+        if stored_session["identity_digest"] != session.identity_digest:
+            raise EnvelopeValidationError("stored session identity disagrees")
+        if self.ledger.intent_state(intent.economic_action_id) is not IntentState.RESERVED:
+            raise EnvelopeValidationError(
+                "native Ink V0F preauth requires a durable reservation"
+            )
+        if intent.side is not Side.BUY:
+            raise EnvelopeValidationError("native Ink V0F preauth supports BUY only")
+
+        from ..ink import InkShadowAdapter
+        from ..ink_v0f_native import (
+            assert_ink_v0f_native_execution_envelope_admissible,
+            build_ink_v0f_native_buy_preview,
+            build_ink_v0f_native_execution_envelope,
+        )
+
+        market = live_verifier.observe_market()
+        effective_impact_bps = min(
+            risk_policy.max_price_impact_bps,
+            intent.bounds.max_price_impact_bps,
+        )
+        selected_input = InkShadowAdapter.impact_capped_input_atomic(
+            market,
+            Side.BUY,
+            desired_input_atomic=intent.bounds.max_input_atomic,
+            max_price_impact_bps=effective_impact_bps,
+        )
+        quote = InkShadowAdapter._quote(market, Side.BUY, selected_input)
+        router_observation = live_verifier.observe_router_for_market(market)
+        preview = build_ink_v0f_native_buy_preview(
+            policy=risk_policy,
+            router=router_identity,
+            observation=market,
+            quote=quote,
+            ledger=self.ledger,
+            intent=intent,
+            session=session,
+            account_nonce=account_nonce,
+            gas_limit_ceiling=gas_limit_ceiling,
+            max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
+            max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
+            constructed_at_epoch_s=constructed_at_epoch_s,
+        )
+        envelope = build_ink_v0f_native_execution_envelope(
+            preview,
+            router_observation,
+            policy=risk_policy,
+            session=session,
+        )
+        assert_ink_v0f_native_execution_envelope_admissible(
+            envelope,
+            preview,
+            router_observation,
+            policy=risk_policy,
+            session=session,
+            now_epoch_s=now_epoch_s,
+        )
+
+        envelope_values = {
+            "envelope_id": envelope.envelope_id,
+            "session_id": envelope.session_id,
+            "session_identity_digest": envelope.session_identity_digest,
+            "economic_action_id": envelope.economic_action_id,
+            "plan_id": envelope.plan_id,
+            "quote_id": envelope.quote_id,
+            "quote_observation_digest": envelope.quote_observation_digest,
+            "venue_block_number": envelope.venue_block_number,
+            "chain_id": envelope.chain_id,
+            "taker_address": envelope.taker_address,
+            "input_instrument_id": envelope.input_instrument_id,
+            "output_instrument_id": envelope.output_instrument_id,
+            "max_input_atomic": str(envelope.max_input_atomic),
+            "min_output_atomic": str(envelope.min_output_atomic),
+            "transaction_to": envelope.transaction_to,
+            "transaction_value_atomic": str(envelope.transaction_value_atomic),
+            "calldata_sha256": envelope.calldata_sha256,
+            "calldata_length": envelope.calldata_length,
+            "allowance_target": envelope.allowance_target,
+            "account_nonce": envelope.account_nonce,
+            "gas_limit_ceiling": envelope.gas_limit_ceiling,
+            "max_fee_per_gas_ceiling_atomic": str(
+                envelope.max_fee_per_gas_ceiling_atomic
+            ),
+            "max_priority_fee_per_gas_ceiling_atomic": str(
+                envelope.max_priority_fee_per_gas_ceiling_atomic
+            ),
+            "deadline_epoch_s": envelope.deadline_epoch_s,
+            "authority_policy_digest": envelope.authority_policy_digest,
+            "evidence_digest": envelope.evidence_digest,
+            "lifecycle": "AUTHORIZED",
+            "constructed_at_epoch_s": envelope.constructed_at_epoch_s,
+        }
+
+        with self._transaction("ink_v0f_preauth_bundle") as conn:
+            self._reject_if_killed("native Ink V0F preauth")
+            session_row = self._require_session(session.session_id, conn)
+            if session_row["identity_digest"] != session.identity_digest:
+                raise EnvelopeValidationError("stored session identity disagrees")
+            action_row = self._require_economic_intent(
+                envelope.economic_action_id,
+                conn,
+            )
+            if IntentState(action_row["state"]) is not IntentState.RESERVED:
+                raise EnvelopeValidationError(
+                    "native Ink V0F preauth requires a durable reservation"
+                )
+            persisted_bounds = self._bounds_from_intent(action_row)
+            if persisted_bounds != intent.bounds:
+                raise EnvelopeValidationError(
+                    "native Ink V0F intent bounds changed during live preflight"
+                )
+            if Side(action_row["side"]) is not Side.BUY:
+                raise EnvelopeValidationError(
+                    "native Ink V0F preauth persisted intent is not BUY"
+                )
+            if envelope.max_input_atomic > persisted_bounds.max_input_atomic:
+                raise EnvelopeValidationError(
+                    "native Ink V0F envelope input exceeds persisted economic bounds"
+                )
+            required_output = -(
+                (-persisted_bounds.min_output_atomic * envelope.max_input_atomic)
+                // persisted_bounds.max_input_atomic
+            )
+            if envelope.min_output_atomic < required_output:
+                raise EnvelopeValidationError(
+                    "native Ink V0F envelope output weakens persisted economic bounds"
+                )
+            if (
+                envelope.input_instrument_id != action_row["quote_instrument_id"]
+                or envelope.output_instrument_id != action_row["instrument_id"]
+            ):
+                raise EnvelopeValidationError(
+                    "native Ink V0F envelope instruments differ from persisted intent"
+                )
+            if envelope.transaction_value_atomic != envelope.max_input_atomic:
+                raise EnvelopeValidationError(
+                    "native Ink V0F transaction value differs from frozen input"
+                )
+            if envelope.allowance_target is not None:
+                raise EnvelopeValidationError(
+                    "native Ink V0F BUY cannot persist an allowance target"
+                )
+
+            prior_approval = conn.execute(
+                "SELECT 1 FROM approval_actions WHERE economic_action_id = ? LIMIT 1",
+                (envelope.economic_action_id,),
+            ).fetchone()
+            if prior_approval is not None:
+                raise SafeHaltError(
+                    "native Ink V0F BUY cannot replace an approval-based preauth"
+                )
+            prior_envelope = conn.execute(
+                "SELECT envelope_id FROM execution_envelopes "
+                "WHERE economic_action_id = ? LIMIT 1",
+                (envelope.economic_action_id,),
+            ).fetchone()
+            if (
+                prior_envelope is not None
+                and prior_envelope["envelope_id"] != envelope.envelope_id
+            ):
+                raise SafeHaltError(
+                    "native Ink V0F BUY cannot replace a different frozen envelope"
+                )
+
+            policy_row = conn.execute(
+                "SELECT per_order_cap_atomic, global_cap_atomic FROM policies "
+                "WHERE policy_id = ?",
+                (action_row["policy_id"],),
+            ).fetchone()
+            if policy_row is None:
+                raise LedgerError("native Ink V0F preauth policy is not admitted")
+            total_held_atomic = self.ledger.held_atomic()
+            current_reservation_atomic = int(action_row["quote_exposure_atomic"])
+            if current_reservation_atomic <= 0:
+                raise LedgerError(
+                    "native Ink V0F BUY preauth requires a positive durable reservation"
+                )
+            if current_reservation_atomic > total_held_atomic:
+                raise LedgerError(
+                    "native Ink V0F durable reservation exceeds canonical held capital"
+                )
+            if envelope.max_input_atomic > current_reservation_atomic:
+                raise AuthorityCeilingError(
+                    "native Ink V0F preauth input exceeds current durable reservation"
+                )
+            held_excluding_requested_atomic = (
+                total_held_atomic - envelope.max_input_atomic
+            )
+            assert_effective_capital_within(
+                requested_atomic=envelope.max_input_atomic,
+                held_atomic=held_excluding_requested_atomic,
+                local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
+                local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
+                verified_grant=verified_grant,
+                now_epoch_s=now_epoch_s,
+            )
+
+            self._economic_external_action(
+                conn,
+                envelope.economic_action_id,
+                session_id=session.session_id,
+            )
+            self._insert_or_match(
+                conn,
+                "execution_envelopes",
+                "envelope_id",
+                envelope.envelope_id,
+                envelope_values,
+            )
+        return envelope
+
     def record_signed_transaction_metadata(
         self,
         record: SignedTransactionRecordV0,
