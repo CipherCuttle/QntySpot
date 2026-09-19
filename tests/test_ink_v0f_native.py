@@ -18,7 +18,7 @@ from qntyspot.authority_root import (
 from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.domain import Side
 from qntyspot.economics import build_intent
-from qntyspot.errors import EnvelopeValidationError, SafeHaltError
+from qntyspot.errors import EnvelopeValidationError, ReplayDivergenceError, SafeHaltError
 from qntyspot.exact_signed_bytes import (
     ParsedExactSignedBytesV0,
     ValidatedExactSignedBytesV0,
@@ -54,7 +54,7 @@ from qntyspot.ink_v0f_preauth import (
     InkV0FRouterObservationV0,
 )
 from qntyspot.ink_v0f_risk import consume_ink_v0f_risk_artifact
-from qntyspot.ledger import open_ledger
+from qntyspot.ledger import open_ledger, reconstruct_execution
 from qntyspot.ledger.execution import ExecutionRuntime
 from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
@@ -725,3 +725,46 @@ def test_exact_bytes_admission_persists_envelope_and_submission_keeps_bytes(monk
         submitted_at_epoch_s=NOW + 3,
     )
     assert transport.seen == [signed_bytes]
+
+
+def test_exact_byte_scope_mismatch_fails_before_persistent_replay_target(
+    monkeypatch, tmp_path
+) -> None:
+    runtime, ledger, intent, sess, _verified, envelope = _durable_native_preauth_for_exact_bytes(
+        monkeypatch
+    )
+    target = tmp_path / "must-not-exist.sqlite3"
+    ledger.connection.execute(
+        """
+        INSERT INTO signed_transactions (
+            signed_transaction_id, external_action_id, session_id, envelope_id,
+            approval_action_id, origin, chain_id, taker_address, account_nonce,
+            raw_signed_sha256, raw_signed_length, transaction_hash, scope_digest,
+            signer_identity, frozen_at_epoch_s
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            "66" * 32,
+            intent.economic_action_id,
+            sess.session_id,
+            envelope.envelope_id,
+            None,
+            "EXTERNAL_SIGNED_BYTES",
+            sess.chain_id,
+            sess.taker_address,
+            envelope.account_nonce,
+            "67" * 32,
+            1,
+            "0x" + "68" * 32,
+            "69" * 32,
+            "evm-recovered:" + sess.taker_address,
+            NOW + 2,
+        ),
+    )
+
+    with pytest.raises(
+        ReplayDivergenceError,
+        match="exact-byte scope differs from durable envelope",
+    ):
+        reconstruct_execution(ledger, path=str(target))
+    assert not target.exists()
