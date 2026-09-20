@@ -66,6 +66,7 @@ from ..authority_root import (
     VerifiedAuthorityGrantV0,
     assert_effective_capital_within,
     require_effective_capability,
+    require_expired_recovery_capability,
 )
 from ..states import EXTERNALLY_AMBIGUOUS_STATES, IntentState
 from .execution_schema import (
@@ -329,16 +330,26 @@ class ExecutionRuntime:
         *,
         now_epoch_s: int,
         safe_halt: bool = False,
+        expired_recovery: bool = False,
     ) -> AuthorityLevel:
-        level = require_effective_capability(
-            capability=capability,
-            source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-            verified_grant=verified_grant,
-            session=session,
-            now_epoch_s=now_epoch_s,
-            kill_switch=self._kill_engaged(),
-            safe_halt=safe_halt,
-        )
+        if expired_recovery:
+            level = require_expired_recovery_capability(
+                capability=capability,
+                source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+                verified_grant=verified_grant,
+                session=session,
+                now_epoch_s=now_epoch_s,
+            )
+        else:
+            level = require_effective_capability(
+                capability=capability,
+                source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+                verified_grant=verified_grant,
+                session=session,
+                now_epoch_s=now_epoch_s,
+                kill_switch=self._kill_engaged(),
+                safe_halt=safe_halt,
+            )
         row = self._conn.execute(
             "SELECT identity_digest, authority_level FROM execution_sessions "
             "WHERE session_id = ?",
@@ -347,7 +358,13 @@ class ExecutionRuntime:
         if row is not None:
             if row["identity_digest"] != session.identity_digest:
                 raise AuthorityVerificationError("stored session identity disagrees")
-            if int(row["authority_level"]) != int(level):
+            stored_level = AuthorityLevel(int(row["authority_level"]))
+            if expired_recovery:
+                if stored_level < level:
+                    raise AuthorityVerificationError(
+                        "stored session never carried recovery authority"
+                    )
+            elif stored_level != level:
                 raise AuthorityVerificationError("stored effective authority disagrees")
         return level
 
@@ -2540,6 +2557,7 @@ class ExecutionRuntime:
         signed_transaction_id: str | None = None,
         external_transaction_ref_id: str | None = None,
         finality: FinalityPolicyV0 = ROBINHOOD_V0_FINALITY,
+        expired_recovery: bool = False,
     ) -> bool:
         if (signed_transaction_id is None) == (external_transaction_ref_id is None):
             raise LedgerError("exactly one transaction origin is required")
@@ -2549,6 +2567,7 @@ class ExecutionRuntime:
             Capability.OBSERVE_CHAIN,
             now_epoch_s=now_epoch_s,
             safe_halt=self.ledger.intent_state(external_action_id) is IntentState.SAFE_HALT,
+            expired_recovery=expired_recovery,
         )
         with self._transaction("chain_observation") as conn:
             if signed_transaction_id is not None:
@@ -2700,6 +2719,7 @@ class ExecutionRuntime:
         fee_atomic: int = 0,
         source: str = "external-chain-observation",
         observed_at_epoch_s: int | None = None,
+        expired_recovery: bool = False,
     ) -> Any:
         self._authorize(
             session,
@@ -2707,6 +2727,7 @@ class ExecutionRuntime:
             Capability.RECONCILE,
             now_epoch_s=now_epoch_s,
             safe_halt=self.ledger.intent_state(economic_action_id) is IntentState.SAFE_HALT,
+            expired_recovery=expired_recovery,
         )
         with self._transaction("reconciliation") as conn:
             external = conn.execute(
