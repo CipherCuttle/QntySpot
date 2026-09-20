@@ -374,6 +374,10 @@ def test_approval_exact_bytes_are_durable_and_submitted_once(tmp_path, monkeypat
     )
     assert attempt.acknowledgment is SubmissionAcknowledgment.ACCEPTED
     assert transport.calls == [raw]
+    # Approval transport evidence must not transition the economic SELL/entry
+    # intent. It remains RESERVED until approval reconciliation and the later
+    # swap path act on it.
+    assert ledger.intent_state(request.economic_action_id) is IntentState.RESERVED
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM submission_attempts WHERE signed_transaction_id = ?",
         (signed.signed_transaction_id,),
