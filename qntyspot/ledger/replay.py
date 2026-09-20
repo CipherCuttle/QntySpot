@@ -122,6 +122,18 @@ def replay_into(
                     f"event {seq}: resume for unknown action {action_id}",
                 )
                 _apply_exact_bytes_resume(wconn, str(action_id), event, seq)
+            elif etype == EventType.CHAIN_TRUTH_RECOVERED.value:
+                _require(
+                    action_id in seen_actions,
+                    f"event {seq}: chain-truth recovery for unknown action {action_id}",
+                )
+                _apply_chain_truth_recovery(
+                    wconn,
+                    str(action_id),
+                    event,
+                    seq,
+                    trusted_reverted_external_action_ids=trusted_reverted_external_action_ids,
+                )
             elif etype == EventType.FILL_RECEIPT_APPENDED.value:
                 _require(
                     action_id in seen_actions,
@@ -354,6 +366,108 @@ def _apply_exact_bytes_resume(
         "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
         "WHERE economic_action_id = ? AND status = ?",
         (ReservationStatus.ACTIVE.value, action_id, ReservationStatus.QUARANTINED.value),
+    )
+
+
+def _apply_chain_truth_recovery(
+    conn: sqlite3.Connection,
+    action_id: str,
+    event: Mapping[str, Any],
+    seq: int,
+    *,
+    trusted_reverted_external_action_ids: frozenset[str],
+) -> None:
+    """Replay terminal chain truth that resolves an ordinary SAFE_HALT sink."""
+    payload = strict_json_loads(event["payload_json"])
+    _require(
+        set(payload)
+        == {"reconciliation_id", "receipt_id", "recovery_type", "verdict"},
+        f"event {seq}: malformed chain-truth recovery payload",
+    )
+    _require(
+        payload["recovery_type"] == "TERMINAL_CHAIN_TRUTH_AFTER_SAFE_HALT",
+        f"event {seq}: unexpected chain-truth recovery type",
+    )
+    _require(
+        str(event["from_state"]) == IntentState.SAFE_HALT.value,
+        f"event {seq}: chain-truth recovery must start at SAFE_HALT",
+    )
+    try:
+        target = IntentState(str(event["to_state"]))
+    except ValueError as exc:
+        raise ReplayDivergenceError(
+            f"event {seq}: unknown chain-truth recovery target"
+        ) from exc
+    _require(
+        target in {IntentState.RECONCILED, IntentState.REJECTED},
+        f"event {seq}: invalid chain-truth recovery target",
+    )
+    row = conn.execute(
+        "SELECT state FROM intents WHERE economic_action_id = ?", (action_id,)
+    ).fetchone()
+    _require(row is not None, f"event {seq}: no intent {action_id}")
+    _require(
+        row["state"] == IntentState.SAFE_HALT.value,
+        f"event {seq}: chain-truth recovery requires replayed SAFE_HALT",
+    )
+    reservation = conn.execute(
+        "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
+        (action_id,),
+    ).fetchone()
+    _require(
+        reservation is not None
+        and reservation["status"] == ReservationStatus.QUARANTINED.value,
+        f"event {seq}: chain-truth recovery requires QUARANTINED reservation",
+    )
+
+    if target is IntentState.RECONCILED:
+        _require(
+            payload["verdict"] == "SETTLED"
+            and isinstance(payload["receipt_id"], str)
+            and bool(payload["receipt_id"]),
+            f"event {seq}: settled recovery payload disagrees",
+        )
+        receipt = conn.execute(
+            "SELECT 1 FROM fill_receipts "
+            "WHERE receipt_id = ? AND economic_action_id = ?",
+            (payload["receipt_id"], action_id),
+        ).fetchone()
+        _require(
+            receipt is not None,
+            f"event {seq}: settled recovery has no bound fill receipt",
+        )
+        conn.execute(
+            "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+            "WHERE economic_action_id = ? AND status = ?",
+            (
+                ReservationStatus.ACTIVE.value,
+                action_id,
+                ReservationStatus.QUARANTINED.value,
+            ),
+        )
+    else:
+        _require(
+            payload["verdict"] == "REVERTED" and payload["receipt_id"] is None,
+            f"event {seq}: reverted recovery payload disagrees",
+        )
+        _require(
+            action_id in trusted_reverted_external_action_ids,
+            f"event {seq}: reverted recovery lacks trusted reverted chain truth",
+        )
+        conn.execute(
+            "UPDATE budget_reservations SET status = ?, settled_seq = ? "
+            "WHERE economic_action_id = ? AND status = ?",
+            (
+                ReservationStatus.RELEASED.value,
+                seq,
+                action_id,
+                ReservationStatus.QUARANTINED.value,
+            ),
+        )
+
+    conn.execute(
+        "UPDATE intents SET state = ? WHERE economic_action_id = ?",
+        (target.value, action_id),
     )
 
 
