@@ -9,10 +9,19 @@ import sqlite3
 import pytest
 
 from conftest import NOW, base_policy_doc, drive
-from qntyspot.authority_root import verify_authority_grant
+from qntyspot.authority_root import (
+    verify_authority_grant,
+    verify_expired_authority_grant_for_recovery,
+)
 from qntyspot.domain import FillReceiptV0
 from qntyspot.economics import build_intent
-from qntyspot.errors import AuthorityCeilingError, ChainTruthError, LedgerError, SafeHaltError
+from qntyspot.errors import (
+    AuthorityCeilingError,
+    AuthorityVerificationError,
+    ChainTruthError,
+    LedgerError,
+    SafeHaltError,
+)
 from qntyspot.execution_contract import (
     AuthorityLevel,
     ChainObservationV0,
@@ -150,6 +159,73 @@ def test_external_lifecycle_reconciles_once_and_replays(tmp_path: Path) -> None:
     assert ledger.intent_state(intent.economic_action_id) is IntentState.FILLED
     assert ledger.connection.execute("SELECT COUNT(*) FROM signed_transactions").fetchone()[0] == 0
     assert ledger.connection.execute("SELECT COUNT(*) FROM execution_envelopes").fetchone()[0] == 0
+    assert_execution_replay_equivalence(ledger)
+
+
+def test_expired_grant_can_finish_already_bound_chain_truth(tmp_path: Path) -> None:
+    ledger, runtime, intent, reference, session, grant = setup_runtime(tmp_path)
+    expired_at = grant.authority_policy.not_after_epoch_s
+    recovery = verify_expired_authority_grant_for_recovery(
+        receipt=grant.receipt,
+        trusted_root=_root_for(grant.root_id),
+        session=session,
+        now_epoch_s=expired_at,
+    )
+    first = replace(
+        _external_observation(reference, "provider-a"),
+        observed_at_epoch_s=expired_at,
+    )
+    second = replace(
+        _external_observation(reference, "provider-b"),
+        observed_at_epoch_s=expired_at,
+    )
+
+    with pytest.raises((AuthorityCeilingError, AuthorityVerificationError)):
+        runtime.record_chain_observation(
+            first,
+            external_action_id=intent.economic_action_id,
+            external_transaction_ref_id=reference.external_transaction_ref_id,
+            session=session,
+            verified_grant=recovery,
+            now_epoch_s=expired_at,
+            finality=FINALITY,
+        )
+
+    runtime.record_chain_observation(
+        first,
+        external_action_id=intent.economic_action_id,
+        external_transaction_ref_id=reference.external_transaction_ref_id,
+        session=session,
+        verified_grant=recovery,
+        now_epoch_s=expired_at,
+        finality=FINALITY,
+        expired_recovery=True,
+    )
+    runtime.record_chain_observation(
+        second,
+        external_action_id=intent.economic_action_id,
+        external_transaction_ref_id=reference.external_transaction_ref_id,
+        session=session,
+        verified_grant=recovery,
+        now_epoch_s=expired_at,
+        finality=FINALITY,
+        expired_recovery=True,
+    )
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.CONFIRMED
+
+    truth = runtime.reconcile_external_action(
+        intent.economic_action_id,
+        session=session,
+        verified_grant=recovery,
+        now_epoch_s=expired_at,
+        finality=FINALITY,
+        receipt_id="receipt-expired-recovery",
+        expired_recovery=True,
+    )
+    assert truth.verdict.value == "CONFIRMED"
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.RECONCILED
+    runtime.complete_settlement(intent.economic_action_id, now_epoch_s=expired_at)
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.FILLED
     assert_execution_replay_equivalence(ledger)
 
 
