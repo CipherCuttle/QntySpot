@@ -865,7 +865,6 @@ class ExecutionRuntime:
         *,
         provider_id: str,
         submitted_at_epoch_s: int,
-        allow_identical_retry: bool = False,
     ) -> SubmissionAttemptV0:
         """Submit one durably admitted exact approval byte string at most once."""
 
@@ -914,9 +913,6 @@ class ExecutionRuntime:
             )
         if not isinstance(provider_id, str) or not provider_id or provider_id.strip() != provider_id:
             raise EnvelopeValidationError("provider_id must be a non-empty label")
-        if type(allow_identical_retry) is not bool:
-            raise EnvelopeValidationError("allow_identical_retry must be boolean")
-
         row = self._conn.execute(
             "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
             (signed.signed_transaction_id,),
@@ -972,9 +968,9 @@ class ExecutionRuntime:
                 "WHERE signed_transaction_id = ? LIMIT 1",
                 (signed.signed_transaction_id,),
             ).fetchone()
-            if prior_attempt is not None and not allow_identical_retry:
+            if prior_attempt is not None:
                 raise SafeHaltError(
-                    "identical approval retransmission requires explicit idempotent retry admission"
+                    "approval retransmission is forbidden after any prior transport attempt"
                 )
 
         try:
@@ -2721,6 +2717,14 @@ class ExecutionRuntime:
                 SubmissionAcknowledgment.ACCEPTED,
                 SubmissionAcknowledgment.UNKNOWN,
             }:
+                # Approval transactions are external effects in their own
+                # namespace. Their external_action_id is the approval action,
+                # not an economic intent ID, so recording transport evidence
+                # must never attempt an intent-state transition. The economic
+                # SELL remains RESERVED until exact approval reconciliation
+                # and the separately validated swap submission path.
+                if signed["origin"] == "APPROVAL":
+                    return inserted
                 action_id = signed["external_action_id"]
                 state = self.ledger.intent_state(action_id)
                 if state is IntentState.SIGNED:
