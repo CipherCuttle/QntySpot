@@ -162,8 +162,17 @@ def test_external_lifecycle_reconciles_once_and_replays(tmp_path: Path) -> None:
     assert_execution_replay_equivalence(ledger)
 
 
-def test_expired_grant_can_finish_already_bound_chain_truth(tmp_path: Path) -> None:
+def test_expired_grant_can_finish_safe_halted_bound_chain_truth(tmp_path: Path) -> None:
     ledger, runtime, intent, reference, session, grant = setup_runtime(tmp_path)
+    ledger.transition(
+        intent.economic_action_id,
+        IntentState.SAFE_HALT,
+        now_epoch_s=NOW + 1,
+        payload={"test": "crash_recovery_quarantine"},
+    )
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.SAFE_HALT
+    assert ledger.held_atomic() == intent.bounds.max_input_atomic
+
     expired_at = grant.authority_policy.not_after_epoch_s
     recovery = verify_expired_authority_grant_for_recovery(
         receipt=grant.receipt,
@@ -186,7 +195,7 @@ def test_expired_grant_can_finish_already_bound_chain_truth(tmp_path: Path) -> N
             external_action_id=intent.economic_action_id,
             external_transaction_ref_id=reference.external_transaction_ref_id,
             session=session,
-            verified_grant=recovery,
+            verified_grant=recovery,  # type: ignore[arg-type]
             now_epoch_s=expired_at,
             finality=FINALITY,
         )
@@ -211,7 +220,8 @@ def test_expired_grant_can_finish_already_bound_chain_truth(tmp_path: Path) -> N
         finality=FINALITY,
         expired_recovery=True,
     )
-    assert ledger.intent_state(intent.economic_action_id) is IntentState.CONFIRMED
+    # Observation while halted records truth but never reopens execution.
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.SAFE_HALT
 
     truth = runtime.reconcile_external_action(
         intent.economic_action_id,
@@ -226,6 +236,55 @@ def test_expired_grant_can_finish_already_bound_chain_truth(tmp_path: Path) -> N
     assert ledger.intent_state(intent.economic_action_id) is IntentState.RECONCILED
     runtime.complete_settlement(intent.economic_action_id, now_epoch_s=expired_at)
     assert ledger.intent_state(intent.economic_action_id) is IntentState.FILLED
+    assert_execution_replay_equivalence(ledger)
+
+
+def test_expired_grant_can_release_safe_halt_after_confirmed_revert(tmp_path: Path) -> None:
+    ledger, runtime, intent, reference, session, grant = setup_runtime(tmp_path)
+    ledger.transition(
+        intent.economic_action_id,
+        IntentState.SAFE_HALT,
+        now_epoch_s=NOW + 1,
+        payload={"test": "crash_recovery_quarantine"},
+    )
+    expired_at = grant.authority_policy.not_after_epoch_s
+    recovery = verify_expired_authority_grant_for_recovery(
+        receipt=grant.receipt,
+        trusted_root=_root_for(grant.root_id),
+        session=session,
+        now_epoch_s=expired_at,
+    )
+    reverted = replace(
+        _external_observation(
+            reference,
+            "provider-a",
+            status=ReceiptStatus.REVERTED,
+        ),
+        observed_at_epoch_s=expired_at,
+    )
+    runtime.record_chain_observation(
+        reverted,
+        external_action_id=intent.economic_action_id,
+        external_transaction_ref_id=reference.external_transaction_ref_id,
+        session=session,
+        verified_grant=recovery,
+        now_epoch_s=expired_at,
+        finality=REVERT_FINALITY,
+        expired_recovery=True,
+    )
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.SAFE_HALT
+
+    truth = runtime.reconcile_external_action(
+        intent.economic_action_id,
+        session=session,
+        verified_grant=recovery,
+        now_epoch_s=expired_at,
+        finality=REVERT_FINALITY,
+        expired_recovery=True,
+    )
+    assert truth.verdict.value == "REVERTED"
+    assert ledger.intent_state(intent.economic_action_id) is IntentState.REJECTED
+    assert ledger.held_atomic() == 0
     assert_execution_replay_equivalence(ledger)
 
 
