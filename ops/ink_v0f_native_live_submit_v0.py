@@ -497,6 +497,19 @@ def _reconstruct_prepared(
     return policy, intent, session, envelope
 
 
+def _assert_authority_window(
+    *, not_after_epoch_s: int, now_epoch_s: int, require_submission_window: bool
+) -> int:
+    remaining = not_after_epoch_s - now_epoch_s
+    if remaining <= 0:
+        raise SafeHaltError("authority grant is expired")
+    if require_submission_window and remaining < MIN_REMAINING_AUTHORITY_S:
+        raise SafeHaltError(
+            f"grant has only {remaining}s remaining; do not admit or submit signed bytes"
+        )
+    return remaining
+
+
 def _verify_current_grant(
     state: Mapping[str, Any],
     *,
@@ -520,13 +533,11 @@ def _verify_current_grant(
         != BOUND_IMPLEMENTATION_DIGEST
     ):
         raise RuntimeError("receipt does not authorize current QntySpot implementation")
-    remaining = receipt.authority_policy.not_after_epoch_s - now_epoch_s
-    if remaining <= 0:
-        raise SafeHaltError("authority grant is expired")
-    if require_submission_window and remaining < MIN_REMAINING_AUTHORITY_S:
-        raise SafeHaltError(
-            f"grant has only {remaining}s remaining; do not admit or submit signed bytes"
-        )
+    _assert_authority_window(
+        not_after_epoch_s=receipt.authority_policy.not_after_epoch_s,
+        now_epoch_s=now_epoch_s,
+        require_submission_window=require_submission_window,
+    )
     config_path = authority_root / "public/trusted-authority-root-v0.json"
     anchor_path = authority_root / "public/authority-root-ed25519-v0.pub"
     trusted = load_trusted_authority_root(
