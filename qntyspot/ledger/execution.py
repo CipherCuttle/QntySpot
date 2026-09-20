@@ -2633,15 +2633,20 @@ class ExecutionRuntime:
                     ChainTruthVerdict.INCLUDED,
                     ChainTruthVerdict.CONFIRMED,
                 }:
-                    self._advance_to_chain_state(
-                        external_action_id,
-                        state,
-                        IntentState.CONFIRMED
-                        if truth.verdict is ChainTruthVerdict.CONFIRMED
-                        else IntentState.INCLUDED,
-                        now_epoch_s=observation.observed_at_epoch_s,
-                        external_reference=external_transaction_ref_id is not None,
-                    )
+                    # SAFE_HALT is terminal for ordinary lifecycle transitions.
+                    # Persist later chain truth while halted, but consume it only
+                    # through the explicit accounting-only recovery primitive
+                    # during reconciliation.
+                    if state is not IntentState.SAFE_HALT:
+                        self._advance_to_chain_state(
+                            external_action_id,
+                            state,
+                            IntentState.CONFIRMED
+                            if truth.verdict is ChainTruthVerdict.CONFIRMED
+                            else IntentState.INCLUDED,
+                            now_epoch_s=observation.observed_at_epoch_s,
+                            external_reference=external_transaction_ref_id is not None,
+                        )
             return inserted
 
     def _advance_to_chain_state(
@@ -2795,6 +2800,20 @@ class ExecutionRuntime:
                         if key != "reconciled_at_epoch_s"
                     },
                 )
+                state = self.ledger.intent_state(economic_action_id)
+                if state is IntentState.SAFE_HALT:
+                    if truth.verdict is ChainTruthVerdict.CONFIRMED:
+                        self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                            economic_action_id,
+                            IntentState.RECONCILED,
+                            now_epoch_s=now_epoch_s,
+                        )
+                    elif truth.verdict is ChainTruthVerdict.REVERTED:
+                        self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                            economic_action_id,
+                            IntentState.REJECTED,
+                            now_epoch_s=now_epoch_s,
+                        )
                 return truth
             if truth.verdict in {ChainTruthVerdict.NO_EVIDENCE, ChainTruthVerdict.VISIBLE, ChainTruthVerdict.INCLUDED}:
                 raise SafeHaltError(
@@ -2816,7 +2835,13 @@ class ExecutionRuntime:
                 self._insert_reconciliation(
                     conn, economic_action_id, truth, now_epoch_s, receipt_id=None,
                 )
-                if state in EXTERNALLY_AMBIGUOUS_STATES or (
+                if state is IntentState.SAFE_HALT:
+                    self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                        economic_action_id,
+                        IntentState.REJECTED,
+                        now_epoch_s=now_epoch_s,
+                    )
+                elif state in EXTERNALLY_AMBIGUOUS_STATES or (
                     external_ref_id is not None and state is IntentState.RESERVED
                 ):
                     self.ledger.transition(
@@ -2850,6 +2875,7 @@ class ExecutionRuntime:
                 IntentState.INCLUDED,
                 IntentState.SUBMITTED,
                 IntentState.SIGNED,
+                IntentState.SAFE_HALT,
             }:
                 raise SafeHaltError(f"confirmed settlement cannot be accounted from {state.value}")
             self.ledger.append_execution_fill_receipt(
@@ -2860,18 +2886,25 @@ class ExecutionRuntime:
             self._insert_reconciliation(
                 conn, economic_action_id, truth, now_epoch_s, receipt_id=receipt.receipt_id,
             )
-            self._advance_to_chain_state(
-                economic_action_id, self.ledger.intent_state(economic_action_id),
-                IntentState.CONFIRMED,
-                now_epoch_s=now_epoch_s,
-                external_reference=external_ref_id is not None,
-            )
-            if self.ledger.intent_state(economic_action_id) is IntentState.CONFIRMED:
-                self.ledger.transition(
-                    economic_action_id, IntentState.RECONCILED,
+            if state is IntentState.SAFE_HALT:
+                self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                    economic_action_id,
+                    IntentState.RECONCILED,
                     now_epoch_s=now_epoch_s,
-                    payload={"execution": "settlement_reconciled"},
                 )
+            else:
+                self._advance_to_chain_state(
+                    economic_action_id, self.ledger.intent_state(economic_action_id),
+                    IntentState.CONFIRMED,
+                    now_epoch_s=now_epoch_s,
+                    external_reference=external_ref_id is not None,
+                )
+                if self.ledger.intent_state(economic_action_id) is IntentState.CONFIRMED:
+                    self.ledger.transition(
+                        economic_action_id, IntentState.RECONCILED,
+                        now_epoch_s=now_epoch_s,
+                        payload={"execution": "settlement_reconciled"},
+                    )
             return truth
 
     def _insert_reconciliation(
