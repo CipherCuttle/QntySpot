@@ -127,10 +127,20 @@ minimum epoch, explicit time interval, exact session binding, authority-policy
 digest, and every repository/implementation/network/taker/venue/ceiling
 field. A caller cannot set a boolean to manufacture a verified result.
 
-Verification is not a timeless bearer capability. Every authority-consuming
-helper and every continuity-recording acceptance requires an explicit current
-epoch and revalidates the receipt interval at that time; a grant that was
-valid when verified is rejected after expiry or before its validity window.
+Verification is not a timeless bearer capability. Every ordinary
+authority-consuming helper and every continuity-recording acceptance requires
+an explicit current epoch and revalidates the receipt interval at that time; a
+grant that was valid when verified is rejected after expiry or before its
+validity window.
+
+Post-expiry accounting recovery is a separate proof domain. An expired receipt
+may be authenticated only against the original public trust root and exact
+static session scope, producing an opaque recovery-only proof type that normal
+authority gates cannot consume. That proof exposes only OBSERVE_CHAIN,
+RECONCILE, and ACCOUNT_QUARANTINE for facts already bound to the original
+session. It never revives reserve, construction, approval, signing, submission,
+or transaction-origin authority, and SAFE_HALT recovery may move only to
+RECONCILED or REJECTED after terminal chain truth is durably proven.
 
 ## Epoch, persistence, and outage semantics
 
@@ -150,7 +160,9 @@ the externally pinned minimum are sufficient for V0; distributed PKI and
 consensus are deferred.
 
 An authority-root outage prevents new issuance because no issuer is available.
-It does not prevent QntySpot from reconciling already-existing external facts.
+It does not prevent QntySpot from reconciling already-existing external facts:
+the original signed receipt can later authenticate only the recovery-only proof
+described above once its interval has expired.
 
 ## Issuance boundary
 
