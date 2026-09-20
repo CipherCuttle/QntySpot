@@ -67,7 +67,7 @@ from qntyspot.keccak import keccak256
 from qntyspot.ledger import open_ledger
 from qntyspot.ledger.execution import ExecutionRuntime
 from qntyspot.policy import parse_policy
-from qntyspot.states import IntentState
+from qntyspot.states import IntentState, TERMINAL_STATES
 
 BOUND_REPOSITORY_COMMIT = "b25fa90a7fc0aa3304f17907b354cbab40c11ce3"
 BOUND_IMPLEMENTATION_DIGEST = (
@@ -582,6 +582,28 @@ def _verify_grant_for_phase(
     return receipt, proof, True
 
 
+def _quarantine_unknown_external_outcome(
+    ledger,
+    economic_action_id: str,
+    *,
+    cause: BaseException,
+    now_epoch_s: int,
+) -> None:
+    """Durably sink unresolved post-guard outcomes before propagating failure."""
+    state = ledger.intent_state(economic_action_id)
+    if state in TERMINAL_STATES:
+        return
+    ledger.transition(
+        economic_action_id,
+        IntentState.SAFE_HALT,
+        now_epoch_s=now_epoch_s,
+        payload={
+            "execution": "post_submission_truth_unresolved",
+            "error_class": cause.__class__.__name__,
+        },
+    )
+
+
 def _result(
     *,
     status: str,
@@ -777,12 +799,21 @@ def main() -> int:
     # external effects but must not erase our ability to learn what already
     # happened. Observation may therefore continue beyond the grant window.
     stop_epoch_s = int(time.time()) + MAX_OBSERVATION_WINDOW_S
-    observations, fee_atomic = _terminal_observations(
-        read_providers,
-        transaction_hash=transaction_hash,
-        envelope=envelope,
-        stop_epoch_s=stop_epoch_s,
-    )
+    try:
+        observations, fee_atomic = _terminal_observations(
+            read_providers,
+            transaction_hash=transaction_hash,
+            envelope=envelope,
+            stop_epoch_s=stop_epoch_s,
+        )
+    except Exception as exc:
+        _quarantine_unknown_external_outcome(
+            ledger,
+            intent.economic_action_id,
+            cause=exc,
+            now_epoch_s=int(time.time()),
+        )
+        raise
 
     # For a successful BUY, corroborate receipt logs against actual wallet
     # balance deltas before allowing reconciliation to mint a fill receipt.
@@ -803,77 +834,115 @@ def main() -> int:
                 - fee_atomic
             )
             if post_balances["krakmask_balance_atomic"] != expected_token:
-                raise SafeHaltError(
+                exc = SafeHaltError(
                     "confirmed KRAKMASK balance delta differs from receipt settlement"
                 )
+                _quarantine_unknown_external_outcome(
+                    ledger,
+                    intent.economic_action_id,
+                    cause=exc,
+                    now_epoch_s=int(time.time()),
+                )
+                raise exc
             if post_balances["native_balance_atomic"] != expected_native:
-                raise SafeHaltError(
+                exc = SafeHaltError(
                     "confirmed native balance delta differs from input plus gas"
                 )
+                _quarantine_unknown_external_outcome(
+                    ledger,
+                    intent.economic_action_id,
+                    cause=exc,
+                    now_epoch_s=int(time.time()),
+                )
+                raise exc
         elif observations[0].receipt_status is ReceiptStatus.REVERTED:
             if post_balances["krakmask_balance_atomic"] != pre_token:
-                raise SafeHaltError(
+                exc = SafeHaltError(
                     "reverted transaction unexpectedly changed KRAKMASK balance"
                 )
+                _quarantine_unknown_external_outcome(
+                    ledger,
+                    intent.economic_action_id,
+                    cause=exc,
+                    now_epoch_s=int(time.time()),
+                )
+                raise exc
             if post_balances["native_balance_atomic"] != pre_native - fee_atomic:
-                raise SafeHaltError(
+                exc = SafeHaltError(
                     "reverted native balance delta differs from gas-only loss"
                 )
+                _quarantine_unknown_external_outcome(
+                    ledger,
+                    intent.economic_action_id,
+                    cause=exc,
+                    now_epoch_s=int(time.time()),
+                )
+                raise exc
 
-    for observation in observations:
-        observation_now = int(time.time())
-        _receipt, observation_proof, observation_expired_recovery = (
-            _verify_grant_for_phase(
-                state,
-                authority_root=authority_root,
-                session=session,
-                now_epoch_s=observation_now,
-                require_submission_window=False,
-                allow_expired_recovery=True,
+    try:
+        for observation in observations:
+            observation_now = int(time.time())
+            _receipt, observation_proof, observation_expired_recovery = (
+                _verify_grant_for_phase(
+                    state,
+                    authority_root=authority_root,
+                    session=session,
+                    now_epoch_s=observation_now,
+                    require_submission_window=False,
+                    allow_expired_recovery=True,
+                )
             )
-        )
-        runtime.record_chain_observation(
-            observation,
-            external_action_id=intent.economic_action_id,
-            signed_transaction_id=signed_transaction_id,
+            runtime.record_chain_observation(
+                observation,
+                external_action_id=intent.economic_action_id,
+                signed_transaction_id=signed_transaction_id,
+                session=session,
+                verified_grant=observation_proof,
+                now_epoch_s=observation_now,
+                finality=ROBINHOOD_V0_FINALITY,
+                expired_recovery=observation_expired_recovery,
+            )
+
+        same_facts = observations[0].settlement_facts == observations[1].settlement_facts
+        receipt_id = None
+        if same_facts and observations[0].receipt_status is ReceiptStatus.SUCCESS:
+            receipt_id = "ink-v0f-" + transaction_hash[2:]
+
+        reconcile_now = int(time.time())
+        _receipt, reconcile_proof, reconcile_expired_recovery = _verify_grant_for_phase(
+            state,
+            authority_root=authority_root,
             session=session,
-            verified_grant=observation_proof,
-            now_epoch_s=observation_now,
-            finality=ROBINHOOD_V0_FINALITY,
-            expired_recovery=observation_expired_recovery,
+            now_epoch_s=reconcile_now,
+            require_submission_window=False,
+            allow_expired_recovery=True,
         )
-
-    same_facts = observations[0].settlement_facts == observations[1].settlement_facts
-    receipt_id = None
-    if same_facts and observations[0].receipt_status is ReceiptStatus.SUCCESS:
-        receipt_id = "ink-v0f-" + transaction_hash[2:]
-
-    reconcile_now = int(time.time())
-    _receipt, reconcile_proof, reconcile_expired_recovery = _verify_grant_for_phase(
-        state,
-        authority_root=authority_root,
-        session=session,
-        now_epoch_s=reconcile_now,
-        require_submission_window=False,
-        allow_expired_recovery=True,
-    )
-    truth = runtime.reconcile_external_action(
-        intent.economic_action_id,
-        session=session,
-        verified_grant=reconcile_proof,
-        now_epoch_s=reconcile_now,
-        finality=ROBINHOOD_V0_FINALITY,
-        receipt_id=receipt_id,
-        fee_atomic=fee_atomic if receipt_id is not None else 0,
-        source="ink-v0f-native-live-rpc",
-        observed_at_epoch_s=max(o.observed_at_epoch_s for o in observations),
-        expired_recovery=reconcile_expired_recovery,
-    )
-    if truth.verdict.value == "CONFIRMED":
-        runtime.complete_settlement(
+        truth = runtime.reconcile_external_action(
             intent.economic_action_id,
+            session=session,
+            verified_grant=reconcile_proof,
+            now_epoch_s=reconcile_now,
+            finality=ROBINHOOD_V0_FINALITY,
+            receipt_id=receipt_id,
+            fee_atomic=fee_atomic if receipt_id is not None else 0,
+            source="ink-v0f-native-live-rpc",
+            observed_at_epoch_s=max(o.observed_at_epoch_s for o in observations),
+            expired_recovery=reconcile_expired_recovery,
+        )
+        if truth.verdict.value == "CONFIRMED":
+            runtime.complete_settlement(
+                intent.economic_action_id,
+                now_epoch_s=int(time.time()),
+            )
+
+    except Exception as exc:
+        _quarantine_unknown_external_outcome(
+            ledger,
+            intent.economic_action_id,
+            cause=exc,
             now_epoch_s=int(time.time()),
         )
+        raise
 
     return _result(
         status=(
