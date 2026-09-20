@@ -68,8 +68,18 @@ def test_submit_helper_is_bound_to_canonical_runtime_and_one_write_attempt() -> 
     assert rpc.max_retries == 0
 
 
-def test_submission_guard_is_exclusive_and_mode_restricted(tmp_path: Path) -> None:
+def test_submission_guard_is_exclusive_and_mode_restricted(
+    tmp_path: Path, monkeypatch
+) -> None:
     helper = _helper()
+    fsync_calls: list[int] = []
+    real_fsync = helper.os.fsync
+
+    def tracked_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(helper.os, "fsync", tracked_fsync)
     path = tmp_path / "episode.submission.json"
     doc = {
         "schema": helper.SUBMISSION_GUARD_SCHEMA,
@@ -79,6 +89,7 @@ def test_submission_guard_is_exclusive_and_mode_restricted(tmp_path: Path) -> No
     assert path.is_file()
     assert os.stat(path).st_mode & 0o077 == 0
     assert helper._read_guard(path) == doc
+    assert len(fsync_calls) == 2
     with pytest.raises(FileExistsError):
         helper._write_guard(path, doc)
 
@@ -125,6 +136,7 @@ def test_success_receipt_requires_exact_pinned_buy_logs() -> None:
         "status": "0x1",
         "gasUsed": "0x5208",
         "effectiveGasPrice": "0x3b9aca00",
+        "l1Fee": "0x4d2",
         "logs": [
             {
                 "address": helper.INKYSWAP_V2_POOL,
@@ -156,7 +168,7 @@ def test_success_receipt_requires_exact_pinned_buy_logs() -> None:
     assert status is ReceiptStatus.SUCCESS
     assert input_atomic == envelope.max_input_atomic
     assert output_atomic == output
-    assert fee_atomic == 21_000 * 1_000_000_000
+    assert fee_atomic == 21_000 * 1_000_000_000 + 1_234
 
 
 def test_success_receipt_refuses_wrong_swap_direction() -> None:
@@ -167,6 +179,7 @@ def test_success_receipt_refuses_wrong_swap_direction() -> None:
         "status": "0x1",
         "gasUsed": "0x5208",
         "effectiveGasPrice": "0x3b9aca00",
+        "l1Fee": "0x4d2",
         "logs": [
             {
                 "address": helper.INKYSWAP_V2_POOL,
@@ -196,6 +209,21 @@ def test_success_receipt_refuses_wrong_swap_direction() -> None:
         helper._settlement_from_receipt(receipt, envelope)
 
 
+def test_receipt_requires_explicit_ink_l1_fee() -> None:
+    helper = _helper()
+    envelope = _envelope()
+    with pytest.raises(RuntimeError, match="receipt l1Fee"):
+        helper._settlement_from_receipt(
+            {
+                "status": "0x0",
+                "gasUsed": "0x5208",
+                "effectiveGasPrice": "0x3b9aca00",
+                "logs": [],
+            },
+            envelope,
+        )
+
+
 def test_reverted_receipt_records_gas_without_inventing_fill_amounts() -> None:
     helper = _helper()
     envelope = _envelope()
@@ -211,4 +239,4 @@ def test_reverted_receipt_records_gas_without_inventing_fill_amounts() -> None:
     assert status is ReceiptStatus.REVERTED
     assert input_atomic is None
     assert output_atomic is None
-    assert fee_atomic == 21_000 * 1_000_000_000
+    assert fee_atomic == 21_000 * 1_000_000_000 + 1_234
