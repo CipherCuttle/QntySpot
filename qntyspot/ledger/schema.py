@@ -51,6 +51,11 @@ class EventType(str, Enum):
     # ExecutionRuntime.resume_quarantined_exact_signed_bytes; never by the
     # ordinary transition table, where SAFE_HALT stays terminal.
     EXACT_BYTES_RESUMED = "EXACT_BYTES_RESUMED"
+    # Explicit accounting-only recovery after SAFE_HALT once terminal chain
+    # truth is durably proven. This never returns an action to an executable
+    # state: confirmed settlement goes to RECONCILED; confirmed revert goes to
+    # REJECTED.
+    CHAIN_TRUTH_RECOVERED = "CHAIN_TRUTH_RECOVERED"
 
 
 CYCLE_EVENT_TYPES = frozenset(
