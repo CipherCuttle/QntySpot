@@ -232,6 +232,7 @@ def test_reverted_receipt_records_gas_without_inventing_fill_amounts() -> None:
             "status": "0x0",
             "gasUsed": "0x5208",
             "effectiveGasPrice": "0x3b9aca00",
+            "l1Fee": "0x4d2",
             "logs": [],
         },
         envelope,
