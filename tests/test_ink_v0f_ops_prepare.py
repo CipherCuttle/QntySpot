@@ -134,6 +134,29 @@ def test_claim_fresh_episode_paths_is_exclusive(tmp_path: Path) -> None:
     assert state.exists()
 
 
+def test_prepared_state_is_fsynced_and_atomically_installed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    helper = _helper()
+    ledger = tmp_path / "episode.sqlite3"
+    state = helper._state_path(ledger)
+    helper._claim_fresh_episode_paths(ledger, state)
+
+    fsync_calls: list[int] = []
+    real_fsync = helper.os.fsync
+
+    def tracked_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(helper.os, "fsync", tracked_fsync)
+    helper._write_durable_prepared_state(state, {"schema": "prepared-test"})
+
+    assert state.read_bytes() == b'{"schema":"prepared-test"}\n'
+    assert not state.with_name(state.name + ".tmp").exists()
+    assert len(fsync_calls) == 2
+
+
 def test_claim_does_not_delete_preexisting_zero_byte_ledger(tmp_path: Path) -> None:
     helper = _helper()
     ledger = tmp_path / "owned-by-other.sqlite3"
