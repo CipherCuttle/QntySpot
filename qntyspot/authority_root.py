@@ -47,6 +47,7 @@ __all__ = [
     "AuthorityIssuancePolicyV0",
     "AuthorityGrantReceiptV0",
     "VerifiedAuthorityGrantV0",
+    "ExpiredAuthorityRecoveryProofV0",
     "load_trusted_authority_root",
     "verify_authority_grant",
     "verify_expired_authority_grant_for_recovery",
@@ -72,6 +73,7 @@ _PORTABLE_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\.[0-9]+)*$")
 _REPOSITORY_PART_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _AUTHORITY_POLICY_SCHEMA = "qntyspot.program_b.v0.authority_policy"
 _VERIFIED_TOKEN = object()
+_EXPIRED_RECOVERY_TOKEN = object()
 
 
 def _portable(value: Any, *, field_name: str) -> str:
@@ -563,6 +565,53 @@ class VerifiedAuthorityGrantV0:
         return self.receipt.authority_policy
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class ExpiredAuthorityRecoveryProofV0:
+    """Opaque proof for accounting-only recovery of one expired session.
+
+    This is intentionally a different runtime type from
+    :class:`VerifiedAuthorityGrantV0`. Ordinary authority gates therefore
+    cannot consume it, even if a caller supplies a backdated timestamp that
+    falls inside the original grant window.
+    """
+
+    receipt: AuthorityGrantReceiptV0
+    root_id: str
+    public_key_fingerprint: str
+    trust_config_digest: str
+    minimum_authority_epoch: int
+    signed_body_digest: str
+    receipt_id: str
+
+    def __init__(
+        self,
+        *,
+        receipt: AuthorityGrantReceiptV0,
+        root_id: str,
+        public_key_fingerprint: str,
+        trust_config_digest: str,
+        minimum_authority_epoch: int,
+        signed_body_digest: str,
+        receipt_id: str,
+        _construction_token: object,
+    ) -> None:
+        if _construction_token is not _EXPIRED_RECOVERY_TOKEN:
+            raise TypeError(
+                "ExpiredAuthorityRecoveryProofV0 is only constructed by recovery verification"
+            )
+        object.__setattr__(self, "receipt", receipt)
+        object.__setattr__(self, "root_id", root_id)
+        object.__setattr__(self, "public_key_fingerprint", public_key_fingerprint)
+        object.__setattr__(self, "trust_config_digest", trust_config_digest)
+        object.__setattr__(self, "minimum_authority_epoch", minimum_authority_epoch)
+        object.__setattr__(self, "signed_body_digest", signed_body_digest)
+        object.__setattr__(self, "receipt_id", receipt_id)
+
+    @property
+    def authority_policy(self) -> AuthorityPolicyRefV0:
+        return self.receipt.authority_policy
+
+
 def _verify_authority_receipt_authenticity(
     *,
     receipt: AuthorityGrantReceiptV0 | bytes,
@@ -647,7 +696,7 @@ def verify_expired_authority_grant_for_recovery(
     trusted_root: TrustedAuthorityRootV0,
     session: ExecutionSessionV0,
     now_epoch_s: int,
-) -> VerifiedAuthorityGrantV0:
+) -> ExpiredAuthorityRecoveryProofV0:
     """Authenticate one expired grant for observation/reconciliation only.
 
     This does not revive execution authority. The returned opaque proof is
@@ -682,7 +731,16 @@ def verify_expired_authority_grant_for_recovery(
         raise AuthorityVerificationError(
             f"authority/session recovery binding failed: {exc}"
         ) from exc
-    return _verified_authority_result(receipt, trusted_root)
+    return ExpiredAuthorityRecoveryProofV0(
+        receipt=receipt,
+        root_id=trusted_root.root_id,
+        public_key_fingerprint=trusted_root.public_key_fingerprint,
+        trust_config_digest=trusted_root.trust_config_digest,
+        minimum_authority_epoch=trusted_root.minimum_authority_epoch,
+        signed_body_digest=receipt.signed_body_digest,
+        receipt_id=receipt.receipt_id,
+        _construction_token=_EXPIRED_RECOVERY_TOKEN,
+    )
 
 
 def _require_verified(grant: Any) -> VerifiedAuthorityGrantV0:
@@ -831,7 +889,7 @@ def require_expired_recovery_capability(
     *,
     capability: Capability,
     source_phase_ceiling: AuthorityLevel,
-    verified_grant: VerifiedAuthorityGrantV0,
+    recovery_proof: ExpiredAuthorityRecoveryProofV0,
     session: ExecutionSessionV0,
     now_epoch_s: int,
 ) -> AuthorityLevel:
@@ -852,7 +910,11 @@ def require_expired_recovery_capability(
         raise AuthorityCeilingError(
             "source_phase_ceiling exceeds the current reviewed phase ceiling"
         )
-    grant = _require_verified(verified_grant)
+    if not isinstance(recovery_proof, ExpiredAuthorityRecoveryProofV0):
+        raise AuthorityVerificationError(
+            "expired-authority recovery requires a recovery-only proof"
+        )
+    grant = recovery_proof
     _non_negative_int(now_epoch_s, field_name="now_epoch_s")
     if now_epoch_s < grant.authority_policy.not_after_epoch_s:
         raise AuthorityVerificationError(
