@@ -524,6 +524,10 @@ class SpotLedger:
                     raise LedgerError(
                         "settled SAFE_HALT recovery requires a bound fill receipt"
                     )
+                if not self._settled_fill_within_bounds(conn, economic_action_id):
+                    raise LedgerError(
+                        "settled SAFE_HALT recovery refuses an out-of-bounds fill"
+                    )
                 conn.execute(
                     "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
                     "WHERE economic_action_id = ? AND status = ?",
@@ -597,6 +601,36 @@ class SpotLedger:
             (economic_action_id,),
         ).fetchone()
         return row is not None
+
+    @staticmethod
+    def _settled_fill_within_bounds(
+        conn: sqlite3.Connection, economic_action_id: str
+    ) -> bool:
+        row = conn.execute(
+            "SELECT bounds_json FROM intents WHERE economic_action_id = ?",
+            (economic_action_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerError(f"unknown economic action {economic_action_id}")
+        bounds = strict_json_loads(row["bounds_json"])
+        max_input = decode_atomic(
+            bounds["max_input_atomic"], field="bounds.max_input_atomic"
+        )
+        min_output = decode_atomic(
+            bounds["min_output_atomic"], field="bounds.min_output_atomic"
+        )
+        totals = conn.execute(
+            "SELECT COALESCE(atomic_sum(input_atomic_filled), '0'), "
+            "COALESCE(atomic_sum(output_atomic_filled), '0') "
+            "FROM fill_receipts WHERE economic_action_id = ?",
+            (economic_action_id,),
+        ).fetchone()
+        total_in = decode_atomic(totals[0], field="total input filled")
+        total_out = decode_atomic(totals[1], field="total output filled")
+        if total_in <= 0 or total_in > max_input:
+            return False
+        required_out = -((-min_output * total_in) // max_input)
+        return total_out >= required_out
 
     @staticmethod
     def _has_bound_reverted_reconciliation(
