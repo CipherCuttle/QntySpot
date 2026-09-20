@@ -63,6 +63,7 @@ from ..exact_signed_bytes import (
     validate_exact_signed_bytes,
 )
 from ..authority_root import (
+    ExpiredAuthorityRecoveryProofV0,
     VerifiedAuthorityGrantV0,
     assert_effective_capital_within,
     require_effective_capability,
@@ -325,7 +326,7 @@ class ExecutionRuntime:
     def _authorize(
         self,
         session: ExecutionSessionV0,
-        verified_grant: VerifiedAuthorityGrantV0,
+        verified_grant: VerifiedAuthorityGrantV0 | ExpiredAuthorityRecoveryProofV0,
         capability: Capability,
         *,
         now_epoch_s: int,
@@ -336,7 +337,7 @@ class ExecutionRuntime:
             level = require_expired_recovery_capability(
                 capability=capability,
                 source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-                verified_grant=verified_grant,
+                recovery_proof=verified_grant,
                 session=session,
                 now_epoch_s=now_epoch_s,
             )
@@ -2552,7 +2553,7 @@ class ExecutionRuntime:
         *,
         external_action_id: str,
         session: ExecutionSessionV0,
-        verified_grant: VerifiedAuthorityGrantV0,
+        verified_grant: VerifiedAuthorityGrantV0 | ExpiredAuthorityRecoveryProofV0,
         now_epoch_s: int,
         signed_transaction_id: str | None = None,
         external_transaction_ref_id: str | None = None,
@@ -2716,7 +2717,7 @@ class ExecutionRuntime:
         economic_action_id: str,
         *,
         session: ExecutionSessionV0,
-        verified_grant: VerifiedAuthorityGrantV0,
+        verified_grant: VerifiedAuthorityGrantV0 | ExpiredAuthorityRecoveryProofV0,
         now_epoch_s: int,
         finality: FinalityPolicyV0 = ROBINHOOD_V0_FINALITY,
         bounds: EconomicBounds | None = None,
