@@ -21,6 +21,7 @@ from qntyspot.authority_root import (
     TRUST_CONFIG_SCHEMA,
     AuthorityGrantReceiptV0,
     AuthorityIssuancePolicyV0,
+    ExpiredAuthorityRecoveryProofV0,
     TrustedAuthorityRootV0,
     VerifiedAuthorityGrantV0,
     assert_effective_capital_within,
@@ -598,14 +599,14 @@ def test_expired_grant_can_only_authenticate_chain_truth_recovery(
     assert require_expired_recovery_capability(
         capability=Capability.OBSERVE_CHAIN,
         source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-        verified_grant=recovery,
+        recovery_proof=recovery,
         session=session,
         now_epoch_s=expired_at,
     ) is AuthorityLevel.RECONCILE_ONLY
     assert require_expired_recovery_capability(
         capability=Capability.RECONCILE,
         source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-        verified_grant=recovery,
+        recovery_proof=recovery,
         session=session,
         now_epoch_s=expired_at + 10_000,
     ) is AuthorityLevel.RECONCILE_ONLY
@@ -621,18 +622,24 @@ def test_expired_grant_can_only_authenticate_chain_truth_recovery(
             require_expired_recovery_capability(
                 capability=forbidden,
                 source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-                verified_grant=recovery,
+                recovery_proof=recovery,
                 session=session,
                 now_epoch_s=expired_at,
             )
 
-    # A recovery-authenticated proof never becomes current authority again.
-    with pytest.raises(AuthorityCeilingError, match="not valid"):
+    assert isinstance(recovery, ExpiredAuthorityRecoveryProofV0)
+    assert not isinstance(recovery, VerifiedAuthorityGrantV0)
+
+    # The recovery-only proof cannot enter any ordinary authority gate, even
+    # if a caller maliciously backdates time into the original grant window.
+    with pytest.raises(AuthorityVerificationError, match="verified grant"):
         effective_authority_level(
             source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-            verified_grant=recovery,
-            now_epoch_s=expired_at,
+            verified_grant=recovery,  # type: ignore[arg-type]
+            now_epoch_s=expired_at - 1,
         )
+    with pytest.raises(TypeError, match="only constructed"):
+        ExpiredAuthorityRecoveryProofV0()  # type: ignore[call-arg]
 
 
 def test_verified_grant_is_revalidated_at_every_consumption_time(
