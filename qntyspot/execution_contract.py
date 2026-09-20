@@ -733,14 +733,13 @@ class ExternalTransactionReferenceV0:
         return digest_object(self.canonical_object())
 
 
-def _assert_authority_session_binding(
+def _assert_authority_session_static_binding(
     session: ExecutionSessionV0,
     authority: AuthorityPolicyRefV0,
     *,
-    now_epoch_s: int,
     error: type[Exception],
 ) -> None:
-    """Apply the same independently-rooted authority binding to every action."""
+    """Bind immutable authority scope to one exact execution session."""
     if session.authority_policy_digest != authority.authority_policy_digest:
         raise error("session was bound to a different authority policy")
     if authority.permitted_repository_commit != session.repository_commit:
@@ -753,6 +752,17 @@ def _assert_authority_session_binding(
         raise error("the authority grant does not cover this taker")
     if authority.permitted_venue_id != session.venue_id:
         raise error("the authority grant does not cover this venue")
+
+
+def _assert_authority_session_binding(
+    session: ExecutionSessionV0,
+    authority: AuthorityPolicyRefV0,
+    *,
+    now_epoch_s: int,
+    error: type[Exception],
+) -> None:
+    """Apply immutable scope plus current grant time to an authority action."""
+    _assert_authority_session_static_binding(session, authority, error=error)
     _non_negative_int(now_epoch_s, field="now_epoch_s", error=error)
     if not (authority.not_before_epoch_s <= now_epoch_s < authority.not_after_epoch_s):
         raise error(f"authority grant is not valid at {now_epoch_s}")

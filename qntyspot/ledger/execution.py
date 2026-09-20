@@ -63,9 +63,11 @@ from ..exact_signed_bytes import (
     validate_exact_signed_bytes,
 )
 from ..authority_root import (
+    ExpiredAuthorityRecoveryProofV0,
     VerifiedAuthorityGrantV0,
     assert_effective_capital_within,
     require_effective_capability,
+    require_expired_recovery_capability,
 )
 from ..states import EXTERNALLY_AMBIGUOUS_STATES, IntentState
 from .execution_schema import (
@@ -324,21 +326,31 @@ class ExecutionRuntime:
     def _authorize(
         self,
         session: ExecutionSessionV0,
-        verified_grant: VerifiedAuthorityGrantV0,
+        verified_grant: VerifiedAuthorityGrantV0 | ExpiredAuthorityRecoveryProofV0,
         capability: Capability,
         *,
         now_epoch_s: int,
         safe_halt: bool = False,
+        expired_recovery: bool = False,
     ) -> AuthorityLevel:
-        level = require_effective_capability(
-            capability=capability,
-            source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
-            verified_grant=verified_grant,
-            session=session,
-            now_epoch_s=now_epoch_s,
-            kill_switch=self._kill_engaged(),
-            safe_halt=safe_halt,
-        )
+        if expired_recovery:
+            level = require_expired_recovery_capability(
+                capability=capability,
+                source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+                recovery_proof=verified_grant,
+                session=session,
+                now_epoch_s=now_epoch_s,
+            )
+        else:
+            level = require_effective_capability(
+                capability=capability,
+                source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+                verified_grant=verified_grant,
+                session=session,
+                now_epoch_s=now_epoch_s,
+                kill_switch=self._kill_engaged(),
+                safe_halt=safe_halt,
+            )
         row = self._conn.execute(
             "SELECT identity_digest, authority_level FROM execution_sessions "
             "WHERE session_id = ?",
@@ -347,7 +359,13 @@ class ExecutionRuntime:
         if row is not None:
             if row["identity_digest"] != session.identity_digest:
                 raise AuthorityVerificationError("stored session identity disagrees")
-            if int(row["authority_level"]) != int(level):
+            stored_level = AuthorityLevel(int(row["authority_level"]))
+            if expired_recovery:
+                if stored_level < level:
+                    raise AuthorityVerificationError(
+                        "stored session never carried recovery authority"
+                    )
+            elif stored_level != level:
                 raise AuthorityVerificationError("stored effective authority disagrees")
         return level
 
@@ -2535,11 +2553,12 @@ class ExecutionRuntime:
         *,
         external_action_id: str,
         session: ExecutionSessionV0,
-        verified_grant: VerifiedAuthorityGrantV0,
+        verified_grant: VerifiedAuthorityGrantV0 | ExpiredAuthorityRecoveryProofV0,
         now_epoch_s: int,
         signed_transaction_id: str | None = None,
         external_transaction_ref_id: str | None = None,
         finality: FinalityPolicyV0 = ROBINHOOD_V0_FINALITY,
+        expired_recovery: bool = False,
     ) -> bool:
         if (signed_transaction_id is None) == (external_transaction_ref_id is None):
             raise LedgerError("exactly one transaction origin is required")
@@ -2549,6 +2568,7 @@ class ExecutionRuntime:
             Capability.OBSERVE_CHAIN,
             now_epoch_s=now_epoch_s,
             safe_halt=self.ledger.intent_state(external_action_id) is IntentState.SAFE_HALT,
+            expired_recovery=expired_recovery,
         )
         with self._transaction("chain_observation") as conn:
             if signed_transaction_id is not None:
@@ -2614,15 +2634,20 @@ class ExecutionRuntime:
                     ChainTruthVerdict.INCLUDED,
                     ChainTruthVerdict.CONFIRMED,
                 }:
-                    self._advance_to_chain_state(
-                        external_action_id,
-                        state,
-                        IntentState.CONFIRMED
-                        if truth.verdict is ChainTruthVerdict.CONFIRMED
-                        else IntentState.INCLUDED,
-                        now_epoch_s=observation.observed_at_epoch_s,
-                        external_reference=external_transaction_ref_id is not None,
-                    )
+                    # SAFE_HALT is terminal for ordinary lifecycle transitions.
+                    # Persist later chain truth while halted, but consume it only
+                    # through the explicit accounting-only recovery primitive
+                    # during reconciliation.
+                    if state is not IntentState.SAFE_HALT:
+                        self._advance_to_chain_state(
+                            external_action_id,
+                            state,
+                            IntentState.CONFIRMED
+                            if truth.verdict is ChainTruthVerdict.CONFIRMED
+                            else IntentState.INCLUDED,
+                            now_epoch_s=observation.observed_at_epoch_s,
+                            external_reference=external_transaction_ref_id is not None,
+                        )
             return inserted
 
     def _advance_to_chain_state(
@@ -2692,7 +2717,7 @@ class ExecutionRuntime:
         economic_action_id: str,
         *,
         session: ExecutionSessionV0,
-        verified_grant: VerifiedAuthorityGrantV0,
+        verified_grant: VerifiedAuthorityGrantV0 | ExpiredAuthorityRecoveryProofV0,
         now_epoch_s: int,
         finality: FinalityPolicyV0 = ROBINHOOD_V0_FINALITY,
         bounds: EconomicBounds | None = None,
@@ -2700,6 +2725,7 @@ class ExecutionRuntime:
         fee_atomic: int = 0,
         source: str = "external-chain-observation",
         observed_at_epoch_s: int | None = None,
+        expired_recovery: bool = False,
     ) -> Any:
         self._authorize(
             session,
@@ -2707,6 +2733,7 @@ class ExecutionRuntime:
             Capability.RECONCILE,
             now_epoch_s=now_epoch_s,
             safe_halt=self.ledger.intent_state(economic_action_id) is IntentState.SAFE_HALT,
+            expired_recovery=expired_recovery,
         )
         with self._transaction("reconciliation") as conn:
             external = conn.execute(
@@ -2774,6 +2801,20 @@ class ExecutionRuntime:
                         if key != "reconciled_at_epoch_s"
                     },
                 )
+                state = self.ledger.intent_state(economic_action_id)
+                if state is IntentState.SAFE_HALT:
+                    if truth.verdict is ChainTruthVerdict.CONFIRMED:
+                        self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                            economic_action_id,
+                            IntentState.RECONCILED,
+                            now_epoch_s=now_epoch_s,
+                        )
+                    elif truth.verdict is ChainTruthVerdict.REVERTED:
+                        self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                            economic_action_id,
+                            IntentState.REJECTED,
+                            now_epoch_s=now_epoch_s,
+                        )
                 return truth
             if truth.verdict in {ChainTruthVerdict.NO_EVIDENCE, ChainTruthVerdict.VISIBLE, ChainTruthVerdict.INCLUDED}:
                 raise SafeHaltError(
@@ -2795,7 +2836,13 @@ class ExecutionRuntime:
                 self._insert_reconciliation(
                     conn, economic_action_id, truth, now_epoch_s, receipt_id=None,
                 )
-                if state in EXTERNALLY_AMBIGUOUS_STATES or (
+                if state is IntentState.SAFE_HALT:
+                    self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                        economic_action_id,
+                        IntentState.REJECTED,
+                        now_epoch_s=now_epoch_s,
+                    )
+                elif state in EXTERNALLY_AMBIGUOUS_STATES or (
                     external_ref_id is not None and state is IntentState.RESERVED
                 ):
                     self.ledger.transition(
@@ -2829,9 +2876,10 @@ class ExecutionRuntime:
                 IntentState.INCLUDED,
                 IntentState.SUBMITTED,
                 IntentState.SIGNED,
+                IntentState.SAFE_HALT,
             }:
                 raise SafeHaltError(f"confirmed settlement cannot be accounted from {state.value}")
-            self.ledger.append_execution_fill_receipt(
+            within_bounds = self.ledger.append_execution_fill_receipt(
                 receipt,
                 validated_action=validated_action,
                 now_epoch_s=now_epoch_s,
@@ -2839,18 +2887,27 @@ class ExecutionRuntime:
             self._insert_reconciliation(
                 conn, economic_action_id, truth, now_epoch_s, receipt_id=receipt.receipt_id,
             )
-            self._advance_to_chain_state(
-                economic_action_id, self.ledger.intent_state(economic_action_id),
-                IntentState.CONFIRMED,
-                now_epoch_s=now_epoch_s,
-                external_reference=external_ref_id is not None,
-            )
-            if self.ledger.intent_state(economic_action_id) is IntentState.CONFIRMED:
-                self.ledger.transition(
-                    economic_action_id, IntentState.RECONCILED,
+            if not within_bounds:
+                return truth
+            if state is IntentState.SAFE_HALT:
+                self.ledger.recover_safe_halt_from_terminal_chain_truth(
+                    economic_action_id,
+                    IntentState.RECONCILED,
                     now_epoch_s=now_epoch_s,
-                    payload={"execution": "settlement_reconciled"},
                 )
+            else:
+                self._advance_to_chain_state(
+                    economic_action_id, self.ledger.intent_state(economic_action_id),
+                    IntentState.CONFIRMED,
+                    now_epoch_s=now_epoch_s,
+                    external_reference=external_ref_id is not None,
+                )
+                if self.ledger.intent_state(economic_action_id) is IntentState.CONFIRMED:
+                    self.ledger.transition(
+                        economic_action_id, IntentState.RECONCILED,
+                        now_epoch_s=now_epoch_s,
+                        payload={"execution": "settlement_reconciled"},
+                    )
             return truth
 
     def _insert_reconciliation(

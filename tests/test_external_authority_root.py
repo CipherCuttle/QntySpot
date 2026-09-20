@@ -21,6 +21,7 @@ from qntyspot.authority_root import (
     TRUST_CONFIG_SCHEMA,
     AuthorityGrantReceiptV0,
     AuthorityIssuancePolicyV0,
+    ExpiredAuthorityRecoveryProofV0,
     TrustedAuthorityRootV0,
     VerifiedAuthorityGrantV0,
     assert_effective_capital_within,
@@ -29,7 +30,9 @@ from qntyspot.authority_root import (
     effective_capabilities,
     effective_capital_ceilings,
     load_trusted_authority_root,
+    require_expired_recovery_capability,
     verify_authority_grant,
+    verify_expired_authority_grant_for_recovery,
 )
 from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.errors import AuthorityCeilingError, AuthorityVerificationError, SessionIdentityError
@@ -563,6 +566,89 @@ def test_anyswap_like_venue_identity_remains_an_exact_identity() -> None:
         request,
         repository_identity="CipherCuttle/QntySpot",
     )
+
+
+def test_expired_grant_can_only_authenticate_chain_truth_recovery(
+    trusted_root: TrustedAuthorityRootV0,
+) -> None:
+    receipt = _receipt(AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER)
+    session = _session(receipt)
+    expired_at = receipt.authority_policy.not_after_epoch_s
+
+    with pytest.raises(AuthorityVerificationError, match="not valid"):
+        verify_authority_grant(
+            receipt=receipt,
+            trusted_root=trusted_root,
+            session=session,
+            now_epoch_s=expired_at,
+        )
+    with pytest.raises(AuthorityVerificationError, match="requires an expired"):
+        verify_expired_authority_grant_for_recovery(
+            receipt=receipt,
+            trusted_root=trusted_root,
+            session=session,
+            now_epoch_s=expired_at - 1,
+        )
+
+    recovery = verify_expired_authority_grant_for_recovery(
+        receipt=receipt.serialized,
+        trusted_root=trusted_root,
+        session=session,
+        now_epoch_s=expired_at,
+    )
+    assert require_expired_recovery_capability(
+        capability=Capability.OBSERVE_CHAIN,
+        source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+        recovery_proof=recovery,
+        session=session,
+        now_epoch_s=expired_at,
+    ) is AuthorityLevel.RECONCILE_ONLY
+    assert require_expired_recovery_capability(
+        capability=Capability.RECONCILE,
+        source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+        recovery_proof=recovery,
+        session=session,
+        now_epoch_s=expired_at + 10_000,
+    ) is AuthorityLevel.RECONCILE_ONLY
+
+    for forbidden in (
+        Capability.RESERVE_CAPITAL,
+        Capability.SUBMIT_EXACT_BYTES,
+        Capability.CONSTRUCT_ENVELOPE,
+        Capability.AUTHORIZE_APPROVAL,
+        Capability.PRODUCE_SIGNATURE,
+    ):
+        with pytest.raises(AuthorityCeilingError, match="forbidden"):
+            require_expired_recovery_capability(
+                capability=forbidden,
+                source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+                recovery_proof=recovery,
+                session=session,
+                now_epoch_s=expired_at,
+            )
+
+    assert isinstance(recovery, ExpiredAuthorityRecoveryProofV0)
+    assert not isinstance(recovery, VerifiedAuthorityGrantV0)
+
+    # The recovery-only proof cannot enter any ordinary authority gate, even
+    # if a caller maliciously backdates time into the original grant window.
+    with pytest.raises(AuthorityVerificationError, match="verified grant"):
+        effective_authority_level(
+            source_phase_ceiling=PHASE_GRANTED_AUTHORITY_LEVEL,
+            verified_grant=recovery,  # type: ignore[arg-type]
+            now_epoch_s=expired_at - 1,
+        )
+    with pytest.raises(TypeError, match="only constructed"):
+        ExpiredAuthorityRecoveryProofV0(
+            receipt=recovery.receipt,
+            root_id=recovery.root_id,
+            public_key_fingerprint=recovery.public_key_fingerprint,
+            trust_config_digest=recovery.trust_config_digest,
+            minimum_authority_epoch=recovery.minimum_authority_epoch,
+            signed_body_digest=recovery.signed_body_digest,
+            receipt_id=recovery.receipt_id,
+            _construction_token=object(),
+        )
 
 
 def test_verified_grant_is_revalidated_at_every_consumption_time(

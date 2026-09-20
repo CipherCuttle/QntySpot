@@ -85,6 +85,7 @@ _RECEIPT_STATES = frozenset(
         IntentState.INCLUDED,
         IntentState.CONFIRMED,
         IntentState.RECONCILED,
+        IntentState.SAFE_HALT,
     }
 )
 
@@ -460,6 +461,123 @@ class SpotLedger:
                 payload=dict(payload or {}),
             )
 
+    def recover_safe_halt_from_terminal_chain_truth(
+        self,
+        economic_action_id: str,
+        to_state: IntentState,
+        *,
+        now_epoch_s: int,
+    ) -> None:
+        """Consume terminal chain truth without reopening execution authority.
+
+        SAFE_HALT remains terminal in the ordinary transition table. This
+        special accounting primitive is allowed only after the execution
+        surface has already persisted a matching terminal reconciliation.
+        Settled truth moves directly to RECONCILED and reactivates the
+        quarantined reservation so FILLED can commit it. Reverted truth moves
+        directly to REJECTED and releases the quarantined reservation.
+        """
+        if to_state not in {IntentState.RECONCILED, IntentState.REJECTED}:
+            raise LedgerError(
+                "SAFE_HALT chain-truth recovery targets only RECONCILED or REJECTED"
+            )
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT state, policy_id, cycle_id FROM intents "
+                "WHERE economic_action_id = ?",
+                (economic_action_id,),
+            ).fetchone()
+            if row is None:
+                raise LedgerError(f"unknown economic action {economic_action_id}")
+            if IntentState(row["state"]) is not IntentState.SAFE_HALT:
+                raise LedgerError("chain-truth recovery requires SAFE_HALT")
+            reservation = conn.execute(
+                "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
+                (economic_action_id,),
+            ).fetchone()
+            if (
+                reservation is None
+                or reservation["status"] != ReservationStatus.QUARANTINED.value
+            ):
+                raise LedgerError(
+                    "chain-truth recovery requires a QUARANTINED reservation"
+                )
+            reconciliation = conn.execute(
+                "SELECT reconciliation_id, verdict, receipt_id "
+                "FROM reconciliations WHERE external_action_id = ?",
+                (economic_action_id,),
+            ).fetchone()
+            if reconciliation is None:
+                raise LedgerError(
+                    "chain-truth recovery requires a durable terminal reconciliation"
+                )
+
+            expected_verdict = (
+                "SETTLED" if to_state is IntentState.RECONCILED else "REVERTED"
+            )
+            if reconciliation["verdict"] != expected_verdict:
+                raise LedgerError(
+                    "chain-truth recovery target disagrees with reconciliation verdict"
+                )
+            if to_state is IntentState.RECONCILED:
+                if not self._has_settled_receipt(conn, economic_action_id):
+                    raise LedgerError(
+                        "settled SAFE_HALT recovery requires a bound fill receipt"
+                    )
+                if not self._settled_fill_within_bounds(conn, economic_action_id):
+                    raise LedgerError(
+                        "settled SAFE_HALT recovery refuses an out-of-bounds fill"
+                    )
+                conn.execute(
+                    "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+                    "WHERE economic_action_id = ? AND status = ?",
+                    (
+                        ReservationStatus.ACTIVE.value,
+                        economic_action_id,
+                        ReservationStatus.QUARANTINED.value,
+                    ),
+                )
+            else:
+                if not self._has_bound_reverted_reconciliation(
+                    conn, economic_action_id
+                ):
+                    raise LedgerError(
+                        "reverted SAFE_HALT recovery requires bound reverted truth"
+                    )
+
+            payload = {
+                "reconciliation_id": reconciliation["reconciliation_id"],
+                "receipt_id": reconciliation["receipt_id"],
+                "recovery_type": "TERMINAL_CHAIN_TRUTH_AFTER_SAFE_HALT",
+                "verdict": expected_verdict,
+            }
+            seq = self._append_event(
+                conn,
+                event_type=EventType.CHAIN_TRUTH_RECOVERED,
+                policy_id=row["policy_id"],
+                cycle_id=row["cycle_id"],
+                economic_action_id=economic_action_id,
+                from_state=IntentState.SAFE_HALT.value,
+                to_state=to_state.value,
+                now_epoch_s=now_epoch_s,
+                payload=payload,
+            )
+            if to_state is IntentState.REJECTED:
+                conn.execute(
+                    "UPDATE budget_reservations SET status = ?, settled_seq = ? "
+                    "WHERE economic_action_id = ? AND status = ?",
+                    (
+                        ReservationStatus.RELEASED.value,
+                        seq,
+                        economic_action_id,
+                        ReservationStatus.QUARANTINED.value,
+                    ),
+                )
+            conn.execute(
+                "UPDATE intents SET state = ? WHERE economic_action_id = ?",
+                (to_state.value, economic_action_id),
+            )
+
     @staticmethod
     def _execution_surface_present(conn: sqlite3.Connection) -> bool:
         return conn.execute(
@@ -485,6 +603,36 @@ class SpotLedger:
         return row is not None
 
     @staticmethod
+    def _settled_fill_within_bounds(
+        conn: sqlite3.Connection, economic_action_id: str
+    ) -> bool:
+        row = conn.execute(
+            "SELECT bounds_json FROM intents WHERE economic_action_id = ?",
+            (economic_action_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerError(f"unknown economic action {economic_action_id}")
+        bounds = strict_json_loads(row["bounds_json"])
+        max_input = decode_atomic(
+            bounds["max_input_atomic"], field="bounds.max_input_atomic"
+        )
+        min_output = decode_atomic(
+            bounds["min_output_atomic"], field="bounds.min_output_atomic"
+        )
+        totals = conn.execute(
+            "SELECT COALESCE(atomic_sum(input_atomic_filled), '0'), "
+            "COALESCE(atomic_sum(output_atomic_filled), '0') "
+            "FROM fill_receipts WHERE economic_action_id = ?",
+            (economic_action_id,),
+        ).fetchone()
+        total_in = decode_atomic(totals[0], field="total input filled")
+        total_out = decode_atomic(totals[1], field="total output filled")
+        if total_in <= 0 or total_in > max_input:
+            return False
+        required_out = -((-min_output * total_in) // max_input)
+        return total_out >= required_out
+
+    @staticmethod
     def _has_bound_reverted_reconciliation(
         conn: sqlite3.Connection, economic_action_id: str
     ) -> bool:
@@ -494,18 +642,37 @@ class SpotLedger:
                 """
                 SELECT 1
                   FROM reconciliations AS r
-                  JOIN signed_transactions AS st
-                    ON st.external_action_id = r.external_action_id
-                  JOIN chain_observations AS co
-                    ON co.external_action_id = st.external_action_id
-                   AND co.signed_transaction_id = st.signed_transaction_id
                  WHERE r.external_action_id = ?
                    AND r.verdict = 'REVERTED'
-                   AND r.transaction_hash = st.transaction_hash
-                   AND r.chain_id = st.chain_id
-                   AND r.taker_address = st.taker_address
-                   AND co.presence = 'INCLUDED'
-                   AND co.receipt_status = 'REVERTED'
+                   AND (
+                        EXISTS (
+                            SELECT 1
+                              FROM signed_transactions AS st
+                              JOIN chain_observations AS co
+                                ON co.external_action_id = st.external_action_id
+                               AND co.signed_transaction_id = st.signed_transaction_id
+                             WHERE st.external_action_id = r.external_action_id
+                               AND r.transaction_hash = st.transaction_hash
+                               AND r.chain_id = st.chain_id
+                               AND r.taker_address = st.taker_address
+                               AND co.presence = 'INCLUDED'
+                               AND co.receipt_status = 'REVERTED'
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                              FROM external_transaction_refs AS er
+                              JOIN chain_observations AS co
+                                ON co.external_action_id = er.external_action_id
+                               AND co.external_transaction_ref_id =
+                                   er.external_transaction_ref_id
+                             WHERE er.external_action_id = r.external_action_id
+                               AND r.transaction_hash = er.transaction_hash
+                               AND r.chain_id = er.chain_id
+                               AND r.taker_address = er.taker_address
+                               AND co.presence = 'INCLUDED'
+                               AND co.receipt_status = 'REVERTED'
+                        )
+                   )
                  LIMIT 1
                 """,
                 (economic_action_id,),
@@ -807,7 +974,7 @@ class SpotLedger:
 
         bounds = strict_json_loads(row["bounds_json"])
         ok = self._receipt_within_bounds(conn, receipt, bounds)
-        if not ok:
+        if not ok and state is not IntentState.SAFE_HALT:
             assert_legal_transition(state, IntentState.SAFE_HALT)
             # The fill happened, it just landed outside the committed
             # bounds. The capital is gone, so it is quarantined rather than

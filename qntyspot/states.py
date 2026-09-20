@@ -14,9 +14,12 @@ DESIGN NOTES
   an action is signed, a transaction may still land, so the runtime may not
   declare it abandoned. The only escapes are the outcome states and
   ``SAFE_HALT``.
-* ``SAFE_HALT`` is reachable from every non-terminal state and is terminal. It
-  is the sink for "external truth is unknown or contradictory", and it never
-  leads back to an executable state.
+* ``SAFE_HALT`` is reachable from every non-terminal state and remains
+  terminal in the ordinary transition table. It is the sink for "external
+  truth is unknown or contradictory" and never leads back to an executable
+  state. A separate accounting-only recovery event may consume later terminal
+  chain truth to move a quarantined action directly to ``RECONCILED`` or
+  ``REJECTED``; that primitive is deliberately outside ``TRANSITIONS``.
 """
 
 from __future__ import annotations
@@ -61,7 +64,9 @@ class IntentState(str, Enum):
 
 S = IntentState
 
-#: States after which no further transition is permitted.
+#: States after which no ordinary lifecycle transition is permitted. SAFE_HALT
+#: can only be consumed by the separate terminal-chain-truth accounting recovery
+#: primitive; it never returns to an executable state.
 TERMINAL_STATES: frozenset[IntentState] = frozenset(
     {S.FILLED, S.CANCELLED, S.EXPIRED, S.REJECTED, S.SAFE_HALT}
 )
