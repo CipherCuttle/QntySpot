@@ -2879,7 +2879,7 @@ class ExecutionRuntime:
                 IntentState.SAFE_HALT,
             }:
                 raise SafeHaltError(f"confirmed settlement cannot be accounted from {state.value}")
-            self.ledger.append_execution_fill_receipt(
+            within_bounds = self.ledger.append_execution_fill_receipt(
                 receipt,
                 validated_action=validated_action,
                 now_epoch_s=now_epoch_s,
@@ -2887,6 +2887,8 @@ class ExecutionRuntime:
             self._insert_reconciliation(
                 conn, economic_action_id, truth, now_epoch_s, receipt_id=receipt.receipt_id,
             )
+            if not within_bounds:
+                return truth
             if state is IntentState.SAFE_HALT:
                 self.ledger.recover_safe_halt_from_terminal_chain_truth(
                     economic_action_id,
