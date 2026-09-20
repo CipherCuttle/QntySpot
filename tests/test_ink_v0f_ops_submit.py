@@ -137,6 +137,63 @@ def test_authority_mode_never_revives_external_effect_after_expiry() -> None:
     ) == "EXPIRED_RECOVERY"
 
 
+def test_post_submission_uncertainty_transitions_to_safe_halt() -> None:
+    helper = _helper()
+
+    class Ledger:
+        def __init__(self) -> None:
+            self.state = helper.IntentState.SUBMITTED
+            self.transitions: list[tuple[object, object, int, dict[str, object]]] = []
+
+        def intent_state(self, economic_action_id: str):
+            assert economic_action_id == "action"
+            return self.state
+
+        def transition(
+            self,
+            economic_action_id: str,
+            target,
+            *,
+            now_epoch_s: int,
+            payload: dict[str, object],
+        ) -> None:
+            self.transitions.append(
+                (economic_action_id, target, now_epoch_s, payload)
+            )
+            self.state = target
+
+    ledger = Ledger()
+    cause = SafeHaltError("provider window expired")
+    helper._quarantine_unknown_external_outcome(
+        ledger,
+        "action",
+        cause=cause,
+        now_epoch_s=123,
+    )
+    assert ledger.state is helper.IntentState.SAFE_HALT
+    assert ledger.transitions == [
+        (
+            "action",
+            helper.IntentState.SAFE_HALT,
+            123,
+            {
+                "execution": "post_submission_truth_unresolved",
+                "error_class": "SafeHaltError",
+            },
+        )
+    ]
+
+    # Idempotent at the sink: repeated observation failures do not create a
+    # second transition or reopen execution.
+    helper._quarantine_unknown_external_outcome(
+        ledger,
+        "action",
+        cause=cause,
+        now_epoch_s=124,
+    )
+    assert len(ledger.transitions) == 1
+
+
 def test_success_receipt_requires_exact_pinned_buy_logs() -> None:
     helper = _helper()
     envelope = _envelope()
