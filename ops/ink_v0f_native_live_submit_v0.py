@@ -248,6 +248,11 @@ def _read_guard(path: Path) -> Mapping[str, Any]:
     return raw
 
 
+def _submission_rpc() -> JsonRpcClient:
+    """One write attempt only; the runtime owns ambiguity after any transport error."""
+    return JsonRpcClient(INK_RPC_ENDPOINTS[0], max_retries=0)
+
+
 def _balances_at_block(
     providers: tuple[JsonRpcClient, JsonRpcClient],
     *,
@@ -498,6 +503,7 @@ def _verify_current_grant(
     authority_root: Path,
     session: ExecutionSessionV0,
     now_epoch_s: int,
+    require_submission_window: bool,
 ):
     if Path(state["authority_root"]).resolve() != authority_root:
         raise RuntimeError("prepared state names another AuthorityRoot")
@@ -515,7 +521,9 @@ def _verify_current_grant(
     ):
         raise RuntimeError("receipt does not authorize current QntySpot implementation")
     remaining = receipt.authority_policy.not_after_epoch_s - now_epoch_s
-    if remaining < MIN_REMAINING_AUTHORITY_S:
+    if remaining <= 0:
+        raise SafeHaltError("authority grant is expired")
+    if require_submission_window and remaining < MIN_REMAINING_AUTHORITY_S:
         raise SafeHaltError(
             f"grant has only {remaining}s remaining; do not admit or submit signed bytes"
         )
@@ -579,11 +587,14 @@ def main() -> int:
         raise RuntimeError("prepared ledger is missing")
 
     _policy, intent, session, envelope = _reconstruct_prepared(state)
+    guard_path = _guard_path(ledger_path)
+    guard = _read_guard(guard_path) if guard_path.exists() else None
     receipt, verified = _verify_current_grant(
         state,
         authority_root=authority_root,
         session=session,
         now_epoch_s=now,
+        require_submission_window=guard is None,
     )
     signed_bytes = _read_signed_bytes(signed_path)
 
@@ -601,8 +612,6 @@ def main() -> int:
     if len(providers) != 2:
         raise RuntimeError("Ink live path requires exactly two read providers")
     read_providers = (providers[0], providers[1])
-    guard_path = _guard_path(ledger_path)
-    guard = _read_guard(guard_path) if guard_path.exists() else None
 
     if guard is None:
         router_identity = consume_ink_v0f_router_artifact(
@@ -674,7 +683,7 @@ def main() -> int:
         _write_guard(guard_path, guard_doc)
         guard = guard_doc
 
-        submit_rpc = JsonRpcClient(INK_RPC_ENDPOINTS[0], max_retries=0)
+        submit_rpc = _submission_rpc()
         transport = JsonRpcExactSignedBytesTransport(submit_rpc)
         attempt = runtime.submit_exact_signed_bytes(
             admission,
@@ -737,33 +746,39 @@ def main() -> int:
 
     # For a successful BUY, corroborate receipt logs against actual wallet
     # balance deltas before allowing reconciliation to mint a fill receipt.
-    if (
-        observations[0].settlement_facts == observations[1].settlement_facts
-        and observations[0].receipt_status is ReceiptStatus.SUCCESS
-    ):
+    if observations[0].settlement_facts == observations[1].settlement_facts:
         inclusion_block = observations[0].block_number
         assert inclusion_block is not None
         post_balances = _balances_at_block(
             read_providers,
             block_number=inclusion_block,
         )
-        expected_token = (
-            int(guard["pre_krakmask_balance_atomic"])
-            + int(observations[0].effective_output_atomic)
-        )
-        expected_native = (
-            int(guard["pre_native_balance_atomic"])
-            - int(observations[0].effective_input_atomic)
-            - fee_atomic
-        )
-        if post_balances["krakmask_balance_atomic"] != expected_token:
-            raise SafeHaltError(
-                "confirmed KRAKMASK balance delta differs from receipt settlement"
+        pre_native = int(guard["pre_native_balance_atomic"])
+        pre_token = int(guard["pre_krakmask_balance_atomic"])
+        if observations[0].receipt_status is ReceiptStatus.SUCCESS:
+            expected_token = pre_token + int(observations[0].effective_output_atomic)
+            expected_native = (
+                pre_native
+                - int(observations[0].effective_input_atomic)
+                - fee_atomic
             )
-        if post_balances["native_balance_atomic"] != expected_native:
-            raise SafeHaltError(
-                "confirmed native balance delta differs from input plus gas"
-            )
+            if post_balances["krakmask_balance_atomic"] != expected_token:
+                raise SafeHaltError(
+                    "confirmed KRAKMASK balance delta differs from receipt settlement"
+                )
+            if post_balances["native_balance_atomic"] != expected_native:
+                raise SafeHaltError(
+                    "confirmed native balance delta differs from input plus gas"
+                )
+        elif observations[0].receipt_status is ReceiptStatus.REVERTED:
+            if post_balances["krakmask_balance_atomic"] != pre_token:
+                raise SafeHaltError(
+                    "reverted transaction unexpectedly changed KRAKMASK balance"
+                )
+            if post_balances["native_balance_atomic"] != pre_native - fee_atomic:
+                raise SafeHaltError(
+                    "reverted native balance delta differs from gas-only loss"
+                )
 
     for observation in observations:
         runtime.record_chain_observation(
