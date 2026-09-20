@@ -35,6 +35,7 @@ from .execution_contract import (
     ExecutionSessionV0,
     _assert_exact_scope,
     _assert_authority_session_binding,
+    _assert_authority_session_static_binding,
 )
 
 __all__ = [
@@ -48,10 +49,12 @@ __all__ = [
     "VerifiedAuthorityGrantV0",
     "load_trusted_authority_root",
     "verify_authority_grant",
+    "verify_expired_authority_grant_for_recovery",
     "assert_issuance_request_admissible",
     "effective_authority_level",
     "effective_capabilities",
     "require_effective_capability",
+    "require_expired_recovery_capability",
     "effective_capital_ceilings",
     "assert_effective_capital_within",
 ]
@@ -560,22 +563,17 @@ class VerifiedAuthorityGrantV0:
         return self.receipt.authority_policy
 
 
-def verify_authority_grant(
+def _verify_authority_receipt_authenticity(
     *,
     receipt: AuthorityGrantReceiptV0 | bytes,
     trusted_root: TrustedAuthorityRootV0,
-    session: ExecutionSessionV0,
-    now_epoch_s: int,
-) -> VerifiedAuthorityGrantV0:
-    """Verify a receipt against external trust and the exact runtime session."""
+) -> AuthorityGrantReceiptV0:
     if isinstance(receipt, bytes):
         receipt = AuthorityGrantReceiptV0.from_bytes(receipt)
     if not isinstance(receipt, AuthorityGrantReceiptV0):
         raise AuthorityVerificationError("receipt is not an authority grant")
     if not isinstance(trusted_root, TrustedAuthorityRootV0):
         raise AuthorityVerificationError("trusted_root must be external configuration")
-    if not isinstance(session, ExecutionSessionV0):
-        raise AuthorityVerificationError("session must be ExecutionSessionV0")
     if receipt.root_id != trusted_root.root_id:
         raise AuthorityVerificationError("receipt is signed by a different root identity")
     if receipt.signature_algorithm != trusted_root.signature_algorithm:
@@ -584,17 +582,6 @@ def verify_authority_grant(
         raise AuthorityVerificationError("receipt public-key fingerprint differs from trust anchor")
     if receipt.authority_epoch < trusted_root.minimum_authority_epoch:
         raise AuthorityVerificationError("authority receipt is below the external minimum epoch")
-    try:
-        _assert_authority_session_binding(
-            session,
-            receipt.authority_policy,
-            now_epoch_s=now_epoch_s,
-            error=AuthorityVerificationError,
-        )
-    except AuthorityVerificationError:
-        raise
-    except (AuthorityCeilingError, TypeError, ValueError) as exc:
-        raise AuthorityVerificationError(f"authority/session binding failed: {exc}") from exc
     try:
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -607,6 +594,13 @@ def verify_authority_grant(
         )
     except (InvalidSignature, ValueError) as exc:
         raise AuthorityVerificationError("authority receipt signature is invalid") from exc
+    return receipt
+
+
+def _verified_authority_result(
+    receipt: AuthorityGrantReceiptV0,
+    trusted_root: TrustedAuthorityRootV0,
+) -> VerifiedAuthorityGrantV0:
     return VerifiedAuthorityGrantV0(
         receipt=receipt,
         root_id=trusted_root.root_id,
@@ -617,6 +611,78 @@ def verify_authority_grant(
         receipt_id=receipt.receipt_id,
         _construction_token=_VERIFIED_TOKEN,
     )
+
+
+def verify_authority_grant(
+    *,
+    receipt: AuthorityGrantReceiptV0 | bytes,
+    trusted_root: TrustedAuthorityRootV0,
+    session: ExecutionSessionV0,
+    now_epoch_s: int,
+) -> VerifiedAuthorityGrantV0:
+    """Verify a current receipt against external trust and the exact runtime session."""
+    receipt = _verify_authority_receipt_authenticity(
+        receipt=receipt,
+        trusted_root=trusted_root,
+    )
+    if not isinstance(session, ExecutionSessionV0):
+        raise AuthorityVerificationError("session must be ExecutionSessionV0")
+    try:
+        _assert_authority_session_binding(
+            session,
+            receipt.authority_policy,
+            now_epoch_s=now_epoch_s,
+            error=AuthorityVerificationError,
+        )
+    except AuthorityVerificationError:
+        raise
+    except (AuthorityCeilingError, TypeError, ValueError) as exc:
+        raise AuthorityVerificationError(f"authority/session binding failed: {exc}") from exc
+    return _verified_authority_result(receipt, trusted_root)
+
+
+def verify_expired_authority_grant_for_recovery(
+    *,
+    receipt: AuthorityGrantReceiptV0 | bytes,
+    trusted_root: TrustedAuthorityRootV0,
+    session: ExecutionSessionV0,
+    now_epoch_s: int,
+) -> VerifiedAuthorityGrantV0:
+    """Authenticate one expired grant for observation/reconciliation only.
+
+    This does not revive execution authority. The returned opaque proof is
+    still rejected by every ordinary capability gate because its interval is
+    expired. Only :func:`require_expired_recovery_capability` may consume it,
+    and that gate exposes no external-effect capability.
+    """
+    receipt = _verify_authority_receipt_authenticity(
+        receipt=receipt,
+        trusted_root=trusted_root,
+    )
+    if not isinstance(session, ExecutionSessionV0):
+        raise AuthorityVerificationError("session must be ExecutionSessionV0")
+    _non_negative_int(now_epoch_s, field_name="now_epoch_s")
+    if now_epoch_s < receipt.authority_policy.not_after_epoch_s:
+        raise AuthorityVerificationError(
+            "recovery verification requires an expired authority grant"
+        )
+    if receipt.authority_policy.granted_level < AuthorityLevel.RECONCILE_ONLY:
+        raise AuthorityVerificationError(
+            "expired grant never carried reconciliation authority"
+        )
+    try:
+        _assert_authority_session_static_binding(
+            session,
+            receipt.authority_policy,
+            error=AuthorityVerificationError,
+        )
+    except AuthorityVerificationError:
+        raise
+    except (AuthorityCeilingError, TypeError, ValueError) as exc:
+        raise AuthorityVerificationError(
+            f"authority/session recovery binding failed: {exc}"
+        ) from exc
+    return _verified_authority_result(receipt, trusted_root)
 
 
 def _require_verified(grant: Any) -> VerifiedAuthorityGrantV0:
@@ -750,6 +816,58 @@ def require_effective_capability(
             + (" while halted" if safe_halt else "")
         )
     return level
+
+
+_EXPIRED_RECOVERY_CAPABILITIES = frozenset(
+    {
+        Capability.OBSERVE_CHAIN,
+        Capability.RECONCILE,
+        Capability.ACCOUNT_QUARANTINE,
+    }
+)
+
+
+def require_expired_recovery_capability(
+    *,
+    capability: Capability,
+    source_phase_ceiling: AuthorityLevel,
+    verified_grant: VerifiedAuthorityGrantV0,
+    session: ExecutionSessionV0,
+    now_epoch_s: int,
+) -> AuthorityLevel:
+    """Permit only read/accounting recovery for one already-bound expired session."""
+    if not isinstance(capability, Capability):
+        raise AuthorityCeilingError(f"unknown capability {capability!r}")
+    if capability not in _EXPIRED_RECOVERY_CAPABILITIES:
+        raise AuthorityCeilingError(
+            f"{capability.value} is forbidden for expired-authority recovery"
+        )
+    if not isinstance(session, ExecutionSessionV0):
+        raise AuthorityVerificationError("session must be ExecutionSessionV0")
+    if not isinstance(source_phase_ceiling, AuthorityLevel):
+        raise AuthorityCeilingError("source_phase_ceiling is not an AuthorityLevel")
+    if source_phase_ceiling < AuthorityLevel.RECONCILE_ONLY:
+        raise AuthorityCeilingError("source phase has no reconciliation authority")
+    if source_phase_ceiling > PHASE_GRANTED_AUTHORITY_LEVEL:
+        raise AuthorityCeilingError(
+            "source_phase_ceiling exceeds the current reviewed phase ceiling"
+        )
+    grant = _require_verified(verified_grant)
+    _non_negative_int(now_epoch_s, field_name="now_epoch_s")
+    if now_epoch_s < grant.authority_policy.not_after_epoch_s:
+        raise AuthorityVerificationError(
+            "expired-authority recovery requires an expired grant"
+        )
+    _assert_authority_session_static_binding(
+        session,
+        grant.authority_policy,
+        error=AuthorityVerificationError,
+    )
+    if grant.authority_policy.granted_level < AuthorityLevel.RECONCILE_ONLY:
+        raise AuthorityCeilingError(
+            "expired grant never carried reconciliation authority"
+        )
+    return AuthorityLevel.RECONCILE_ONLY
 
 
 def effective_capital_ceilings(
