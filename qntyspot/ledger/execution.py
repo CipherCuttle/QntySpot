@@ -939,6 +939,11 @@ class ExecutionRuntime:
                     f"durable approval signed metadata {field} differs"
                 )
 
+        # Claim the one transport opportunity durably before bytes can reach
+        # RPC. This UNKNOWN guard is append-only: if the process dies during
+        # transport, or a second runtime races us, restart observes the guard
+        # and refuses retransmission instead of guessing whether the first
+        # external effect occurred.
         with self._transaction("submission_attempt") as conn:
             self._reject_if_killed("approval exact signed-byte submission")
             approval = conn.execute(
@@ -972,6 +977,31 @@ class ExecutionRuntime:
                 raise SafeHaltError(
                     "approval retransmission is forbidden after any prior transport attempt"
                 )
+            guard = SubmissionAttemptV0(
+                signed_transaction_id=signed.signed_transaction_id,
+                provider_id=provider_id,
+                attempt_ordinal=0,
+                submitted_at_epoch_s=submitted_at_epoch_s,
+                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+                error_class="PreTransportGuard",
+            )
+            guard_values = {
+                "submission_attempt_id": guard.submission_attempt_id,
+                "signed_transaction_id": guard.signed_transaction_id,
+                "provider_id": guard.provider_id,
+                "attempt_ordinal": guard.attempt_ordinal,
+                "submitted_at_epoch_s": guard.submitted_at_epoch_s,
+                "acknowledgment": guard.acknowledgment.value,
+                "provider_reported_hash": guard.provider_reported_hash,
+                "error_class": guard.error_class,
+            }
+            self._insert_or_match(
+                conn,
+                "submission_attempts",
+                "submission_attempt_id",
+                guard.submission_attempt_id,
+                guard_values,
+            )
 
         try:
             provider_hash = transport.submit_exact_signed_bytes(signed_bytes)
