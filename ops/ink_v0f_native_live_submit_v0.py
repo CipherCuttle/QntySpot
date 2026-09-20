@@ -240,6 +240,16 @@ def _write_guard(path: Path, document: Mapping[str, Any]) -> None:
             pass
         raise
 
+    # The file fsync is not sufficient to make the new directory entry
+    # durable across sudden power loss. The guard must survive any transport
+    # attempt, so sync the parent directory before bytes can reach RPC.
+    dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    dir_fd = os.open(path.parent, dir_flags)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
 
 def _read_guard(path: Path) -> Mapping[str, Any]:
     raw = strict_json_loads(path.read_bytes())
@@ -292,7 +302,8 @@ def _settlement_from_receipt(
     effective_gas_price = _uint_quantity(
         receipt.get("effectiveGasPrice"), field="receipt effectiveGasPrice"
     )
-    fee_atomic = gas_used * effective_gas_price
+    l1_fee = _uint_quantity(receipt.get("l1Fee"), field="receipt l1Fee")
+    fee_atomic = gas_used * effective_gas_price + l1_fee
     if status_raw == 0:
         return ReceiptStatus.REVERTED, None, None, fee_atomic
     if status_raw != 1:
