@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from ..canon import digest_object
+from ..canon import digest_object, strict_json_loads
 from ..errors import LedgerError, ReplayDivergenceError
 from ..exact_signed_bytes import ExactSignedTransactionRecordV0
 from ..execution_contract import (
@@ -193,6 +193,55 @@ def _validate_exact_signed_envelope_bindings(snapshot: Mapping[str, Any]) -> Non
             and envelope["account_nonce"] == row["account_nonce"],
             "signed_transactions: exact-byte envelope binding disagrees",
         )
+
+
+def _validate_chain_truth_recovery_bindings(target: SpotLedger) -> None:
+    """Bind every special SAFE_HALT recovery event to its exact reconciliation."""
+    for event in target.connection.execute(
+        "SELECT economic_action_id, from_state, to_state, payload_json "
+        "FROM state_events WHERE event_type = 'CHAIN_TRUTH_RECOVERED' "
+        "ORDER BY seq"
+    ):
+        payload = strict_json_loads(event["payload_json"])
+        _require(
+            type(payload) is dict
+            and set(payload)
+            == {"reconciliation_id", "receipt_id", "recovery_type", "verdict"},
+            "chain-truth recovery event payload is malformed",
+        )
+        reconciliation = target.connection.execute(
+            "SELECT * FROM reconciliations WHERE reconciliation_id = ? "
+            "AND external_action_id = ?",
+            (payload["reconciliation_id"], event["economic_action_id"]),
+        ).fetchone()
+        _require(
+            reconciliation is not None,
+            "chain-truth recovery event is not bound to its reconciliation",
+        )
+        _require(
+            event["from_state"] == "SAFE_HALT",
+            "chain-truth recovery event must originate at SAFE_HALT",
+        )
+        if event["to_state"] == "RECONCILED":
+            _require(
+                payload["verdict"] == "SETTLED"
+                and reconciliation["verdict"] == "SETTLED"
+                and payload["receipt_id"] == reconciliation["receipt_id"]
+                and payload["receipt_id"] is not None,
+                "settled chain-truth recovery disagrees with reconciliation",
+            )
+        elif event["to_state"] == "REJECTED":
+            _require(
+                payload["verdict"] == "REVERTED"
+                and reconciliation["verdict"] == "REVERTED"
+                and payload["receipt_id"] is None
+                and reconciliation["receipt_id"] is None,
+                "reverted chain-truth recovery disagrees with reconciliation",
+            )
+        else:
+            raise ReplayDivergenceError(
+                "chain-truth recovery has an executable or unknown target"
+            )
 
 
 def _validate_settlement_states(target: SpotLedger) -> None:
@@ -400,6 +449,7 @@ def replay_execution_into(target: SpotLedger, source: SpotLedger) -> None:
                     f"VALUES ({','.join(':' + name for name in names)})",
                     row,
                 )
+    _validate_chain_truth_recovery_bindings(target)
     _validate_settlement_states(target)
 
 
