@@ -24,8 +24,13 @@ These flags are also exported at runtime as `qntyspot.AUTHORITY`,
 The Level-3 source ceiling is only one half of authority. A current,
 independently verified AuthorityRoot grant bound to the exact implementation,
 network, taker, venue, capital ceilings, and validity window is required for
-every effective Level-1+ runtime action. No production Level-3 grant is
-provisioned by this source transition, so production execution remains denied.
+every action that can create a new external effect and for ordinary Level-1+
+runtime authority. The only post-expiry exception is an accounting-only
+recovery proof for the exact already-bound session: it may observe chain truth,
+reconcile that truth, and account quarantined capital, but it cannot reserve,
+construct, approve, sign, submit, or create another transaction origin. No
+production Level-3 grant is provisioned by this source transition, so
+production execution remains denied.
 `SIGNING_AUTHORIZED = NO` means QntySpot cannot produce a signature; Level 3
 uses only complete bytes signed by the externally controlled human account.
 `LIVE_CAPITAL_AUTHORIZED = NO` records the current pregrant deployment state,
@@ -86,7 +91,8 @@ phase does not issue, embed, discover, or provision a production grant.
 - wallet signing
 - arbitrary or unbounded transaction construction
 - any transaction broadcast outside the exact grant-bound submission entrypoint
-- execution without a current matching external grant
+- execution or any new external effect without a current matching external grant
+- using an expired-grant recovery proof for reserve/construct/approve/sign/submit authority
 - venue discovery
 - automatic token selection
 - bridging
