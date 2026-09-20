@@ -166,6 +166,39 @@ def _claim_fresh_episode_paths(ledger_path: Path, state_path: Path) -> None:
         ) from exc
 
 
+def _write_durable_prepared_state(state_path: Path, state: dict[str, object]) -> None:
+    """Install the prepared state durably before any signing request is exposed."""
+    payload = (
+        json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    tmp_path = state_path.with_name(state_path.name + ".tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    fd: int | None = None
+    try:
+        fd = os.open(tmp_path, flags, 0o600)
+        view = memoryview(payload)
+        written = 0
+        while written < len(view):
+            written += os.write(fd, view[written:])
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(tmp_path, state_path)
+        directory_fd = os.open(state_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def _envelope_object(envelope: ExecutionEnvelopeV0) -> dict[str, object]:
     return {field.name: getattr(envelope, field.name) for field in fields(envelope)}
 
@@ -410,10 +443,7 @@ def main() -> int:
         "session": _session_object(session),
         "envelope": _envelope_object(envelope),
     }
-    state_path.write_text(
-        json.dumps(state, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+    _write_durable_prepared_state(state_path, state)
 
     result = {
         "schema": "qntyspot.ops.ink_v0f_native_first_live.signing_request.v0",
