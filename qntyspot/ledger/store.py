@@ -608,18 +608,37 @@ class SpotLedger:
                 """
                 SELECT 1
                   FROM reconciliations AS r
-                  JOIN signed_transactions AS st
-                    ON st.external_action_id = r.external_action_id
-                  JOIN chain_observations AS co
-                    ON co.external_action_id = st.external_action_id
-                   AND co.signed_transaction_id = st.signed_transaction_id
                  WHERE r.external_action_id = ?
                    AND r.verdict = 'REVERTED'
-                   AND r.transaction_hash = st.transaction_hash
-                   AND r.chain_id = st.chain_id
-                   AND r.taker_address = st.taker_address
-                   AND co.presence = 'INCLUDED'
-                   AND co.receipt_status = 'REVERTED'
+                   AND (
+                        EXISTS (
+                            SELECT 1
+                              FROM signed_transactions AS st
+                              JOIN chain_observations AS co
+                                ON co.external_action_id = st.external_action_id
+                               AND co.signed_transaction_id = st.signed_transaction_id
+                             WHERE st.external_action_id = r.external_action_id
+                               AND r.transaction_hash = st.transaction_hash
+                               AND r.chain_id = st.chain_id
+                               AND r.taker_address = st.taker_address
+                               AND co.presence = 'INCLUDED'
+                               AND co.receipt_status = 'REVERTED'
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                              FROM external_transaction_refs AS er
+                              JOIN chain_observations AS co
+                                ON co.external_action_id = er.external_action_id
+                               AND co.external_transaction_ref_id =
+                                   er.external_transaction_ref_id
+                             WHERE er.external_action_id = r.external_action_id
+                               AND r.transaction_hash = er.transaction_hash
+                               AND r.chain_id = er.chain_id
+                               AND r.taker_address = er.taker_address
+                               AND co.presence = 'INCLUDED'
+                               AND co.receipt_status = 'REVERTED'
+                        )
+                   )
                  LIMIT 1
                 """,
                 (economic_action_id,),
