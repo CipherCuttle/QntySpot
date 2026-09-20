@@ -639,7 +639,16 @@ def test_expired_grant_can_only_authenticate_chain_truth_recovery(
             now_epoch_s=expired_at - 1,
         )
     with pytest.raises(TypeError, match="only constructed"):
-        ExpiredAuthorityRecoveryProofV0()  # type: ignore[call-arg]
+        ExpiredAuthorityRecoveryProofV0(
+            receipt=recovery.receipt,
+            root_id=recovery.root_id,
+            public_key_fingerprint=recovery.public_key_fingerprint,
+            trust_config_digest=recovery.trust_config_digest,
+            minimum_authority_epoch=recovery.minimum_authority_epoch,
+            signed_body_digest=recovery.signed_body_digest,
+            receipt_id=recovery.receipt_id,
+            _construction_token=object(),
+        )
 
 
 def test_verified_grant_is_revalidated_at_every_consumption_time(
