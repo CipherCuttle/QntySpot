@@ -4,6 +4,8 @@ import importlib.util
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from qntyspot.economics import build_intent
 from qntyspot.policy import parse_policy
 
@@ -115,3 +117,43 @@ def test_ops_helper_is_bound_to_current_durable_envelope_runtime() -> None:
     assert helper.BOUND_IMPLEMENTATION_DIGEST == (
         "0eebedcd5028ada31899dde2794fc783970df13e461dfd85353ed61c22aa4e8d"
     )
+
+
+def test_claim_fresh_episode_paths_is_exclusive(tmp_path: Path) -> None:
+    helper = _helper()
+    ledger = tmp_path / "episode.sqlite3"
+    state = helper._state_path(ledger)
+
+    helper._claim_fresh_episode_paths(ledger, state)
+    assert ledger.exists()
+    assert state.exists()
+
+    with pytest.raises(RuntimeError, match="reuse or race"):
+        helper._claim_fresh_episode_paths(ledger, state)
+    assert ledger.exists()
+    assert state.exists()
+
+
+def test_claim_does_not_delete_preexisting_zero_byte_ledger(tmp_path: Path) -> None:
+    helper = _helper()
+    ledger = tmp_path / "owned-by-other.sqlite3"
+    state = helper._state_path(ledger)
+    ledger.touch()
+
+    with pytest.raises(RuntimeError, match="reuse or race"):
+        helper._claim_fresh_episode_paths(ledger, state)
+    assert ledger.exists()
+    assert ledger.stat().st_size == 0
+    assert not state.exists()
+
+
+def test_state_collision_removes_only_our_new_ledger_claim(tmp_path: Path) -> None:
+    helper = _helper()
+    ledger = tmp_path / "new-claim.sqlite3"
+    state = helper._state_path(ledger)
+    state.write_text("other-process\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="reuse or race"):
+        helper._claim_fresh_episode_paths(ledger, state)
+    assert not ledger.exists()
+    assert state.read_text(encoding="utf-8") == "other-process\n"
