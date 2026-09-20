@@ -701,6 +701,323 @@ class ExecutionRuntime:
             )
         return envelope
 
+    def admit_ink_v0f_signed_approval(
+        self,
+        request: Any,
+        signed_bytes: bytes,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        *,
+        frozen_at_epoch_s: int,
+    ) -> Any:
+        """Validate and durably bind one exact externally signed Ink approval.
+
+        This is the approval analogue of admit_exact_signed_bytes. The complete
+        signed payload remains caller-owned; only its immutable identity is
+        persisted. The durable origin is the already-authorized approval
+        action, never a caller-selected arbitrary transaction.
+        """
+
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.SUBMIT_EXACT_BYTES,
+            now_epoch_s=frozen_at_epoch_s,
+        )
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.AUTHORIZE_APPROVAL,
+            now_epoch_s=frozen_at_epoch_s,
+        )
+
+        from ..ink_v0f_human_signing import (
+            InkV0FApprovalKind,
+            InkV0FApprovalSigningRequestV0,
+            validate_ink_v0f_signed_approval,
+        )
+
+        if type(request) is not InkV0FApprovalSigningRequestV0:
+            raise EnvelopeValidationError(
+                "approval exact-byte admission requires a canonical signing request"
+            )
+        if request.kind is not InkV0FApprovalKind.EXACT_APPROVAL:
+            raise EnvelopeValidationError(
+                "this admission path accepts the frozen exact approval only"
+            )
+        scope = request.scope
+        if (
+            scope.session_id != session.session_id
+            or scope.session_identity_digest != session.identity_digest
+            or scope.authority_policy_digest != session.authority_policy_digest
+            or scope.chain_id != session.chain_id
+            or scope.taker_address != session.taker_address
+        ):
+            raise AuthorityVerificationError(
+                "approval signed-byte scope differs from the execution session"
+            )
+        if scope.economic_action_id != request.approval_action_id:
+            raise EnvelopeValidationError(
+                "approval signed-byte scope is not bound to the approval action"
+            )
+
+        signed = validate_ink_v0f_signed_approval(request, signed_bytes)
+        parsed = signed.validated.parsed
+        signer_identity = "evm-recovered:" + parsed.sender_address
+
+        with self._transaction("signed_metadata") as conn:
+            self._reject_if_killed("approval exact signed-byte admission")
+            session_row = self._require_session(session.session_id, conn)
+            if session_row["identity_digest"] != session.identity_digest:
+                raise AuthorityVerificationError(
+                    "stored execution session identity differs"
+                )
+
+            approval = conn.execute(
+                "SELECT * FROM approval_actions WHERE approval_action_id = ?",
+                (request.approval_action_id,),
+            ).fetchone()
+            if approval is None:
+                raise LedgerError("approval exact-byte admission requires a durable approval")
+            if approval["lifecycle"] != "AUTHORIZED":
+                raise LedgerError(
+                    "approval exact-byte admission requires an AUTHORIZED approval"
+                )
+            required_approval = {
+                "session_id": session.session_id,
+                "session_identity_digest": session.identity_digest,
+                "economic_action_id": request.economic_action_id,
+                "taker_address": session.taker_address,
+                "token_address": request.token_address,
+                "spender_address": request.spender_address,
+                "requested_allowance_atomic": str(request.allowance_atomic),
+                "authority_policy_digest": session.authority_policy_digest,
+            }
+            for field, expected in required_approval.items():
+                if approval[field] != expected:
+                    raise EnvelopeValidationError(
+                        f"durable approval {field} differs from the signing request"
+                    )
+
+            economic = self._require_economic_intent(request.economic_action_id, conn)
+            if IntentState(economic["state"]) is not IntentState.RESERVED:
+                raise LedgerError(
+                    "approval exact-byte admission requires a RESERVED economic action"
+                )
+
+            external = conn.execute(
+                "SELECT * FROM external_actions WHERE external_action_id = ?",
+                (request.approval_action_id,),
+            ).fetchone()
+            if (
+                external is None
+                or external["kind"] != "APPROVAL"
+                or external["approval_action_id"] != request.approval_action_id
+                or external["session_id"] != session.session_id
+            ):
+                raise LedgerError(
+                    "approval exact-byte admission requires the bound approval external action"
+                )
+
+            existing = conn.execute(
+                "SELECT * FROM signed_transactions WHERE external_action_id = ?",
+                (request.approval_action_id,),
+            ).fetchone()
+            values = {
+                "signed_transaction_id": signed.signed_transaction_id,
+                "external_action_id": request.approval_action_id,
+                "session_id": session.session_id,
+                "envelope_id": None,
+                "approval_action_id": request.approval_action_id,
+                "origin": "APPROVAL",
+                "chain_id": parsed.chain_id,
+                "taker_address": parsed.sender_address,
+                "account_nonce": parsed.account_nonce,
+                "raw_signed_sha256": signed.signed_bytes_sha256,
+                "raw_signed_length": signed.signed_bytes_length,
+                "transaction_hash": signed.transaction_hash,
+                "scope_digest": scope.scope_digest,
+                "signer_identity": signer_identity,
+                "frozen_at_epoch_s": frozen_at_epoch_s,
+            }
+            if existing is not None:
+                if any(existing[field] != expected for field, expected in values.items()):
+                    raise LedgerError(
+                        "one approval action cannot bind different signed bytes"
+                    )
+                return signed
+            self._insert_or_match(
+                conn,
+                "signed_transactions",
+                "signed_transaction_id",
+                signed.signed_transaction_id,
+                values,
+            )
+        return signed
+
+    def submit_ink_v0f_signed_approval(
+        self,
+        signed: Any,
+        signed_bytes: bytes,
+        transport: ExactSignedBytesTransport,
+        session: ExecutionSessionV0,
+        verified_grant: VerifiedAuthorityGrantV0,
+        *,
+        provider_id: str,
+        submitted_at_epoch_s: int,
+        allow_identical_retry: bool = False,
+    ) -> SubmissionAttemptV0:
+        """Submit one durably admitted exact approval byte string at most once."""
+
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.SUBMIT_EXACT_BYTES,
+            now_epoch_s=submitted_at_epoch_s,
+        )
+        self._authorize(
+            session,
+            verified_grant,
+            Capability.AUTHORIZE_APPROVAL,
+            now_epoch_s=submitted_at_epoch_s,
+        )
+
+        from ..ink_v0f_human_signing import (
+            InkV0FApprovalKind,
+            InkV0FSignedApprovalV0,
+        )
+
+        if type(signed) is not InkV0FSignedApprovalV0:
+            raise EnvelopeValidationError(
+                "approval submission requires validated exact signed bytes"
+            )
+        if signed.request.kind is not InkV0FApprovalKind.EXACT_APPROVAL:
+            raise EnvelopeValidationError(
+                "this submission path accepts the frozen exact approval only"
+            )
+        if type(signed_bytes) is not bytes or not signed_bytes:
+            raise EnvelopeValidationError("approval signed bytes must be non-empty")
+        if sha256_hex(signed_bytes) != signed.signed_bytes_sha256:
+            raise EnvelopeValidationError("approval signed bytes were mutated")
+        if len(signed_bytes) != signed.signed_bytes_length:
+            raise EnvelopeValidationError("approval signed-byte length differs")
+        if derive_transaction_hash(signed_bytes) != signed.transaction_hash:
+            raise EnvelopeValidationError("approval signed-byte transaction hash differs")
+        if (
+            signed.request.scope.session_id != session.session_id
+            or signed.request.scope.session_identity_digest != session.identity_digest
+            or signed.request.scope.authority_policy_digest
+            != session.authority_policy_digest
+        ):
+            raise AuthorityVerificationError(
+                "approval submission belongs to another execution session"
+            )
+        if not isinstance(provider_id, str) or not provider_id or provider_id.strip() != provider_id:
+            raise EnvelopeValidationError("provider_id must be a non-empty label")
+        if type(allow_identical_retry) is not bool:
+            raise EnvelopeValidationError("allow_identical_retry must be boolean")
+
+        row = self._conn.execute(
+            "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
+            (signed.signed_transaction_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerError("approval signed-byte admission is not durable")
+        required_signed = {
+            "external_action_id": signed.request.approval_action_id,
+            "session_id": session.session_id,
+            "envelope_id": None,
+            "approval_action_id": signed.request.approval_action_id,
+            "origin": "APPROVAL",
+            "chain_id": signed.validated.parsed.chain_id,
+            "taker_address": signed.validated.parsed.sender_address,
+            "account_nonce": signed.validated.parsed.account_nonce,
+            "raw_signed_sha256": signed.signed_bytes_sha256,
+            "raw_signed_length": signed.signed_bytes_length,
+            "transaction_hash": signed.transaction_hash,
+            "scope_digest": signed.request.scope.scope_digest,
+        }
+        for field, expected in required_signed.items():
+            if row[field] != expected:
+                raise EnvelopeValidationError(
+                    f"durable approval signed metadata {field} differs"
+                )
+
+        with self._transaction("submission_attempt") as conn:
+            self._reject_if_killed("approval exact signed-byte submission")
+            approval = conn.execute(
+                "SELECT * FROM approval_actions WHERE approval_action_id = ?",
+                (signed.request.approval_action_id,),
+            ).fetchone()
+            if (
+                approval is None
+                or approval["lifecycle"] != "AUTHORIZED"
+                or approval["session_id"] != session.session_id
+                or approval["economic_action_id"] != signed.request.economic_action_id
+                or approval["requested_allowance_atomic"]
+                != str(signed.request.allowance_atomic)
+            ):
+                raise LedgerError(
+                    "approval signed-byte submission requires the frozen AUTHORIZED approval"
+                )
+            economic = self._require_economic_intent(
+                signed.request.economic_action_id, conn
+            )
+            if IntentState(economic["state"]) is not IntentState.RESERVED:
+                raise LedgerError(
+                    "approval signed-byte submission requires a RESERVED economic action"
+                )
+            prior_attempt = conn.execute(
+                "SELECT 1 FROM submission_attempts "
+                "WHERE signed_transaction_id = ? LIMIT 1",
+                (signed.signed_transaction_id,),
+            ).fetchone()
+            if prior_attempt is not None and not allow_identical_retry:
+                raise SafeHaltError(
+                    "identical approval retransmission requires explicit idempotent retry admission"
+                )
+
+        try:
+            provider_hash = transport.submit_exact_signed_bytes(signed_bytes)
+        except Exception as exc:
+            attempt = SubmissionAttemptV0(
+                signed_transaction_id=signed.signed_transaction_id,
+                provider_id=provider_id,
+                attempt_ordinal=self._next_submission_ordinal(
+                    signed.signed_transaction_id, provider_id
+                ),
+                submitted_at_epoch_s=submitted_at_epoch_s,
+                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+                error_class=exc.__class__.__name__,
+            )
+            self._record_submission_attempt(attempt)
+            return attempt
+        if provider_hash != signed.transaction_hash:
+            attempt = SubmissionAttemptV0(
+                signed_transaction_id=signed.signed_transaction_id,
+                provider_id=provider_id,
+                attempt_ordinal=self._next_submission_ordinal(
+                    signed.signed_transaction_id, provider_id
+                ),
+                submitted_at_epoch_s=submitted_at_epoch_s,
+                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+                error_class="ProviderHashMismatch",
+            )
+            self._record_submission_attempt(attempt)
+            return attempt
+        attempt = SubmissionAttemptV0(
+            signed_transaction_id=signed.signed_transaction_id,
+            provider_id=provider_id,
+            attempt_ordinal=self._next_submission_ordinal(
+                signed.signed_transaction_id, provider_id
+            ),
+            submitted_at_epoch_s=submitted_at_epoch_s,
+            acknowledgment=SubmissionAcknowledgment.ACCEPTED,
+            provider_reported_hash=provider_hash,
+        )
+        self._record_submission_attempt(attempt)
+        return attempt
+
     def admit_exact_signed_bytes(
         self,
         scope: ExactSignedBytesScopeV0,
