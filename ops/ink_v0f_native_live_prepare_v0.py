@@ -139,8 +139,10 @@ def _claim_fresh_episode_paths(ledger_path: Path, state_path: Path) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     ledger_fd: int | None = None
     state_fd: int | None = None
+    created_ledger = False
     try:
         ledger_fd = os.open(ledger_path, flags, 0o600)
+        created_ledger = True
         os.close(ledger_fd)
         ledger_fd = None
         state_fd = os.open(state_path, flags, 0o600)
@@ -151,13 +153,13 @@ def _claim_fresh_episode_paths(ledger_path: Path, state_path: Path) -> None:
             os.close(ledger_fd)
         if state_fd is not None:
             os.close(state_fd)
-        # If this process created the ledger claim but could not claim the
-        # state path, remove only our still-empty ledger placeholder.
-        try:
-            if ledger_path.is_file() and ledger_path.stat().st_size == 0:
+        # Remove only a ledger placeholder created by this invocation. Never
+        # unlink an existing zero-byte file owned by another process.
+        if created_ledger:
+            try:
                 ledger_path.unlink()
-        except FileNotFoundError:
-            pass
+            except FileNotFoundError:
+                pass
         raise RuntimeError(
             "refusing to reuse or race an existing first-live ledger/state path; "
             "choose a fresh path"
