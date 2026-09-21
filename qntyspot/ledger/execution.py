@@ -482,11 +482,23 @@ class ExecutionRuntime:
             if verified.receipt.authority_epoch < row["highest_accepted_epoch"]:
                 raise AuthorityVerificationError("authority receipt epoch rolls back local continuity")
             if verified.receipt.authority_epoch == row["highest_accepted_epoch"]:
-                if verified.receipt_id != row["highest_accepted_receipt_id"]:
+                if verified.receipt_id == row["highest_accepted_receipt_id"]:
+                    return False
+                if (
+                    verified.receipt.authority_epoch != 6
+                    or verified.authority_policy.permitted_network_id != "evm:57073"
+                ):
                     raise AuthorityVerificationError(
                         "different authority receipt at an accepted epoch"
                     )
-                return False
+                if (
+                    verified.receipt.issued_at_epoch_s
+                    <= row["highest_accepted_at_epoch_s"]
+                    or accepted_at_epoch_s <= row["highest_accepted_at_epoch_s"]
+                ):
+                    raise AuthorityVerificationError(
+                        "same-epoch successor authority receipt does not advance local continuity"
+                    )
             conn.execute(
                 "UPDATE authority_root_state SET highest_accepted_epoch = ?, "
                 "highest_accepted_receipt_id = ?, highest_accepted_at_epoch_s = ? "

@@ -141,6 +141,92 @@ def _observe(
     )
 
 
+def test_epoch6_same_epoch_authority_receipt_renewal_is_monotonic(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import qntyspot.ledger.execution as execution_module
+
+    class FakePolicy:
+        def __init__(self, network_id: str) -> None:
+            self.permitted_network_id = network_id
+
+        def assert_valid_at(self, now_epoch_s: int) -> None:
+            assert now_epoch_s >= 0
+
+    class FakeReceipt:
+        def __init__(self, *, epoch: int, issued_at: int) -> None:
+            self.authority_epoch = epoch
+            self.issued_at_epoch_s = issued_at
+
+    class FakeVerified:
+        def __init__(
+            self,
+            *,
+            receipt_id: str,
+            issued_at: int,
+            network_id: str = "evm:57073",
+        ) -> None:
+            self.trust_config_digest = "aa" * 32
+            self.root_id = "qnty-authority-root-v0"
+            self.public_key_fingerprint = "bb" * 32
+            self.minimum_authority_epoch = 1
+            self.receipt_id = receipt_id
+            self.receipt = FakeReceipt(epoch=6, issued_at=issued_at)
+            self.authority_policy = FakePolicy(network_id)
+
+    monkeypatch.setattr(
+        execution_module,
+        "VerifiedAuthorityGrantV0",
+        FakeVerified,
+    )
+
+    with open_ledger(str(tmp_path / "renewable-authority.sqlite3")) as ledger:
+        runtime = ExecutionRuntime(ledger)
+        first = FakeVerified(receipt_id="11" * 32, issued_at=100)
+        assert runtime.record_verified_authority(first, accepted_at_epoch_s=110)
+
+        successor = FakeVerified(receipt_id="22" * 32, issued_at=1_000)
+        assert runtime.record_verified_authority(successor, accepted_at_epoch_s=1_010)
+        assert not runtime.record_verified_authority(
+            successor,
+            accepted_at_epoch_s=1_011,
+        )
+
+        row = ledger.connection.execute(
+            "SELECT * FROM authority_root_state WHERE trust_config_digest = ?",
+            (first.trust_config_digest,),
+        ).fetchone()
+        assert row["highest_accepted_epoch"] == 6
+        assert row["highest_accepted_receipt_id"] == successor.receipt_id
+        assert row["highest_accepted_at_epoch_s"] == 1_010
+
+        stale = FakeVerified(receipt_id="33" * 32, issued_at=1_000)
+        with pytest.raises(
+            AuthorityVerificationError,
+            match="does not advance local continuity",
+        ):
+            runtime.record_verified_authority(stale, accepted_at_epoch_s=1_020)
+
+        non_ink = FakeVerified(
+            receipt_id="44" * 32,
+            issued_at=2_000,
+            network_id="evm:46630",
+        )
+        with pytest.raises(
+            AuthorityVerificationError,
+            match="different authority receipt at an accepted epoch",
+        ):
+            runtime.record_verified_authority(non_ink, accepted_at_epoch_s=2_010)
+
+        with pytest.raises(sqlite3.IntegrityError, match="rollback"):
+            ledger.connection.execute(
+                "UPDATE authority_root_state SET highest_accepted_receipt_id = ? "
+                "WHERE trust_config_digest = ?",
+                ("55" * 32, first.trust_config_digest),
+            )
+
+
 def test_external_lifecycle_reconciles_once_and_replays(tmp_path: Path) -> None:
     ledger, runtime, intent, reference, session, grant = setup_runtime(tmp_path)
     _observe(runtime, intent, reference, session, grant, _external_observation(reference, "provider-a"))
