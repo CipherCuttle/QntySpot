@@ -452,3 +452,36 @@ def test_replay_rejects_tampered_inventory_carry_amount() -> None:
                 canonical_policies=ledger.canonical_policies(),
                 events=events,
             )
+
+
+def test_inventory_continuity_can_chain_through_an_empty_successor_cycle() -> None:
+    ledger, _, source_cycle, successor_policy, source_inventory = (
+        _filled_entry_with_successor()
+    )
+    middle_cycle = ledger.continue_inventory_into_successor_cycle(
+        source_cycle,
+        successor_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+    assert ledger.inventory_atomic(middle_cycle) == source_inventory
+
+    final_doc = base_policy_doc()
+    final_doc["policy_name"] = "fixture-buy-final-renewal"
+    final_doc["timing"] = {
+        "valid_from_epoch_s": NOW - 5,
+        "expiry_epoch_s": NOW + 30_000,
+        "quote_ttl_s": 300,
+    }
+    final_policy = parse_policy(final_doc)
+    ledger.admit_policy(final_policy)
+    final_cycle = ledger.continue_inventory_into_successor_cycle(
+        middle_cycle,
+        final_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+
+    assert ledger.inventory_atomic(middle_cycle) == 0
+    assert ledger.inventory_atomic(final_cycle) == source_inventory
+    assert_replay_equivalence(ledger)
