@@ -489,7 +489,8 @@ def _apply_exact_bytes_resume(
         f"event {seq}: unexpected recovery type for an exact-bytes resume",
     )
     row = conn.execute(
-        "SELECT state FROM intents WHERE economic_action_id = ?", (action_id,)
+        "SELECT state, quote_exposure_atomic FROM intents WHERE economic_action_id = ?",
+        (action_id,),
     ).fetchone()
     _require(row is not None, f"event {seq}: no intent {action_id}")
     _require(
@@ -500,20 +501,47 @@ def _apply_exact_bytes_resume(
         "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
         (action_id,),
     ).fetchone()
-    _require(
-        reservation is not None
-        and reservation["status"] == ReservationStatus.QUARANTINED.value,
-        f"event {seq}: exact-bytes resume requires a QUARANTINED reservation",
+    quote_exposure_atomic = decode_atomic(
+        row["quote_exposure_atomic"], field="replay quote_exposure"
     )
+    if quote_exposure_atomic == 0:
+        _require(
+            reservation is None,
+            f"event {seq}: zero-exposure resume must not have a reservation",
+        )
+        _require(
+            payload.get("prior_reservation_status") is None,
+            f"event {seq}: zero-exposure resume payload names a reservation",
+        )
+    else:
+        _require(
+            reservation is not None
+            and reservation["status"] == ReservationStatus.QUARANTINED.value,
+            f"event {seq}: capital-consuming resume requires QUARANTINED reservation",
+        )
+        _require(
+            payload.get("prior_reservation_status")
+            == ReservationStatus.QUARANTINED.value,
+            f"event {seq}: resume payload reservation status differs",
+        )
     conn.execute(
         "UPDATE intents SET state = ? WHERE economic_action_id = ?",
         (IntentState.SIGNED.value, action_id),
     )
-    conn.execute(
-        "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
-        "WHERE economic_action_id = ? AND status = ?",
-        (ReservationStatus.ACTIVE.value, action_id, ReservationStatus.QUARANTINED.value),
-    )
+    if quote_exposure_atomic > 0:
+        cursor = conn.execute(
+            "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+            "WHERE economic_action_id = ? AND status = ?",
+            (
+                ReservationStatus.ACTIVE.value,
+                action_id,
+                ReservationStatus.QUARANTINED.value,
+            ),
+        )
+        _require(
+            cursor.rowcount == 1,
+            f"event {seq}: resume failed to restore reservation",
+        )
 
 
 def _apply_chain_truth_recovery(
@@ -550,7 +578,8 @@ def _apply_chain_truth_recovery(
         f"event {seq}: invalid chain-truth recovery target",
     )
     row = conn.execute(
-        "SELECT state FROM intents WHERE economic_action_id = ?", (action_id,)
+        "SELECT state, quote_exposure_atomic FROM intents WHERE economic_action_id = ?",
+        (action_id,),
     ).fetchone()
     _require(row is not None, f"event {seq}: no intent {action_id}")
     _require(
@@ -561,11 +590,21 @@ def _apply_chain_truth_recovery(
         "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
         (action_id,),
     ).fetchone()
-    _require(
-        reservation is not None
-        and reservation["status"] == ReservationStatus.QUARANTINED.value,
-        f"event {seq}: chain-truth recovery requires QUARANTINED reservation",
+    quote_exposure_atomic = decode_atomic(
+        row["quote_exposure_atomic"], field="replay quote_exposure"
     )
+    if quote_exposure_atomic == 0:
+        _require(
+            reservation is None,
+            f"event {seq}: zero-exposure chain-truth recovery must not have a reservation",
+        )
+    else:
+        _require(
+            reservation is not None
+            and reservation["status"] == ReservationStatus.QUARANTINED.value,
+            f"event {seq}: capital-consuming chain-truth recovery requires "
+            "QUARANTINED reservation",
+        )
 
     if target is IntentState.RECONCILED:
         _require(
@@ -583,15 +622,20 @@ def _apply_chain_truth_recovery(
             receipt is not None,
             f"event {seq}: settled recovery has no bound fill receipt",
         )
-        conn.execute(
-            "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
-            "WHERE economic_action_id = ? AND status = ?",
-            (
-                ReservationStatus.ACTIVE.value,
-                action_id,
-                ReservationStatus.QUARANTINED.value,
-            ),
-        )
+        if quote_exposure_atomic > 0:
+            cursor = conn.execute(
+                "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+                "WHERE economic_action_id = ? AND status = ?",
+                (
+                    ReservationStatus.ACTIVE.value,
+                    action_id,
+                    ReservationStatus.QUARANTINED.value,
+                ),
+            )
+            _require(
+                cursor.rowcount == 1,
+                f"event {seq}: settled recovery failed to restore reservation",
+            )
     else:
         _require(
             payload["verdict"] == "REVERTED" and payload["receipt_id"] is None,
@@ -601,16 +645,21 @@ def _apply_chain_truth_recovery(
             action_id in trusted_reverted_external_action_ids,
             f"event {seq}: reverted recovery lacks trusted reverted chain truth",
         )
-        conn.execute(
-            "UPDATE budget_reservations SET status = ?, settled_seq = ? "
-            "WHERE economic_action_id = ? AND status = ?",
-            (
-                ReservationStatus.RELEASED.value,
-                seq,
-                action_id,
-                ReservationStatus.QUARANTINED.value,
-            ),
-        )
+        if quote_exposure_atomic > 0:
+            cursor = conn.execute(
+                "UPDATE budget_reservations SET status = ?, settled_seq = ? "
+                "WHERE economic_action_id = ? AND status = ?",
+                (
+                    ReservationStatus.RELEASED.value,
+                    seq,
+                    action_id,
+                    ReservationStatus.QUARANTINED.value,
+                ),
+            )
+            _require(
+                cursor.rowcount == 1,
+                f"event {seq}: reverted recovery failed to release reservation",
+            )
 
     conn.execute(
         "UPDATE intents SET state = ? WHERE economic_action_id = ?",
