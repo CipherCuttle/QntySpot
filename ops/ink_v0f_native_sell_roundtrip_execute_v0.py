@@ -87,9 +87,9 @@ from qntyspot.ledger.execution import ExecutionRuntime
 from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
 
-BOUND_REPOSITORY_COMMIT = "91ec941d7e89fc44da0e4501b52f47fc65962020"
+BOUND_REPOSITORY_COMMIT = "c0049f20accffe50c1995a1ad68e587daa130c0d"
 BOUND_IMPLEMENTATION_DIGEST = (
-    "dbcbab558ad591d195fcee06951389d1eb566fed40d9b211b8e5578f61b14f81"
+    "89c4227b1476905c54702d9dd90dc7d0cafdd3852f84820fe50aa59a7a32e244"
 )
 EXPECTED_TRUST_CONFIG_DIGEST = (
     "7da16f3c8df42db7c16eeae80136456518cf563e272f517219659b81c648b8a6"
