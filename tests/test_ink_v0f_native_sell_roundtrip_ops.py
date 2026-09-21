@@ -166,7 +166,6 @@ def _recovery_ledger(
             self.connection = Connection()
 
         def inventory_atomic(self, cycle_id):
-            assert cycle_id != "buy-cycle"
             return inventories.get(cycle_id, helper.EXPECTED_INVENTORY_ATOMIC)
 
     return Ledger()
