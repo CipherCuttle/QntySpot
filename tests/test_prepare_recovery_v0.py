@@ -46,6 +46,61 @@ def test_plan_is_durable_before_carry_and_byte_identical_on_resume(armed) -> Non
     assert ledger.connection.execute("SELECT COUNT(*) FROM cycles").fetchone()[0] == 1
 
 
+
+def test_prepare_plan_survives_after_commit_process_failure(armed) -> None:
+    ledger, _policy, source_cycle_id, _intent = armed
+
+    def crash(boundary: str, when: str) -> None:
+        if boundary == "prepare_plan" and when == "after_commit":
+            raise RuntimeError("INJECTED_AFTER_PLAN_COMMIT")
+
+    runtime = ExecutionRuntime(ledger, failure_injector=crash)
+    with pytest.raises(RuntimeError, match="INJECTED_AFTER_PLAN_COMMIT"):
+        _record(runtime, source_cycle_id)
+
+    resumed = ExecutionRuntime(ledger).load_prepare_plan(
+        operation_kind="INK_V0F_NATIVE_SELL",
+        source_cycle_id=source_cycle_id,
+    )
+    assert resumed is not None
+    assert resumed.phase == "PLANNED"
+
+
+def test_every_prepare_phase_survives_after_commit_process_failure(armed) -> None:
+    ledger, _policy, source_cycle_id, _intent = armed
+    record = _record(ExecutionRuntime(ledger), source_cycle_id)
+    phases = (
+        "POLICY_ADMITTED",
+        "INVENTORY_CARRIED",
+        "INTENT_SIMULATED",
+        "SESSION_RECORDED",
+        "PREAUTH_RECORDED",
+        "PREPARED",
+    )
+
+    for expected_phase in phases:
+        def crash(boundary: str, when: str) -> None:
+            if boundary == "prepare_phase" and when == "after_commit":
+                raise RuntimeError(f"INJECTED_AFTER_{expected_phase}")
+
+        with pytest.raises(RuntimeError, match=f"INJECTED_AFTER_{expected_phase}"):
+            ExecutionRuntime(
+                ledger,
+                failure_injector=crash,
+            ).advance_prepare_phase(
+                record.prepare_id,
+                expected_phase,
+                now_epoch_s=1_700_000_001,
+            )
+
+        record = ExecutionRuntime(ledger).load_prepare_plan(
+            operation_kind="INK_V0F_NATIVE_SELL",
+            source_cycle_id=source_cycle_id,
+        )
+        assert record is not None
+        assert record.phase == expected_phase
+
+
 def test_plan_mismatch_stops_before_another_carry(armed) -> None:
     ledger, _policy, source_cycle_id, _intent = armed
     runtime = ExecutionRuntime(ledger)
