@@ -866,7 +866,13 @@ class ExecutionRuntime:
         provider_id: str,
         submitted_at_epoch_s: int,
     ) -> SubmissionAttemptV0:
-        """Submit one durably admitted exact approval byte string at most once."""
+        """Guard, then transport one durably admitted exact approval byte string.
+
+        The append-only UNKNOWN attempt is committed *before* the transport
+        seam.  Once that guard exists, this runtime will never transport the
+        approval again.  The RPC return value is advisory only; canonical
+        two-provider chain observation decides whether the approval landed.
+        """
 
         self._authorize(
             session,
@@ -913,6 +919,7 @@ class ExecutionRuntime:
             )
         if not isinstance(provider_id, str) or not provider_id or provider_id.strip() != provider_id:
             raise EnvelopeValidationError("provider_id must be a non-empty label")
+
         row = self._conn.execute(
             "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
             (signed.signed_transaction_id,),
@@ -939,11 +946,6 @@ class ExecutionRuntime:
                     f"durable approval signed metadata {field} differs"
                 )
 
-        # Claim the one transport opportunity durably before bytes can reach
-        # RPC. This UNKNOWN guard is append-only: if the process dies during
-        # transport, or a second runtime races us, restart observes the guard
-        # and refuses retransmission instead of guessing whether the first
-        # external effect occurred.
         with self._transaction("submission_attempt") as conn:
             self._reject_if_killed("approval exact signed-byte submission")
             approval = conn.execute(
@@ -977,72 +979,28 @@ class ExecutionRuntime:
                 raise SafeHaltError(
                     "approval retransmission is forbidden after any prior transport attempt"
                 )
-            guard = SubmissionAttemptV0(
-                signed_transaction_id=signed.signed_transaction_id,
-                provider_id=provider_id,
-                attempt_ordinal=0,
-                submitted_at_epoch_s=submitted_at_epoch_s,
-                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
-                error_class="PreTransportGuard",
-            )
-            guard_values = {
-                "submission_attempt_id": guard.submission_attempt_id,
-                "signed_transaction_id": guard.signed_transaction_id,
-                "provider_id": guard.provider_id,
-                "attempt_ordinal": guard.attempt_ordinal,
-                "submitted_at_epoch_s": guard.submitted_at_epoch_s,
-                "acknowledgment": guard.acknowledgment.value,
-                "provider_reported_hash": guard.provider_reported_hash,
-                "error_class": guard.error_class,
-            }
-            self._insert_or_match(
-                conn,
-                "submission_attempts",
-                "submission_attempt_id",
-                guard.submission_attempt_id,
-                guard_values,
-            )
 
-        try:
-            provider_hash = transport.submit_exact_signed_bytes(signed_bytes)
-        except Exception as exc:
-            attempt = SubmissionAttemptV0(
-                signed_transaction_id=signed.signed_transaction_id,
-                provider_id=provider_id,
-                attempt_ordinal=self._next_submission_ordinal(
-                    signed.signed_transaction_id, provider_id
-                ),
-                submitted_at_epoch_s=submitted_at_epoch_s,
-                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
-                error_class=exc.__class__.__name__,
-            )
-            self._record_submission_attempt(attempt)
-            return attempt
-        if provider_hash != signed.transaction_hash:
-            attempt = SubmissionAttemptV0(
-                signed_transaction_id=signed.signed_transaction_id,
-                provider_id=provider_id,
-                attempt_ordinal=self._next_submission_ordinal(
-                    signed.signed_transaction_id, provider_id
-                ),
-                submitted_at_epoch_s=submitted_at_epoch_s,
-                acknowledgment=SubmissionAcknowledgment.UNKNOWN,
-                error_class="ProviderHashMismatch",
-            )
-            self._record_submission_attempt(attempt)
-            return attempt
-        attempt = SubmissionAttemptV0(
+        guard = SubmissionAttemptV0(
             signed_transaction_id=signed.signed_transaction_id,
             provider_id=provider_id,
-            attempt_ordinal=self._next_submission_ordinal(
-                signed.signed_transaction_id, provider_id
-            ),
+            attempt_ordinal=0,
             submitted_at_epoch_s=submitted_at_epoch_s,
-            acknowledgment=SubmissionAcknowledgment.ACCEPTED,
-            provider_reported_hash=provider_hash,
+            acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+            error_class="PreTransportGuard",
         )
-        self._record_submission_attempt(attempt)
-        return attempt
+        if not self._record_submission_attempt(guard):
+            raise SafeHaltError(
+                "approval transport guard already exists; refusing retransmission"
+            )
+
+        # From this point onward the external outcome is conservatively UNKNOWN.
+        # A process crash, RPC exception, or conflicting concurrent caller can
+        # never make this exact approval eligible for transport again.
+        try:
+            transport.submit_exact_signed_bytes(signed_bytes)
+        except Exception:
+            return guard
+        return guard
 
     def admit_exact_signed_bytes(
         self,
