@@ -7,6 +7,7 @@ from qntyspot.canon import sha256_hex
 from qntyspot.economics import build_intent
 from qntyspot.execution_contract import (
     ChainObservationV0,
+    ExecutionEnvelopeV0,
     ChainPresence,
     FinalityPolicyV0,
     ReceiptStatus,
@@ -106,30 +107,64 @@ def _surface(tmp_path, monkeypatch):
         max_fee_per_gas_ceiling=2,
         max_priority_fee_per_gas_ceiling=1,
     )
-    insert(
-        ledger.connection,
-        "execution_envelopes",
-        **envelope_row(
-            intent,
-            session_id=session.session_id,
-            session_identity_digest=session.identity_digest,
-            economic_action_id=intent.economic_action_id,
-            chain_id=session.chain_id,
-            taker_address=session.taker_address,
-            transaction_to=scope.target_address,
-            transaction_value_atomic="0",
-            calldata_sha256=scope.calldata_sha256,
-            calldata_length=scope.calldata_length,
-            account_nonce=scope.account_nonce,
-            gas_limit_ceiling=scope.gas_limit_ceiling,
-            max_fee_per_gas_ceiling_atomic=str(scope.max_fee_per_gas_ceiling),
-            max_priority_fee_per_gas_ceiling_atomic=str(
-                scope.max_priority_fee_per_gas_ceiling
-            ),
-            authority_policy_digest=session.authority_policy_digest,
-            lifecycle="AUTHORIZED",
+    stored_envelope = envelope_row(
+        intent,
+        session_id=session.session_id,
+        session_identity_digest=session.identity_digest,
+        economic_action_id=intent.economic_action_id,
+        chain_id=session.chain_id,
+        taker_address=session.taker_address,
+        transaction_to=scope.target_address,
+        transaction_value_atomic="0",
+        calldata_sha256=scope.calldata_sha256,
+        calldata_length=scope.calldata_length,
+        account_nonce=scope.account_nonce,
+        gas_limit_ceiling=scope.gas_limit_ceiling,
+        max_fee_per_gas_ceiling_atomic=str(scope.max_fee_per_gas_ceiling),
+        max_priority_fee_per_gas_ceiling_atomic=str(
+            scope.max_priority_fee_per_gas_ceiling
         ),
+        authority_policy_digest=session.authority_policy_digest,
+        lifecycle="AUTHORIZED",
     )
+    canonical_envelope = ExecutionEnvelopeV0(
+        session_id=str(stored_envelope["session_id"]),
+        session_identity_digest=str(stored_envelope["session_identity_digest"]),
+        economic_action_id=str(stored_envelope["economic_action_id"]),
+        chain_id=int(stored_envelope["chain_id"]),
+        taker_address=str(stored_envelope["taker_address"]),
+        input_instrument_id=str(stored_envelope["input_instrument_id"]),
+        output_instrument_id=str(stored_envelope["output_instrument_id"]),
+        max_input_atomic=int(stored_envelope["max_input_atomic"]),
+        min_output_atomic=int(stored_envelope["min_output_atomic"]),
+        transaction_to=str(stored_envelope["transaction_to"]),
+        transaction_value_atomic=int(stored_envelope["transaction_value_atomic"]),
+        calldata_sha256=str(stored_envelope["calldata_sha256"]),
+        calldata_length=int(stored_envelope["calldata_length"]),
+        allowance_target=(
+            None
+            if stored_envelope["allowance_target"] is None
+            else str(stored_envelope["allowance_target"])
+        ),
+        account_nonce=int(stored_envelope["account_nonce"]),
+        gas_limit_ceiling=int(stored_envelope["gas_limit_ceiling"]),
+        max_fee_per_gas_ceiling_atomic=int(
+            stored_envelope["max_fee_per_gas_ceiling_atomic"]
+        ),
+        max_priority_fee_per_gas_ceiling_atomic=int(
+            stored_envelope["max_priority_fee_per_gas_ceiling_atomic"]
+        ),
+        deadline_epoch_s=int(stored_envelope["deadline_epoch_s"]),
+        authority_policy_digest=str(stored_envelope["authority_policy_digest"]),
+        plan_id=str(stored_envelope["plan_id"]),
+        quote_id=str(stored_envelope["quote_id"]),
+        quote_observation_digest=str(stored_envelope["quote_observation_digest"]),
+        venue_block_number=int(stored_envelope["venue_block_number"]),
+        constructed_at_epoch_s=int(stored_envelope["constructed_at_epoch_s"]),
+    )
+    stored_envelope["envelope_id"] = canonical_envelope.envelope_id
+    stored_envelope["evidence_digest"] = canonical_envelope.evidence_digest
+    insert(ledger.connection, "execution_envelopes", **stored_envelope)
     parsed = ParsedExactSignedBytesV0(
         transaction_type="eip-1559",
         chain_id=session.chain_id,
