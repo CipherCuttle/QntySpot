@@ -93,11 +93,27 @@ def test_driver_atomically_reuses_exact_committed_grant_and_refuses_drift(
         )
 
 
+def test_driver_executes_reviewed_operator_against_explicit_frozen_runtime(
+    tmp_path: Path,
+) -> None:
+    driver = _driver_helper()
+    expected_prepare = DRIVER_HELPER.with_name(
+        "ink_v0f_native_sell_roundtrip_prepare_v0.py"
+    ).resolve()
+    assert driver._operator_prepare_path() == expected_prepare
+
+    frozen_runtime = (tmp_path / "frozen-runtime").resolve()
+    env = driver._runtime_env(frozen_runtime)
+    assert env["PYTHONPATH"] == str(frozen_runtime)
+
+
 def test_driver_has_no_grant_issuance_or_transaction_execution_surface() -> None:
     source = DRIVER_HELPER.read_text(encoding="utf-8")
     assert "issue_" not in source
     assert "private_key" not in source.lower()
     assert "ink_v0f_native_sell_roundtrip_execute_v0.py" not in source
+    assert 'qntyspot_root / "ops/ink_v0f_native_sell_roundtrip_prepare_v0.py"' not in source
+    assert "operator_prepare_sha256" in source
     assert "--receipt" in source
     assert "--run-dir" in source
 
