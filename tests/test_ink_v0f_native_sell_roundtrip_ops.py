@@ -192,6 +192,104 @@ def _recovery_ledger(
     return Ledger()
 
 
+
+def _prepare_discovery_ledger(helper, *, prepare_sources, carries):
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class Connection:
+        def execute(self, sql, _params=()):
+            normalized = " ".join(sql.split())
+            if "FROM prepare_records" in normalized:
+                return Result(
+                    [{"source_cycle_id": source} for source in prepare_sources]
+                )
+            if "FROM state_events" in normalized:
+                return Result(
+                    [
+                        {
+                            "cycle_id": child,
+                            "payload_json": helper.canonical_json_str(
+                                {
+                                    "inventory_carry": {
+                                        "amount_atomic": str(amount),
+                                        "source_cycle_id": source,
+                                    }
+                                }
+                            ),
+                        }
+                        for source, child, amount in carries
+                    ]
+                )
+            raise AssertionError(normalized)
+
+    return SimpleNamespace(connection=Connection())
+
+
+def test_durable_prepare_resume_finds_active_carried_successor_without_expiry_gate() -> None:
+    helper = _helper()
+    marker = object()
+
+    class Runtime:
+        def load_prepare_plan(self, *, operation_kind, source_cycle_id):
+            assert operation_kind == "INK_V0F_NATIVE_SELL"
+            assert source_cycle_id == "serial8-cycle"
+            return marker
+
+    ledger = _prepare_discovery_ledger(
+        helper,
+        prepare_sources=["serial8-cycle"],
+        carries=[
+            (
+                "buy-cycle",
+                "serial8-cycle",
+                helper.EXPECTED_INVENTORY_ATOMIC,
+            )
+        ],
+    )
+    assert helper._load_existing_prepare(
+        Runtime(),
+        ledger,
+        first_buy_cycle_id="buy-cycle",
+    ) is marker
+
+
+def test_durable_prepare_resume_rejects_disconnected_or_ambiguous_source() -> None:
+    helper = _helper()
+
+    class Runtime:
+        def load_prepare_plan(self, **_kwargs):
+            raise AssertionError("must stop before loading")
+
+    disconnected = _prepare_discovery_ledger(
+        helper,
+        prepare_sources=["other-cycle"],
+        carries=[],
+    )
+    with pytest.raises(RuntimeError, match="unique first-live inventory-carry chain"):
+        helper._load_existing_prepare(
+            Runtime(),
+            disconnected,
+            first_buy_cycle_id="buy-cycle",
+        )
+
+    ambiguous = _prepare_discovery_ledger(
+        helper,
+        prepare_sources=["serial8-cycle", "other-cycle"],
+        carries=[],
+    )
+    with pytest.raises(RuntimeError, match="multiple durable"):
+        helper._load_existing_prepare(
+            Runtime(),
+            ambiguous,
+            first_buy_cycle_id="buy-cycle",
+        )
+
+
 def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sell() -> None:
     helper = _helper()
     action_id = "aa" * 32
