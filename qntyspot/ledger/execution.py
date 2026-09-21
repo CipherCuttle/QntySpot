@@ -535,14 +535,16 @@ class ExecutionRuntime:
             ).fetchone()
             if policy_row is None:
                 raise LedgerError("the reservation policy is not admitted in this ledger")
-            assert_effective_capital_within(
-                requested_atomic=int(action_row["quote_exposure_atomic"]),
-                held_atomic=self.ledger.held_atomic(),
-                local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
-                local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
-                verified_grant=verified_grant,
-                now_epoch_s=now_epoch_s,
-            )
+            requested_atomic = int(action_row["quote_exposure_atomic"])
+            if requested_atomic > 0:
+                assert_effective_capital_within(
+                    requested_atomic=requested_atomic,
+                    held_atomic=self.ledger.held_atomic(),
+                    local_per_action_atomic=int(policy_row["per_order_cap_atomic"]),
+                    local_cumulative_atomic=int(policy_row["global_cap_atomic"]),
+                    verified_grant=verified_grant,
+                    now_epoch_s=now_epoch_s,
+                )
             self._economic_external_action(
                 conn, economic_action_id, session_id=session.session_id
             )
