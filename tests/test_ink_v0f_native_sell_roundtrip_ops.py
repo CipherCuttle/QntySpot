@@ -104,9 +104,9 @@ def test_driver_has_no_grant_issuance_or_transaction_execution_surface() -> None
 
 def test_sell_prepare_is_bound_to_v9_runtime_and_exact_first_buy() -> None:
     helper = _helper()
-    assert helper.BOUND_REPOSITORY_COMMIT == "91ec941d7e89fc44da0e4501b52f47fc65962020"
+    assert helper.BOUND_REPOSITORY_COMMIT == "c0049f20accffe50c1995a1ad68e587daa130c0d"
     assert helper.BOUND_IMPLEMENTATION_DIGEST == (
-        "dbcbab558ad591d195fcee06951389d1eb566fed40d9b211b8e5578f61b14f81"
+        "89c4227b1476905c54702d9dd90dc7d0cafdd3852f84820fe50aa59a7a32e244"
     )
     assert helper.EXPECTED_BUY_TX_HASH == (
         "0xa02d78dece891ba72dc1c8b4d363be7482e988d5487cb46567b52453db7e2ae7"
