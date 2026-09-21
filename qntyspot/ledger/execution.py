@@ -963,6 +963,10 @@ class ExecutionRuntime:
                 raise LedgerError(
                     "approval signed-byte submission requires the frozen AUTHORIZED approval"
                 )
+            if submitted_at_epoch_s >= approval["deadline_epoch_s"]:
+                raise SafeHaltError(
+                    "approval authorization deadline expired before transport"
+                )
             economic = self._require_economic_intent(
                 signed.request.economic_action_id, conn
             )
