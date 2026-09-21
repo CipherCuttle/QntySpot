@@ -2544,6 +2544,9 @@ class ExecutionRuntime:
         max_priority_fee_per_gas_ceiling: int,
         constructed_at_epoch_s: int,
         now_epoch_s: int,
+        frozen_approval: ApprovalActionV0 | None = None,
+        frozen_envelope: ExecutionEnvelopeV0 | None = None,
+        frozen_prepare_id: str | None = None,
     ) -> tuple[ApprovalActionV0, ExecutionEnvelopeV0]:
         """Atomically persist exact KRAKMASK approval + native-ETH SELL envelope."""
 
