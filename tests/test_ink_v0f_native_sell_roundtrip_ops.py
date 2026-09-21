@@ -1,0 +1,313 @@
+from __future__ import annotations
+
+import importlib.util
+import os
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+HELPER = ROOT / "ops" / "ink_v0f_native_sell_roundtrip_prepare_v0.py"
+
+
+EXECUTE_HELPER = ROOT / "ops" / "ink_v0f_native_sell_roundtrip_execute_v0.py"
+
+
+def _helper():
+    spec = importlib.util.spec_from_file_location("ink_v0f_native_sell_roundtrip_prepare_ops", HELPER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _execute_helper():
+    spec = importlib.util.spec_from_file_location(
+        "ink_v0f_native_sell_roundtrip_execute_ops", EXECUTE_HELPER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_sell_prepare_is_bound_to_v8_and_exact_first_buy() -> None:
+    helper = _helper()
+    assert helper.BOUND_REPOSITORY_COMMIT == "91ec941d7e89fc44da0e4501b52f47fc65962020"
+    assert helper.BOUND_IMPLEMENTATION_DIGEST == (
+        "dbcbab558ad591d195fcee06951389d1eb566fed40d9b211b8e5578f61b14f81"
+    )
+    assert helper.EXPECTED_BUY_TX_HASH == (
+        "0xa02d78dece891ba72dc1c8b4d363be7482e988d5487cb46567b52453db7e2ae7"
+    )
+    assert helper.EXPECTED_INVENTORY_ATOMIC == 4396392944674627615414
+    assert helper.EXPECTED_APPROVAL_NONCE == 1
+
+
+def test_successor_policy_refresh_changes_only_episode_identity_price_and_timing() -> None:
+    helper = _helper()
+    source = {
+        "schema": "qntyspot.policy.v0",
+        "policy_name": "old",
+        "side": "BUY",
+        "base": {"keep": "base"},
+        "quote": {"keep": "quote"},
+        "entry_ladder": {"levels": [{"level_id": "E1", "trigger_price": "1", "input_amount": "0.001"}]},
+        "exit_ladder": {"levels": [{"level_id": "X1", "trigger_price": "1", "input_ratio": "1"}]},
+        "capital": {"keep": "capital"},
+        "limits": {
+            "max_executable_price": "2",
+            "min_executable_price": "0.5",
+            "max_price_impact_bps": 100,
+            "max_slippage_bps": 50,
+        },
+        "timing": {
+            "valid_from_epoch_s": 1,
+            "expiry_epoch_s": 2,
+            "quote_ttl_s": 1,
+        },
+        "reentry": {
+            "max_cycles": 4,
+            "rearm_hysteresis_bps": 200,
+            "rearm_cooldown_s": 600,
+        },
+        "recycling": {"profit_recycle_ratio": "0", "banked_profit_ratio": "1"},
+    }
+    result = helper._successor_policy_doc(
+        source,
+        spot=Decimal("0.00000025"),
+        now=1_800_000_000,
+        expiry=1_800_000_600,
+    )
+    assert source["policy_name"] == "old"
+    assert result["policy_name"] == "ink-v0f-native-sell-successor-1800000000"
+    assert result["side"] == "BUY"
+    assert result["base"] == source["base"]
+    assert result["quote"] == source["quote"]
+    assert result["capital"] == source["capital"]
+    assert result["entry_ladder"]["levels"][0]["trigger_price"] == "0.00000025"
+    assert result["exit_ladder"]["levels"][0]["trigger_price"] == "0.00000025"
+    assert result["limits"]["min_executable_price"] == "0.000000125"
+    assert result["limits"]["max_executable_price"] == "0.0000005"
+    assert result["limits"]["max_price_impact_bps"] == 100
+    assert result["limits"]["max_slippage_bps"] == 50
+    assert result["timing"] == {
+        "valid_from_epoch_s": 1_799_999_995,
+        "expiry_epoch_s": 1_800_000_600,
+        "quote_ttl_s": 600,
+    }
+    assert result["reentry"]["max_cycles"] == 1
+
+
+def test_prepared_state_is_private_durable_and_exclusive(tmp_path: Path) -> None:
+    helper = _helper()
+    path = tmp_path / "episode.sqlite3.sell-prepared.json"
+    helper._write_durable_state(path, {"schema": helper.PREPARED_SCHEMA, "x": 1})
+    assert path.read_text(encoding="utf-8") == (
+        '{"schema":"qntyspot.ops.ink_v0f_native_sell_roundtrip.prepared.v0","x":1}\n'
+    )
+    assert os.stat(path).st_mode & 0o077 == 0
+    with pytest.raises(FileExistsError):
+        helper._write_durable_state(path, {"schema": helper.PREPARED_SCHEMA, "x": 1})
+
+
+def test_rpc_uint_decoder_requires_one_word() -> None:
+    helper = _helper()
+    assert helper._data_uint("0x" + ("00" * 31) + "2a", field="x") == 42
+    with pytest.raises(RuntimeError, match="uint256"):
+        helper._data_uint("0x2a", field="x")
+
+
+
+def test_execute_helper_imports_and_reconstructs_frozen_sell_fields() -> None:
+    helper = _execute_helper()
+    envelope = SimpleNamespace(
+        max_input_atomic=123,
+        min_output_atomic=77,
+        deadline_epoch_s=1_900_000_000,
+        calldata_sha256="",
+        calldata_length=0,
+        chain_id=57_073,
+        gas_limit_ceiling=300_000,
+        max_fee_per_gas_ceiling_atomic=2_000_000_000,
+        max_priority_fee_per_gas_ceiling_atomic=100_000_000,
+        account_nonce=2,
+        transaction_to=helper.INK_V0F_ROUTER_ADDRESS,
+    )
+    calldata = helper.encode_swap_exact_tokens_for_eth(
+        amount_in_atomic=envelope.max_input_atomic,
+        amount_out_min_atomic=envelope.min_output_atomic,
+        path=(helper.KRAKMASK_ADDRESS, helper.WETH9_ADDRESS),
+        recipient=helper.INK_V0F_TAKER_ADDRESS,
+        deadline_epoch_s=envelope.deadline_epoch_s,
+    )
+    envelope.calldata_sha256 = helper.sha256_hex(calldata)
+    envelope.calldata_length = len(calldata)
+    fields = helper._sell_signing_fields(envelope)
+    assert fields["nonce"] == 2
+    assert fields["to"] == helper.INK_V0F_ROUTER_ADDRESS
+    assert fields["value"] == 0
+    assert fields["data"].startswith("0x18cbafe5")
+
+
+def test_sell_receipt_parser_requires_exact_native_sell_direction() -> None:
+    helper = _execute_helper()
+    amount_in = 123
+    amount_out = 77
+    envelope = SimpleNamespace(max_input_atomic=amount_in, min_output_atomic=70)
+
+    swap_data = "0x" + "".join(
+        f"{word:064x}" for word in (amount_in, 0, 0, amount_out)
+    )
+    transfer_in = "0x" + f"{amount_in:064x}"
+    transfer_out = "0x" + f"{amount_out:064x}"
+    receipt = {
+        "status": "0x1",
+        "gasUsed": "0x5208",
+        "effectiveGasPrice": "0x3b9aca00",
+        "l1Fee": "0x0",
+        "logs": [
+            {
+                "address": helper.INKYSWAP_V2_POOL,
+                "topics": [
+                    helper._SWAP_TOPIC,
+                    helper._topic_address(helper.INK_V0F_ROUTER_ADDRESS),
+                    helper._topic_address(helper.INK_V0F_ROUTER_ADDRESS),
+                ],
+                "data": swap_data,
+            },
+            {
+                "address": helper.KRAKMASK_ADDRESS,
+                "topics": [
+                    helper._TRANSFER_TOPIC,
+                    helper._topic_address(helper.INK_V0F_TAKER_ADDRESS),
+                    helper._topic_address(helper.INKYSWAP_V2_POOL),
+                ],
+                "data": transfer_in,
+            },
+            {
+                "address": helper.WETH9_ADDRESS,
+                "topics": [
+                    helper._TRANSFER_TOPIC,
+                    helper._topic_address(helper.INKYSWAP_V2_POOL),
+                    helper._topic_address(helper.INK_V0F_ROUTER_ADDRESS),
+                ],
+                "data": transfer_out,
+            },
+        ],
+    }
+    status, actual_in, actual_out, fee = helper._receipt_settlement(receipt, envelope)
+    assert status is helper.ReceiptStatus.SUCCESS
+    assert actual_in == amount_in
+    assert actual_out == amount_out
+    assert fee == 21_000 * 1_000_000_000
+
+    wrong = dict(receipt)
+    wrong["logs"] = [dict(item) for item in receipt["logs"]]
+    wrong["logs"][0] = dict(wrong["logs"][0])
+    wrong["logs"][0]["data"] = "0x" + "".join(
+        f"{word:064x}" for word in (0, amount_in, amount_out, 0)
+    )
+    with pytest.raises(helper.ChainTruthError, match="direction"):
+        helper._receipt_settlement(wrong, envelope)
+
+
+def test_revoke_sidecars_are_private_and_non_replaceable(tmp_path: Path) -> None:
+    helper = _execute_helper()
+    path = tmp_path / "episode.revoke-prepared.json"
+    helper._write_private_once(
+        path,
+        {
+            "schema": helper.REVOKE_PREPARED_SCHEMA,
+            "request_id": "11" * 32,
+        },
+    )
+    assert os.stat(path).st_mode & 0o077 == 0
+    with pytest.raises(FileExistsError):
+        helper._write_private_once(
+            path,
+            {
+                "schema": helper.REVOKE_PREPARED_SCHEMA,
+                "request_id": "11" * 32,
+            },
+        )
+
+
+
+def test_revoke_nonce_is_same_before_sell_and_next_after_terminal_revert(
+    tmp_path: Path,
+) -> None:
+    helper = _execute_helper()
+    ledger_path = tmp_path / "episode.sqlite3"
+    envelope = SimpleNamespace(account_nonce=2)
+    action_id = "aa" * 32
+
+    class Result:
+        def __init__(self, row):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class Connection:
+        def __init__(self):
+            self.signed = None
+            self.reconciliation = None
+
+        def execute(self, sql, _params):
+            if "FROM signed_transactions" in sql:
+                return Result(self.signed)
+            if "FROM reconciliations" in sql:
+                return Result(self.reconciliation)
+            raise AssertionError(sql)
+
+    class Ledger:
+        def __init__(self):
+            self.connection = Connection()
+            self.state = helper.IntentState.RESERVED
+
+        def intent_state(self, _action_id):
+            return self.state
+
+    ledger = Ledger()
+    assert helper._expected_revoke_nonce(
+        ledger,
+        ledger_path=ledger_path,
+        economic_action_id=action_id,
+        envelope=envelope,
+    ) == 2
+
+    guard_path = helper._sell_guard_path(ledger_path)
+    helper._write_guard(
+        guard_path,
+        {
+            "schema": helper.SELL_GUARD_SCHEMA,
+            "transaction_hash": "0x" + "11" * 32,
+        },
+    )
+    ledger.connection.signed = {
+        "transaction_hash": "0x" + "11" * 32,
+        "account_nonce": 2,
+    }
+    ledger.connection.reconciliation = {
+        "verdict": "REVERTED",
+        "transaction_hash": "0x" + "11" * 32,
+    }
+    ledger.state = helper.IntentState.REJECTED
+    assert helper._expected_revoke_nonce(
+        ledger,
+        ledger_path=ledger_path,
+        economic_action_id=action_id,
+        envelope=envelope,
+    ) == 3
+
+    ledger.state = helper.IntentState.SAFE_HALT
+    with pytest.raises(helper.SafeHaltError, match="not terminal enough"):
+        helper._expected_revoke_nonce(
+            ledger,
+            ledger_path=ledger_path,
+            economic_action_id=action_id,
+            envelope=envelope,
+        )
