@@ -408,7 +408,8 @@ WHEN NEW.trust_config_digest <> OLD.trust_config_digest
    OR NEW.minimum_authority_epoch <> OLD.minimum_authority_epoch
    OR NEW.highest_accepted_epoch < OLD.highest_accepted_epoch
    OR (NEW.highest_accepted_epoch = OLD.highest_accepted_epoch
-       AND NEW.highest_accepted_receipt_id <> OLD.highest_accepted_receipt_id)
+       AND NEW.highest_accepted_receipt_id <> OLD.highest_accepted_receipt_id
+       AND NEW.highest_accepted_at_epoch_s <= OLD.highest_accepted_at_epoch_s)
    OR NEW.highest_accepted_at_epoch_s < OLD.highest_accepted_at_epoch_s
 BEGIN
     SELECT RAISE(ABORT, 'authority root state rollback or identity change');
