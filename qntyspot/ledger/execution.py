@@ -946,6 +946,15 @@ class ExecutionRuntime:
                     f"durable approval signed metadata {field} differs"
                 )
 
+        guard = SubmissionAttemptV0(
+            signed_transaction_id=signed.signed_transaction_id,
+            provider_id=provider_id,
+            attempt_ordinal=0,
+            submitted_at_epoch_s=submitted_at_epoch_s,
+            acknowledgment=SubmissionAcknowledgment.UNKNOWN,
+            error_class="PreTransportGuard",
+        )
+
         with self._transaction("submission_attempt") as conn:
             self._reject_if_killed("approval exact signed-byte submission")
             approval = conn.execute(
@@ -983,19 +992,26 @@ class ExecutionRuntime:
                 raise SafeHaltError(
                     "approval retransmission is forbidden after any prior transport attempt"
                 )
-
-        guard = SubmissionAttemptV0(
-            signed_transaction_id=signed.signed_transaction_id,
-            provider_id=provider_id,
-            attempt_ordinal=0,
-            submitted_at_epoch_s=submitted_at_epoch_s,
-            acknowledgment=SubmissionAcknowledgment.UNKNOWN,
-            error_class="PreTransportGuard",
-        )
-        if not self._record_submission_attempt(guard):
-            raise SafeHaltError(
-                "approval transport guard already exists; refusing retransmission"
-            )
+            guard_values = {
+                "submission_attempt_id": guard.submission_attempt_id,
+                "signed_transaction_id": guard.signed_transaction_id,
+                "provider_id": guard.provider_id,
+                "attempt_ordinal": guard.attempt_ordinal,
+                "submitted_at_epoch_s": guard.submitted_at_epoch_s,
+                "acknowledgment": guard.acknowledgment.value,
+                "provider_reported_hash": guard.provider_reported_hash,
+                "error_class": guard.error_class,
+            }
+            if not self._insert_or_match(
+                conn,
+                "submission_attempts",
+                "submission_attempt_id",
+                guard.submission_attempt_id,
+                guard_values,
+            ):
+                raise SafeHaltError(
+                    "approval transport guard already exists; refusing retransmission"
+                )
 
         # From this point onward the external outcome is conservatively UNKNOWN.
         # A process crash, RPC exception, or conflicting concurrent caller can
