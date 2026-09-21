@@ -426,8 +426,6 @@ class SpotLedger:
                     "SELECT state FROM intents WHERE cycle_id = ?", (source_cycle_id,)
                 ).fetchall()
             ]
-            if not states:
-                raise LedgerError("source cycle has no economic history to continue")
             if any(
                 state not in TERMINAL_STATES or state is IntentState.SAFE_HALT
                 for state in states
