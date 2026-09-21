@@ -658,9 +658,10 @@ class SpotLedger:
         SAFE_HALT remains terminal in the ordinary transition table. This
         special accounting primitive is allowed only after the execution
         surface has already persisted a matching terminal reconciliation.
-        Settled truth moves directly to RECONCILED and reactivates the
-        quarantined reservation so FILLED can commit it. Reverted truth moves
-        directly to REJECTED and releases the quarantined reservation.
+        Settled truth moves directly to RECONCILED and, for capital-consuming
+        actions, reactivates the quarantined reservation so FILLED can commit it.
+        Reverted truth moves directly to REJECTED and releases only an existing
+        capital reservation. Zero-exposure SELLs correctly carry no reservation.
         """
         if to_state not in {IntentState.RECONCILED, IntentState.REJECTED}:
             raise LedgerError(
@@ -668,7 +669,7 @@ class SpotLedger:
             )
         with self._write() as conn:
             row = conn.execute(
-                "SELECT state, policy_id, cycle_id FROM intents "
+                "SELECT state, policy_id, cycle_id, quote_exposure_atomic FROM intents "
                 "WHERE economic_action_id = ?",
                 (economic_action_id,),
             ).fetchone()
@@ -680,12 +681,21 @@ class SpotLedger:
                 "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
                 (economic_action_id,),
             ).fetchone()
-            if (
+            quote_exposure_atomic = decode_atomic(
+                row["quote_exposure_atomic"], field="quote_exposure"
+            )
+            if quote_exposure_atomic == 0:
+                if reservation is not None:
+                    raise LedgerError(
+                        "zero-exposure chain-truth recovery must not have a reservation"
+                    )
+            elif (
                 reservation is None
                 or reservation["status"] != ReservationStatus.QUARANTINED.value
             ):
                 raise LedgerError(
-                    "chain-truth recovery requires a QUARANTINED reservation"
+                    "capital-consuming chain-truth recovery requires a "
+                    "QUARANTINED reservation"
                 )
             reconciliation = conn.execute(
                 "SELECT reconciliation_id, verdict, receipt_id "
@@ -713,15 +723,20 @@ class SpotLedger:
                     raise LedgerError(
                         "settled SAFE_HALT recovery refuses an out-of-bounds fill"
                     )
-                conn.execute(
-                    "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
-                    "WHERE economic_action_id = ? AND status = ?",
-                    (
-                        ReservationStatus.ACTIVE.value,
-                        economic_action_id,
-                        ReservationStatus.QUARANTINED.value,
-                    ),
-                )
+                if quote_exposure_atomic > 0:
+                    cursor = conn.execute(
+                        "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+                        "WHERE economic_action_id = ? AND status = ?",
+                        (
+                            ReservationStatus.ACTIVE.value,
+                            economic_action_id,
+                            ReservationStatus.QUARANTINED.value,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise LedgerError(
+                            "settled recovery failed to reactivate the reservation"
+                        )
             else:
                 if not self._has_bound_reverted_reconciliation(
                     conn, economic_action_id
@@ -747,8 +762,8 @@ class SpotLedger:
                 now_epoch_s=now_epoch_s,
                 payload=payload,
             )
-            if to_state is IntentState.REJECTED:
-                conn.execute(
+            if to_state is IntentState.REJECTED and quote_exposure_atomic > 0:
+                cursor = conn.execute(
                     "UPDATE budget_reservations SET status = ?, settled_seq = ? "
                     "WHERE economic_action_id = ? AND status = ?",
                     (
@@ -758,6 +773,10 @@ class SpotLedger:
                         ReservationStatus.QUARANTINED.value,
                     ),
                 )
+                if cursor.rowcount != 1:
+                    raise LedgerError(
+                        "reverted recovery failed to release the reservation"
+                    )
             conn.execute(
                 "UPDATE intents SET state = ? WHERE economic_action_id = ?",
                 (to_state.value, economic_action_id),
