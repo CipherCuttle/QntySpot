@@ -119,7 +119,7 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
         )
         identity = json.loads(output.read_text(encoding="utf-8"))
     if identity.get("implementation_digest") != BOUND_IMPLEMENTATION_DIGEST:
-        raise RuntimeError("recomputed QntySpot implementation digest differs from V8 binding")
+        raise RuntimeError("recomputed QntySpot implementation digest differs from current binding")
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -203,9 +203,138 @@ def _source_buy(ledger) -> tuple[str, str]:
         "SELECT status FROM cycles WHERE cycle_id = ?",
         (row["cycle_id"],),
     ).fetchone()
-    if cycle is None or cycle["status"] != "OPEN":
-        raise RuntimeError("first-live source cycle is not OPEN for inventory continuation")
+    if cycle is None or cycle["status"] not in {"OPEN", "COMPLETED"}:
+        raise RuntimeError("first-live source cycle is neither OPEN nor safely continued")
     return str(row["cycle_id"]), str(row["policy_id"])
+
+
+def _recoverable_inventory_source(
+    ledger,
+    *,
+    first_buy_cycle_id: str,
+    now: int,
+) -> tuple[str, str | None]:
+    """Find the exact inventory-bearing cycle after a failed pre-sign prepare.
+
+    The only recoverable non-pristine shape is the one produced by this helper
+    when it carried the BUY inventory, created one zero-exposure SELL intent,
+    reached SIMULATED, and then failed before authority/session/preauth state.
+    No external or signable state may exist.
+    """
+
+    source = ledger.connection.execute(
+        "SELECT status FROM cycles WHERE cycle_id = ?",
+        (first_buy_cycle_id,),
+    ).fetchone()
+    if source is None:
+        raise RuntimeError("first-live BUY cycle is missing")
+    if source["status"] == "OPEN":
+        return first_buy_cycle_id, None
+    if source["status"] != "COMPLETED":
+        raise RuntimeError("first-live BUY cycle has an unrecoverable status")
+
+    candidates: list[dict[str, object]] = []
+    rows = ledger.connection.execute(
+        """
+        SELECT cycle_id, payload_json
+          FROM state_events
+         WHERE event_type = 'CYCLE_OPENED'
+         ORDER BY seq
+        """
+    ).fetchall()
+    for row in rows:
+        payload = strict_json_loads(row["payload_json"])
+        carry = payload.get("inventory_carry") if isinstance(payload, dict) else None
+        if (
+            isinstance(carry, dict)
+            and carry.get("source_cycle_id") == first_buy_cycle_id
+        ):
+            candidates.append(
+                {
+                    "cycle_id": str(row["cycle_id"]),
+                    "amount_atomic": carry.get("amount_atomic"),
+                }
+            )
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "completed first-live BUY must have exactly one inventory-carry successor"
+        )
+
+    carried_cycle_id = str(candidates[0]["cycle_id"])
+    if candidates[0]["amount_atomic"] != str(EXPECTED_INVENTORY_ATOMIC):
+        raise RuntimeError("partial prepare carried an unexpected inventory amount")
+
+    carried_cycle = ledger.connection.execute(
+        """
+        SELECT c.status, c.policy_id, p.canonical_json
+          FROM cycles AS c
+          JOIN policies AS p ON p.policy_id = c.policy_id
+         WHERE c.cycle_id = ?
+        """,
+        (carried_cycle_id,),
+    ).fetchone()
+    if carried_cycle is None or carried_cycle["status"] != "OPEN":
+        raise RuntimeError("partial prepare successor cycle is not the unique OPEN inventory source")
+    if ledger.inventory_atomic(carried_cycle_id) != EXPECTED_INVENTORY_ATOMIC:
+        raise RuntimeError("partial prepare successor inventory differs from the first-live BUY")
+
+    old_policy = strict_json_loads(carried_cycle["canonical_json"])
+    if not isinstance(old_policy, dict):
+        raise RuntimeError("partial prepare successor policy is malformed")
+    timing = old_policy.get("timing")
+    if (
+        not isinstance(timing, dict)
+        or type(timing.get("expiry_epoch_s")) is not int
+        or timing["expiry_epoch_s"] > now
+    ):
+        raise RuntimeError("partial prepare successor policy is not expired")
+
+    intents = ledger.connection.execute(
+        """
+        SELECT economic_action_id, state, side, quote_exposure_atomic
+          FROM intents
+         WHERE cycle_id = ?
+        """,
+        (carried_cycle_id,),
+    ).fetchall()
+    if len(intents) != 1:
+        raise RuntimeError("partial prepare successor does not contain exactly one intent")
+    intent = intents[0]
+    if (
+        intent["side"] != "SELL"
+        or int(intent["quote_exposure_atomic"]) != 0
+        or intent["state"] not in {IntentState.SIMULATED.value, IntentState.EXPIRED.value}
+    ):
+        raise RuntimeError("partial prepare successor intent is not safely abandonable")
+
+    action_id = str(intent["economic_action_id"])
+    count_checks = (
+        ("budget_reservations", "economic_action_id"),
+        ("approval_actions", "economic_action_id"),
+        ("execution_envelopes", "economic_action_id"),
+        ("external_actions", "economic_action_id"),
+        ("signed_transactions", "external_action_id"),
+    )
+    for table, column in count_checks:
+        count = ledger.connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",
+            (action_id,),
+        ).fetchone()[0]
+        if count != 0:
+            raise RuntimeError(
+                f"partial prepare has persisted {table}; automatic recovery is forbidden"
+            )
+    session_count = ledger.connection.execute(
+        "SELECT COUNT(*) FROM execution_sessions WHERE policy_id = ?",
+        (carried_cycle["policy_id"],),
+    ).fetchone()[0]
+    if session_count != 0:
+        raise RuntimeError("partial prepare already has an execution session")
+
+    stale_action_id = (
+        action_id if intent["state"] == IntentState.SIMULATED.value else None
+    )
+    return carried_cycle_id, stale_action_id
 
 
 def _successor_policy_doc(
@@ -244,7 +373,7 @@ def _verify_receipt_shape(receipt: AuthorityGrantReceiptV0, *, now: int) -> None
     }
     for field, value in expected.items():
         if getattr(authority, field) != value:
-            raise RuntimeError(f"AuthorityRoot receipt {field} differs from frozen V8 scope")
+            raise RuntimeError(f"AuthorityRoot receipt {field} differs from frozen V9 scope")
     if authority.not_after_epoch_s - now < 300:
         raise RuntimeError("fresh grant has less than 300s remaining; refuse rushed SELL prepare")
 
@@ -298,8 +427,13 @@ def main() -> int:
     live = InkV0FLiveVerifier((providers[0], providers[1]), router_identity)
 
     ledger = open_ledger(str(ledger_path))
-    source_cycle_id, source_policy_id = _source_buy(ledger)
-    inventory = ledger.inventory_atomic(source_cycle_id)
+    first_buy_cycle_id, source_policy_id = _source_buy(ledger)
+    inventory_source_cycle_id, stale_partial_action_id = _recoverable_inventory_source(
+        ledger,
+        first_buy_cycle_id=first_buy_cycle_id,
+        now=now,
+    )
+    inventory = ledger.inventory_atomic(inventory_source_cycle_id)
     if inventory != EXPECTED_INVENTORY_ATOMIC:
         raise RuntimeError(
             f"ledger inventory {inventory} differs from first-live BUY output "
@@ -384,9 +518,20 @@ def main() -> int:
         raise RuntimeError("native balance cannot cover frozen approval + SELL fee ceilings")
 
     # All external/read-only checks are complete before ledger continuity mutates.
+    # A prior failed prepare may have left exactly one SIMULATED zero-effect
+    # successor. Expire only that fully-proven pre-commitment action, then carry
+    # its unchanged inventory forward. Any signable/external residue was
+    # rejected above.
+    if stale_partial_action_id is not None:
+        ledger.transition(
+            stale_partial_action_id,
+            IntentState.EXPIRED,
+            now_epoch_s=now,
+            payload={"recovery": "abandon_failed_pre_sign_sell_prepare"},
+        )
     ledger.admit_policy(policy)
     successor_cycle_id = ledger.continue_inventory_into_successor_cycle(
-        source_cycle_id,
+        inventory_source_cycle_id,
         policy,
         0,
         now_epoch_s=now,
@@ -482,7 +627,7 @@ def main() -> int:
         "receipt": str(receipt_path),
         "ledger": str(ledger_path),
         "prepared_at_epoch_s": now,
-        "source_cycle_id": source_cycle_id,
+        "source_cycle_id": inventory_source_cycle_id,
         "cycle_id": successor_cycle_id,
         "policy_doc": policy_doc,
         "session": _dataclass_object(session),
