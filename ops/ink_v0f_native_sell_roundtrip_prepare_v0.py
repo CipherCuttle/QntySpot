@@ -230,6 +230,80 @@ def _source_buy(ledger) -> tuple[str, str]:
     return str(row["cycle_id"]), str(row["policy_id"])
 
 
+
+def _load_existing_prepare(
+    runtime: ExecutionRuntime,
+    ledger,
+    *,
+    first_buy_cycle_id: str,
+):
+    """Load the one durable native-SELL prepare on the BUY carry chain.
+
+    A prepare may be anchored to a legacy inventory-carry successor rather
+    than directly to the original BUY cycle.  Resume discovery therefore
+    follows immutable carry events without imposing policy-expiry rules.
+    """
+    rows = ledger.connection.execute(
+        """
+        SELECT source_cycle_id
+          FROM prepare_records
+         WHERE operation_kind = 'INK_V0F_NATIVE_SELL'
+         ORDER BY created_at_epoch_s, prepare_id
+        """
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) != 1:
+        raise RuntimeError("multiple durable native SELL prepare records are ambiguous")
+    prepare_source_cycle_id = str(rows[0]["source_cycle_id"])
+
+    successors: dict[str, list[dict[str, object]]] = {}
+    for row in ledger.connection.execute(
+        """
+        SELECT cycle_id, payload_json
+          FROM state_events
+         WHERE event_type = 'CYCLE_OPENED'
+         ORDER BY seq
+        """
+    ).fetchall():
+        payload = strict_json_loads(row["payload_json"])
+        carry = payload.get("inventory_carry") if isinstance(payload, dict) else None
+        if not isinstance(carry, dict):
+            continue
+        source_cycle_id = carry.get("source_cycle_id")
+        if not isinstance(source_cycle_id, str):
+            raise RuntimeError("inventory-carry event has malformed source cycle id")
+        successors.setdefault(source_cycle_id, []).append(
+            {
+                "cycle_id": str(row["cycle_id"]),
+                "amount_atomic": carry.get("amount_atomic"),
+            }
+        )
+
+    current_cycle_id = first_buy_cycle_id
+    visited: set[str] = set()
+    while current_cycle_id != prepare_source_cycle_id:
+        if current_cycle_id in visited:
+            raise RuntimeError("inventory-carry history contains a cycle")
+        visited.add(current_cycle_id)
+        outgoing = successors.get(current_cycle_id, [])
+        if len(outgoing) != 1:
+            raise RuntimeError(
+                "durable prepare source is not on the unique first-live inventory-carry chain"
+            )
+        if outgoing[0]["amount_atomic"] != str(EXPECTED_INVENTORY_ATOMIC):
+            raise RuntimeError("durable prepare carry chain contains an unexpected inventory amount")
+        current_cycle_id = str(outgoing[0]["cycle_id"])
+
+    record = runtime.load_prepare_plan(
+        operation_kind="INK_V0F_NATIVE_SELL",
+        source_cycle_id=prepare_source_cycle_id,
+    )
+    if record is None:
+        raise RuntimeError("durable prepare index references a missing prepare record")
+    return record
+
+
 def _recoverable_inventory_source(
     ledger,
     *,
@@ -725,8 +799,10 @@ def main() -> int:
     ledger = open_ledger(str(ledger_path))
     first_buy_cycle_id, source_policy_id = _source_buy(ledger)
     runtime = ExecutionRuntime(ledger)
-    existing_prepare = runtime.load_prepare_plan(
-        operation_kind="INK_V0F_NATIVE_SELL", source_cycle_id=first_buy_cycle_id
+    existing_prepare = _load_existing_prepare(
+        runtime,
+        ledger,
+        first_buy_cycle_id=first_buy_cycle_id,
     )
     if existing_prepare is None:
         _verify_receipt_shape(receipt, now=now, require_fresh_margin=True)
@@ -820,10 +896,34 @@ def main() -> int:
         now_epoch_s=now,
     )
 
-    priority_fee = max(1_000_000, min(100_000_000, signer_state.base_fee_per_gas // 10))
-    max_fee = max(1_000_000_000, signer_state.base_fee_per_gas * 3 + priority_fee)
-    approval_gas = 80_000
-    sell_gas = 300_000
+    if existing_prepare is None:
+        priority_fee = max(
+            1_000_000,
+            min(100_000_000, signer_state.base_fee_per_gas // 10),
+        )
+        max_fee = max(
+            1_000_000_000,
+            signer_state.base_fee_per_gas * 3 + priority_fee,
+        )
+        approval_gas = 80_000
+        sell_gas = 300_000
+    else:
+        request = plan.get("approval_request")
+        frozen_envelope = plan.get("envelope")
+        if not isinstance(request, dict) or not isinstance(frozen_envelope, dict):
+            raise RuntimeError("durable prepare gas terms are missing")
+        approval_gas = int(request["gas_limit_ceiling"])
+        sell_gas = int(frozen_envelope["gas_limit_ceiling"])
+        max_fee = int(request["max_fee_per_gas_ceiling"])
+        priority_fee = int(request["max_priority_fee_per_gas_ceiling"])
+        if (
+            approval_gas <= 0
+            or sell_gas <= 0
+            or max_fee <= 0
+            or priority_fee < 0
+        ):
+            raise RuntimeError("durable prepare gas terms are invalid")
+
     native_balance = int(
         providers[0].request("eth_getBalance", [INK_V0F_TAKER_ADDRESS, hex(market.common_block)]),
         16,
@@ -857,13 +957,6 @@ def main() -> int:
     else:
         plan = dict(existing_prepare.plan)
         prepare_record = existing_prepare
-        request = plan.get("approval_request")
-        if not isinstance(request, dict):
-            raise RuntimeError("durable prepare approval request is missing")
-        approval_gas = int(request["gas_limit_ceiling"])
-        sell_gas = int(plan["envelope"]["gas_limit_ceiling"])
-        max_fee = int(request["max_fee_per_gas_ceiling"])
-        priority_fee = int(request["max_priority_fee_per_gas_ceiling"])
 
     # The durable plan is now the recovery authority.  No later local failure
     # can justify an expiry-gated successor or a second carry.
@@ -993,7 +1086,7 @@ def main() -> int:
             "gas_limit_ceiling": approval_gas,
             "max_fee_per_gas_ceiling": max_fee,
             "max_priority_fee_per_gas_ceiling": priority_fee,
-            "constructed_at_epoch_s": now,
+            "constructed_at_epoch_s": session.started_at_epoch_s,
             "request_id": approval_request.request_id,
         },
         "expected_inventory_atomic": str(inventory),
