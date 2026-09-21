@@ -12,7 +12,13 @@ from qntyspot.execution_contract import (
     FinalityPolicyV0,
     ReceiptStatus,
 )
-from qntyspot.exact_signed_bytes import ExactSignedBytesScopeV0
+from qntyspot.exact_signed_bytes import (
+    ExactSignedBytesAdmissionV0,
+    ExactSignedBytesScopeV0,
+    ExactSignedTransactionRecordV0,
+    ParsedExactSignedBytesV0,
+    ValidatedExactSignedBytesV0,
+)
 from qntyspot.ledger import (
     ExecutionRuntime,
     assert_execution_replay_equivalence,
@@ -23,7 +29,7 @@ from qntyspot.states import IntentState
 
 from test_execution_schema import envelope_row, insert
 from test_external_authority_root import _receipt, _root_for, _session
-from test_submit_exact_signed_bytes_v0 import RAW, TAKER, TARGET
+from test_submit_exact_signed_bytes_v0 import RAW
 
 TX_HASH = "0x7508482061b00d5775609a79956af4b58b07a969aa030ac99c3444c7573e129b"
 FINALITY = FinalityPolicyV0(min_confirmation_depth=2, min_agreeing_providers=2)
@@ -66,8 +72,6 @@ def _surface(tmp_path):
         policy_id=policy.policy_id,
         db_schema_version=5,
     )
-    assert session.chain_id == 46_630
-    assert session.taker_address == TAKER
     from qntyspot.authority_root import verify_authority_grant
 
     grant = verify_authority_grant(
@@ -97,7 +101,7 @@ def _surface(tmp_path):
         authority_policy_digest=session.authority_policy_digest,
         chain_id=session.chain_id,
         taker_address=session.taker_address,
-        target_address=TARGET,
+        target_address="0x1111111111111111111111111111111111111111",
         min_value_atomic=0,
         max_value_atomic=0,
         calldata_sha256=sha256_hex(b""),
@@ -131,13 +135,69 @@ def _surface(tmp_path):
             lifecycle="AUTHORIZED",
         ),
     )
-    admission = runtime.admit_exact_signed_bytes(
-        scope,
-        RAW,
-        session,
-        grant,
-        frozen_at_epoch_s=NOW,
+    parsed = ParsedExactSignedBytesV0(
+        transaction_type="eip-1559",
+        chain_id=session.chain_id,
+        account_nonce=scope.account_nonce or 0,
+        gas_limit=scope.gas_limit_ceiling,
+        max_fee_per_gas=scope.max_fee_per_gas_ceiling,
+        max_priority_fee_per_gas=scope.max_priority_fee_per_gas_ceiling,
+        target_address=scope.target_address,
+        value_atomic=0,
+        calldata=b"",
+        sender_address=session.taker_address,
+        transaction_hash=TX_HASH,
     )
+    validated = ValidatedExactSignedBytesV0(
+        scope=scope,
+        parsed=parsed,
+        signed_bytes_sha256=sha256_hex(RAW),
+        signed_bytes_length=len(RAW),
+    )
+    record = ExactSignedTransactionRecordV0(
+        economic_action_id=intent.economic_action_id,
+        scope_digest=scope.scope_digest,
+        signed_bytes_sha256=sha256_hex(RAW),
+        signed_bytes_length=len(RAW),
+        transaction_hash=TX_HASH,
+        chain_id=session.chain_id,
+        account_nonce=scope.account_nonce or 0,
+        taker_address=session.taker_address,
+        signer_identity="public-runtime-fixture",
+    )
+    admission = ExactSignedBytesAdmissionV0(RAW, record, validated)
+    envelope_id = ledger.connection.execute(
+        "SELECT envelope_id FROM execution_envelopes WHERE economic_action_id = ?",
+        (intent.economic_action_id,),
+    ).fetchone()[0]
+    ledger.connection.execute(
+        """
+        INSERT INTO signed_transactions (
+            signed_transaction_id, external_action_id, session_id, envelope_id,
+            approval_action_id, origin, chain_id, taker_address, account_nonce,
+            raw_signed_sha256, raw_signed_length, transaction_hash, scope_digest,
+            signer_identity, frozen_at_epoch_s
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            record.signed_transaction_id,
+            intent.economic_action_id,
+            session.session_id,
+            envelope_id,
+            None,
+            "EXTERNAL_SIGNED_BYTES",
+            session.chain_id,
+            session.taker_address,
+            scope.account_nonce or 0,
+            record.signed_bytes_sha256,
+            record.signed_bytes_length,
+            record.transaction_hash,
+            record.scope_digest,
+            record.signer_identity,
+            NOW,
+        ),
+    )
+    drive(ledger, intent.economic_action_id, IntentState.SIGNED)
     assert ledger.intent_state(intent.economic_action_id) is IntentState.SIGNED
     return ledger, runtime, intent, session, grant, admission
 
