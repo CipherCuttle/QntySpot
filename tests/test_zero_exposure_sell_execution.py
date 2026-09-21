@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from conftest import NOW, base_policy_doc, drive
+from conftest import drive
 from qntyspot.canon import sha256_hex
 from qntyspot.economics import build_intent
 from qntyspot.execution_contract import (
-    AuthorityLevel,
     ChainObservationV0,
     ChainPresence,
     FinalityPolicyV0,
@@ -28,7 +27,13 @@ from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
 
 from test_execution_schema import envelope_row, insert
-from test_external_authority_root import _receipt, _root_for, _session
+import qntyspot.ink_v0f_execution as ink_execution
+from test_ink_v0f_approval_exact_runtime import (
+    FIXTURE_TAKER,
+    NOW,
+    _policy_doc,
+    _verified_grant,
+)
 from test_submit_exact_signed_bytes_v0 import RAW
 
 TX_HASH = "0x7508482061b00d5775609a79956af4b58b07a969aa030ac99c3444c7573e129b"
@@ -44,8 +49,9 @@ class TransportSpy:
         return TX_HASH
 
 
-def _surface(tmp_path):
-    policy = parse_policy(base_policy_doc())
+def _surface(tmp_path, monkeypatch):
+    monkeypatch.setattr(ink_execution, "INK_V0F_TAKER_ADDRESS", FIXTURE_TAKER)
+    policy = parse_policy(_policy_doc())
     ledger = open_ledger(str(tmp_path / "zero-exposure-sell.sqlite3"))
     ledger.admit_policy(policy)
     cycle_id = ledger.open_cycle(policy, 0, now_epoch_s=NOW)
@@ -64,22 +70,11 @@ def _surface(tmp_path):
         IntentState.TRIGGERED,
         IntentState.QUOTE_PINNED,
         IntentState.SIMULATED,
-    )
-
-    receipt = _receipt(AuthorityLevel.AUTONOMOUS_BOUNDED_SIGNER)
-    session = replace(
-        _session(receipt),
-        policy_id=policy.policy_id,
-        db_schema_version=5,
-    )
-    from qntyspot.authority_root import verify_authority_grant
-
-    grant = verify_authority_grant(
-        receipt=receipt,
-        trusted_root=_root_for(receipt.root_id),
-        session=session,
         now_epoch_s=NOW,
     )
+
+    session, grant = _verified_grant(policy_id=policy.policy_id)
+    session = replace(session, db_schema_version=5)
     runtime = ExecutionRuntime(ledger)
     runtime.create_execution_session(session, grant, now_epoch_s=NOW)
     runtime.reserve_action(
@@ -197,7 +192,7 @@ def _surface(tmp_path):
             NOW,
         ),
     )
-    drive(ledger, intent.economic_action_id, IntentState.SIGNED)
+    drive(ledger, intent.economic_action_id, IntentState.SIGNED, now_epoch_s=NOW)
     assert ledger.intent_state(intent.economic_action_id) is IntentState.SIGNED
     return ledger, runtime, intent, session, grant, admission
 
@@ -234,8 +229,8 @@ def _included(
     )
 
 
-def test_zero_exposure_sell_submits_without_budget_reservation(tmp_path) -> None:
-    ledger, runtime, intent, session, grant, admission = _surface(tmp_path)
+def test_zero_exposure_sell_submits_without_budget_reservation(tmp_path, monkeypatch) -> None:
+    ledger, runtime, intent, session, grant, admission = _surface(tmp_path, monkeypatch)
     spy = TransportSpy()
 
     attempt = runtime.submit_exact_signed_bytes(
@@ -257,9 +252,9 @@ def test_zero_exposure_sell_submits_without_budget_reservation(tmp_path) -> None
 
 
 def test_zero_exposure_sell_safe_halt_terminal_truth_recovers_and_replays(
-    tmp_path,
+    tmp_path, monkeypatch,
 ) -> None:
-    ledger, runtime, intent, session, grant, admission = _surface(tmp_path)
+    ledger, runtime, intent, session, grant, admission = _surface(tmp_path, monkeypatch)
     spy = TransportSpy()
     runtime.submit_exact_signed_bytes(
         admission,
