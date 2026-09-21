@@ -6,6 +6,7 @@ must survive process death; no signer, transport, or live authority is used.
 
 from __future__ import annotations
 
+import inspect
 import sqlite3
 
 import pytest
@@ -66,6 +67,19 @@ def test_phase_order_is_monotonic_and_identity_is_immutable(armed) -> None:
         ledger.connection.execute(
             "UPDATE prepare_records SET plan_json = '{}' WHERE prepare_id = ?", (record.prepare_id,)
         )
+
+
+
+def test_native_sell_preauth_accepts_frozen_resume_bundle_parameters() -> None:
+    signature = inspect.signature(
+        ExecutionRuntime.record_ink_v0f_native_sell_preauth_bundle
+    )
+    assert "frozen_approval" in signature.parameters
+    assert "frozen_envelope" in signature.parameters
+    assert "frozen_prepare_id" in signature.parameters
+    assert signature.parameters["frozen_approval"].default is None
+    assert signature.parameters["frozen_envelope"].default is None
+    assert signature.parameters["frozen_prepare_id"].default is None
 
 
 def test_active_successor_does_not_change_prepare_identity(armed) -> None:
