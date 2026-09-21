@@ -101,9 +101,19 @@ def test_successor_policy_refresh_changes_only_episode_identity_price_and_timing
     assert result["reentry"]["max_cycles"] == 1
 
 
-def _recovery_ledger(helper, *, cycles, carries, intents, residue=None, sessions=None):
+def _recovery_ledger(
+    helper,
+    *,
+    cycles,
+    carries,
+    intents,
+    residue=None,
+    sessions=None,
+    inventories=None,
+):
     residue = residue or {}
     sessions = sessions or {}
+    inventories = inventories or {}
 
     class Result:
         def __init__(self, *, one=None, all_rows=None):
@@ -157,7 +167,7 @@ def _recovery_ledger(helper, *, cycles, carries, intents, residue=None, sessions
 
         def inventory_atomic(self, cycle_id):
             assert cycle_id != "buy-cycle"
-            return helper.EXPECTED_INVENTORY_ATOMIC
+            return inventories.get(cycle_id, helper.EXPECTED_INVENTORY_ATOMIC)
 
     return Ledger()
 
@@ -270,12 +280,114 @@ def test_partial_prepare_recovery_walks_repeated_zero_effect_carry_chain() -> No
             ],
             "serial6-cycle": [],
         },
+        inventories={
+            "serial5-cycle": 0,
+            "serial6-cycle": helper.EXPECTED_INVENTORY_ATOMIC,
+        },
     )
     assert helper._recoverable_inventory_source(
         ledger,
         first_buy_cycle_id="buy-cycle",
         now=200,
     ) == ("serial6-cycle", None)
+
+
+def test_partial_prepare_recovery_rejects_completed_hop_retaining_inventory() -> None:
+    helper = _helper()
+    old_action = "bc" * 32
+    cycles = {
+        "buy-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "buy-policy",
+            "canonical_json": "{}",
+        },
+        "serial5-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "serial5-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 100}}
+            ),
+        },
+        "serial6-cycle": {
+            "status": "OPEN",
+            "policy_id": "serial6-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 150}}
+            ),
+        },
+    }
+    ledger = _recovery_ledger(
+        helper,
+        cycles=cycles,
+        carries=[
+            ("buy-cycle", "serial5-cycle", helper.EXPECTED_INVENTORY_ATOMIC),
+            ("serial5-cycle", "serial6-cycle", helper.EXPECTED_INVENTORY_ATOMIC),
+        ],
+        intents={
+            "serial5-cycle": [
+                {
+                    "economic_action_id": old_action,
+                    "state": helper.IntentState.EXPIRED.value,
+                    "side": "SELL",
+                    "quote_exposure_atomic": "0",
+                }
+            ],
+            "serial6-cycle": [],
+        },
+        inventories={
+            "serial5-cycle": helper.EXPECTED_INVENTORY_ATOMIC,
+            "serial6-cycle": helper.EXPECTED_INVENTORY_ATOMIC,
+        },
+    )
+    with pytest.raises(RuntimeError, match="retains inventory"):
+        helper._recoverable_inventory_source(
+            ledger,
+            first_buy_cycle_id="buy-cycle",
+            now=200,
+        )
+
+
+def test_partial_prepare_recovery_rejects_fill_receipt_residue() -> None:
+    helper = _helper()
+    action_id = "bd" * 32
+    cycles = {
+        "buy-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "buy-policy",
+            "canonical_json": "{}",
+        },
+        "partial-cycle": {
+            "status": "OPEN",
+            "policy_id": "partial-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 100}}
+            ),
+        },
+    }
+    ledger = _recovery_ledger(
+        helper,
+        cycles=cycles,
+        carries=[
+            ("buy-cycle", "partial-cycle", helper.EXPECTED_INVENTORY_ATOMIC),
+        ],
+        intents={
+            "partial-cycle": [
+                {
+                    "economic_action_id": action_id,
+                    "state": helper.IntentState.EXPIRED.value,
+                    "side": "SELL",
+                    "quote_exposure_atomic": "0",
+                }
+            ]
+        },
+        residue={("fill_receipts", action_id): 1},
+    )
+    with pytest.raises(RuntimeError, match="fill_receipts"):
+        helper._recoverable_inventory_source(
+            ledger,
+            first_buy_cycle_id="buy-cycle",
+            now=200,
+        )
 
 
 def test_partial_prepare_recovery_rejects_session_on_empty_open_hop() -> None:
