@@ -40,6 +40,22 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _operator_prepare_path() -> Path:
+    """Return the reviewed operator helper, not a copy from the frozen runtime."""
+
+    return Path(__file__).resolve().with_name(
+        "ink_v0f_native_sell_roundtrip_prepare_v0.py"
+    )
+
+
+def _runtime_env(qntyspot_root: Path) -> dict[str, str]:
+    """Force subprocess imports to resolve from the frozen runtime checkout."""
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(qntyspot_root)
+    return env
+
+
 def _fsync_dir(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -186,6 +202,7 @@ def _run_phase(
     command: list[str],
     log_path: Path,
     label: str,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one unsigned/non-transport phase and append bounded textual output."""
 
@@ -194,6 +211,7 @@ def _run_phase(
         text=True,
         capture_output=True,
         check=False,
+        env=env,
     )
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(f"=== {label} rc={result.returncode} ===\n")
@@ -227,7 +245,11 @@ def main() -> int:
     authority_root = Path(args.authority_root).resolve()
     receipt_path = Path(args.receipt).resolve()
     ledger_path = Path(args.ledger).resolve()
-    prepare = qntyspot_root / "ops/ink_v0f_native_sell_roundtrip_prepare_v0.py"
+    prepare = _operator_prepare_path()
+    if not prepare.is_file():
+        raise DriverSafeStop("reviewed prepare helper is missing")
+    prepare_sha256 = _sha256(prepare.read_bytes())
+    runtime_env = _runtime_env(qntyspot_root)
 
     state = _load_state(state_path)
     fixed = {
@@ -235,6 +257,8 @@ def main() -> int:
         "authority_root": str(authority_root),
         "receipt_path": str(receipt_path),
         "ledger": str(ledger_path),
+        "operator_prepare_path": str(prepare),
+        "operator_prepare_sha256": prepare_sha256,
     }
     for key, value in fixed.items():
         previous = state.get(key)
@@ -257,6 +281,7 @@ def main() -> int:
         ],
         log_path=log_path,
         label="PREFLIGHT",
+        env=runtime_env,
     )
     if preflight.returncode != 0:
         _set_phase(
@@ -291,6 +316,7 @@ def main() -> int:
         ],
         log_path=log_path,
         label="PREPARE",
+        env=runtime_env,
     )
     if prepared.returncode != 0:
         _set_phase(
