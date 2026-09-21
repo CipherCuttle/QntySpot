@@ -479,3 +479,40 @@ def test_approval_submission_refuses_changed_payload_before_guard_or_transport(
     assert ledger.connection.execute(
         "SELECT COUNT(*) FROM submission_attempts"
     ).fetchone()[0] == 0
+
+
+def test_expired_approval_refuses_before_guard_or_transport(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, runtime, session, grant, request = _setup(tmp_path, monkeypatch)
+    signed = runtime.admit_ink_v0f_signed_approval(
+        request,
+        RAW_APPROVAL,
+        session,
+        grant,
+        frozen_at_epoch_s=NOW,
+    )
+
+    class NoTransport:
+        def __init__(self) -> None:
+            self.called = False
+
+        def submit_exact_signed_bytes(self, payload: bytes) -> str:
+            self.called = True
+            return signed.transaction_hash
+
+    transport = NoTransport()
+    with pytest.raises(SafeHaltError, match="deadline"):
+        runtime.submit_ink_v0f_signed_approval(
+            signed,
+            RAW_APPROVAL,
+            transport,
+            session,
+            grant,
+            provider_id="ink-provider-0",
+            submitted_at_epoch_s=NOW + 300,
+        )
+    assert transport.called is False
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM submission_attempts"
+    ).fetchone()[0] == 0
