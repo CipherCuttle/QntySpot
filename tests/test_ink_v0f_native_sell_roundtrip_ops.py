@@ -3,10 +3,14 @@ from __future__ import annotations
 import importlib.util
 import os
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from qntyspot.canon import decimal_to_fraction, format_canonical_decimal
+from qntyspot.errors import CanonicalFormError
 
 ROOT = Path(__file__).resolve().parents[1]
 HELPER = ROOT / "ops" / "ink_v0f_native_sell_roundtrip_prepare_v0.py"
@@ -99,6 +103,23 @@ def test_successor_policy_refresh_changes_only_episode_identity_price_and_timing
         "quote_ttl_s": 600,
     }
     assert result["reentry"]["max_cycles"] == 1
+
+
+def test_successor_decimal_normalization_leaves_room_for_sell_slippage() -> None:
+    helper = _helper()
+    # This is the historical failure shape: a 29-place reserve price multiplied
+    # by the SELL 0.995 slippage factor needs 31 canonical fractional places.
+    old_trigger = decimal_to_fraction(
+        Decimal("0.12345678901234567890123456788"), field="historical spot"
+    )
+    with pytest.raises(CanonicalFormError, match="needs 31 fractional digits"):
+        format_canonical_decimal(old_trigger * Fraction(199, 200), field="limit_price")
+
+    normalized = decimal_to_fraction(
+        Decimal(helper._decimal_text(Decimal("0.12345678901234567890123456788"))),
+        field="normalized spot",
+    )
+    assert format_canonical_decimal(normalized * Fraction(199, 200), field="limit_price")
 
 
 def _recovery_ledger(

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,8 @@ from qntyspot.ink_v0f_preauth import InkV0FLiveVerifier
 from qntyspot.ink_v0f_risk import consume_ink_v0f_risk_artifact
 from qntyspot.ledger import SCHEMA_VERSION, open_ledger
 from qntyspot.ledger.execution import ExecutionRuntime
+from qntyspot.ledger.schema import configure_connection
+from qntyspot.ledger.store import SpotLedger, cycle_id_for
 from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
 
@@ -66,6 +69,11 @@ EXPECTED_APPROVAL_NONCE = 1
 EXPECTED_MAX_AUTHORITY_ATOMIC = 10**15
 VENUE_ID = "inkyswap-v2-ink-mainnet"
 PREPARED_SCHEMA = "qntyspot.ops.ink_v0f_native_sell_roundtrip.prepared.v0"
+PREPARE_PLAN_SCHEMA = "qntyspot.ops.ink_v0f_native_sell_roundtrip.plan.v1"
+PREPARE_PHASES = (
+    "PLANNED", "POLICY_ADMITTED", "INVENTORY_CARRIED", "INTENT_SIMULATED",
+    "SESSION_RECORDED", "PREAUTH_RECORDED", "PREPARED",
+)
 
 
 def _assert_bound_qntyspot_root(root: Path) -> None:
@@ -123,7 +131,11 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
 
 
 def _decimal_text(value: Decimal) -> str:
-    quantum = Decimal(1).scaleb(-28)
+    # SELL's 50-bps leg limit multiplies the trigger by 199/200.  The extra
+    # factor of 2 can add three decimal places, so a 27-place source ceiling
+    # (not 28) is required to remain within the core's 30-place canonical
+    # decimal contract after the later bound calculation.
+    quantum = Decimal(1).scaleb(-27)
     rounded = value.quantize(quantum, rounding=ROUND_HALF_EVEN)
     text = format(rounded, "f").rstrip("0").rstrip(".")
     return text if text else "0"
@@ -143,6 +155,16 @@ def _write_durable_state(path: Path, document: dict[str, object]) -> None:
         while written < len(view):
             written += os.write(fd, view[written:])
         os.fsync(fd)
+    except BaseException:
+        # An interrupted O_EXCL write must not leave a syntactically plausible
+        # but incomplete artifact which a later run mistakes for a committed
+        # prepare.  The ledger plan remains authoritative; this sidecar is a
+        # convenience cache only.
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        raise
     finally:
         os.close(fd)
     dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
@@ -395,7 +417,9 @@ def _successor_policy_doc(
     return doc
 
 
-def _verify_receipt_shape(receipt: AuthorityGrantReceiptV0, *, now: int) -> None:
+def _verify_receipt_shape(
+    receipt: AuthorityGrantReceiptV0, *, now: int, require_fresh_margin: bool = True
+) -> None:
     authority = receipt.authority_policy
     expected = {
         "permitted_repository_commit": BOUND_REPOSITORY_COMMIT,
@@ -409,8 +433,133 @@ def _verify_receipt_shape(receipt: AuthorityGrantReceiptV0, *, now: int) -> None
     for field, value in expected.items():
         if getattr(authority, field) != value:
             raise RuntimeError(f"AuthorityRoot receipt {field} differs from frozen V9 scope")
-    if authority.not_after_epoch_s - now < 300:
+    if require_fresh_margin and authority.not_after_epoch_s - now < 300:
         raise RuntimeError("fresh grant has less than 300s remaining; refuse rushed SELL prepare")
+
+
+def _prospective_prepare_plan(
+    *,
+    ledger,
+    source_cycle_id: str,
+    policy,
+    session: ExecutionSessionV0,
+    verified,
+    live: InkV0FLiveVerifier,
+    risk_policy,
+    router_identity,
+    signer_nonce: int,
+    approval_gas: int,
+    sell_gas: int,
+    max_fee: int,
+    priority_fee: int,
+    now: int,
+) -> dict[str, object]:
+    """Validate the entire prepare in an in-memory ledger before any carry.
+
+    The clone deliberately exercises the same schema, policy, intent, session,
+    reservation, live quote, approval and native-envelope constructors as the
+    durable path, then is discarded.  Thus decimal/serialization/schema and
+    deterministic preauth failures cannot strand source inventory.
+    """
+    clone_conn = sqlite3.connect(":memory:")
+    clone_conn.row_factory = sqlite3.Row
+    ledger.connection.backup(clone_conn)
+    configure_connection(clone_conn, wal=False, busy_timeout_ms=5_000)
+    clone = SpotLedger(clone_conn, owns_connection=True)
+    try:
+        runtime = ExecutionRuntime(clone)
+        clone.admit_policy(policy)
+        cycle_id = clone.continue_inventory_into_successor_cycle(
+            source_cycle_id, policy, 0, now_epoch_s=now
+        )
+        expected_cycle_id = cycle_id_for(policy.policy_id, 0)
+        if cycle_id != expected_cycle_id:
+            raise RuntimeError("prospective successor cycle identity differs")
+        inventory = clone.inventory_atomic(cycle_id)
+        intent = build_intent(
+            policy, cycle_id, policy.level("X1"), now_epoch_s=now, inventory_atomic=inventory
+        )
+        # Force canonical bounds rendering here.  This is the historical
+        # 31-fractional-digit boundary and must run before the real carry.
+        canonical_json_str(intent.canonical_object())
+        clone.create_intent(intent, now_epoch_s=now)
+        for target in (IntentState.TRIGGERED, IntentState.QUOTE_PINNED, IntentState.SIMULATED):
+            clone.transition(intent.economic_action_id, target, now_epoch_s=now)
+        runtime.record_verified_authority(verified, accepted_at_epoch_s=now)
+        runtime.create_execution_session(session, verified, now_epoch_s=now)
+        runtime.reserve_action(intent.economic_action_id, session=session, verified_grant=verified, now_epoch_s=now)
+        approval, envelope = runtime.record_ink_v0f_native_sell_preauth_bundle(
+            live_verifier=live, risk_policy=risk_policy, router_identity=router_identity,
+            intent=intent, session=session, verified_grant=verified,
+            account_nonce=signer_nonce + 1, gas_limit_ceiling=sell_gas,
+            max_fee_per_gas_ceiling=max_fee,
+            max_priority_fee_per_gas_ceiling=priority_fee,
+            constructed_at_epoch_s=now, now_epoch_s=now,
+        )
+        approval_request = build_ink_v0f_approval_signing_request(
+            approval=approval, envelope=envelope, session=session,
+            approval_nonce=signer_nonce, gas_limit_ceiling=approval_gas,
+            max_fee_per_gas_ceiling=max_fee,
+            max_priority_fee_per_gas_ceiling=priority_fee,
+            constructed_at_epoch_s=now,
+        )
+        sell_calldata = encode_swap_exact_tokens_for_eth(
+            amount_in_atomic=envelope.max_input_atomic,
+            amount_out_min_atomic=envelope.min_output_atomic,
+            path=(KRAKMASK_ADDRESS, WETH9_ADDRESS), recipient=INK_V0F_TAKER_ADDRESS,
+            deadline_epoch_s=envelope.deadline_epoch_s,
+        )
+        if sha256_hex(sell_calldata) != envelope.calldata_sha256:
+            raise RuntimeError("prospective native SELL calldata differs from envelope")
+        return {
+            "schema": PREPARE_PLAN_SCHEMA,
+            "source_cycle_id": source_cycle_id,
+            "cycle_id": cycle_id,
+            "policy_doc": dict(policy.canonical),
+            "session": _dataclass_object(session),
+            "intent": intent.canonical_object(),
+            "approval": _dataclass_object(approval),
+            "envelope": _dataclass_object(envelope),
+            "approval_request": {
+                "approval_nonce": signer_nonce,
+                "gas_limit_ceiling": approval_gas,
+                "max_fee_per_gas_ceiling": max_fee,
+                "max_priority_fee_per_gas_ceiling": priority_fee,
+                "constructed_at_epoch_s": now,
+                "request_id": approval_request.request_id,
+            },
+            "expected_inventory_atomic": str(inventory),
+        }
+    finally:
+        clone.close()
+
+
+def _advance_to_phase(runtime: ExecutionRuntime, record, phase: str, *, now: int):
+    """Advance only forward; an observed post-crash state may be ahead."""
+    current = record
+    while PREPARE_PHASES.index(current.phase) < PREPARE_PHASES.index(phase):
+        current = runtime.advance_prepare_phase(
+            current.prepare_id,
+            PREPARE_PHASES[PREPARE_PHASES.index(current.phase) + 1],
+            now_epoch_s=now,
+        )
+    return current
+
+
+def _persisted_intent_matches(ledger, intent) -> bool:
+    row = ledger.connection.execute(
+        "SELECT bounds_json, policy_id, cycle_id, level_id, side FROM intents WHERE economic_action_id = ?",
+        (intent.economic_action_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    if (
+        row["policy_id"] != intent.policy_id or row["cycle_id"] != intent.cycle_id
+        or row["level_id"] != intent.level_id or row["side"] != intent.side.value
+        or row["bounds_json"] != canonical_json_str(intent.bounds.canonical_object())
+    ):
+        raise RuntimeError("durable intent differs from immutable prepare plan")
+    return True
 
 
 def main() -> int:
@@ -434,8 +583,6 @@ def main() -> int:
     _assert_bound_qntyspot_root(qntyspot_root)
     if not ledger_path.is_file() or ledger_path.stat().st_size == 0:
         raise RuntimeError("SELL prepare requires the existing non-empty first-live BUY ledger")
-    if state_path.exists():
-        raise RuntimeError("SELL prepared state already exists; resume it instead of preparing again")
 
     if args.preflight_only:
         router_identity = consume_ink_v0f_router_artifact(
@@ -553,7 +700,7 @@ def main() -> int:
         raise RuntimeError("grant receipt must live inside the explicit AuthorityRoot") from exc
 
     receipt = AuthorityGrantReceiptV0.from_bytes(receipt_path.read_bytes())
-    _verify_receipt_shape(receipt, now=now)
+    _verify_receipt_shape(receipt, now=now, require_fresh_margin=False)
     authority = receipt.authority_policy
 
     config_path = authority_root / "public/trusted-authority-root-v0.json"
@@ -577,12 +724,23 @@ def main() -> int:
 
     ledger = open_ledger(str(ledger_path))
     first_buy_cycle_id, source_policy_id = _source_buy(ledger)
-    inventory_source_cycle_id, stale_partial_action_id = _recoverable_inventory_source(
-        ledger,
-        first_buy_cycle_id=first_buy_cycle_id,
-        now=now,
+    runtime = ExecutionRuntime(ledger)
+    existing_prepare = runtime.load_prepare_plan(
+        operation_kind="INK_V0F_NATIVE_SELL", source_cycle_id=first_buy_cycle_id
     )
-    inventory = ledger.inventory_atomic(inventory_source_cycle_id)
+    if existing_prepare is None:
+        _verify_receipt_shape(receipt, now=now, require_fresh_margin=True)
+        inventory_source_cycle_id, stale_partial_action_id = _recoverable_inventory_source(
+            ledger, first_buy_cycle_id=first_buy_cycle_id, now=now,
+        )
+    else:
+        inventory_source_cycle_id = existing_prepare.source_cycle_id
+        stale_partial_action_id = None
+    inventory = (
+        int(existing_prepare.plan["expected_inventory_atomic"])
+        if existing_prepare is not None
+        else ledger.inventory_atomic(inventory_source_cycle_id)
+    )
     if inventory != EXPECTED_INVENTORY_ATOMIC:
         raise RuntimeError(
             f"ledger inventory {inventory} differs from first-live BUY output "
@@ -615,33 +773,46 @@ def main() -> int:
     if not isinstance(source_doc, dict):
         raise RuntimeError("source policy canonical JSON is not an object")
 
-    getcontext().prec = 80
-    spot = Decimal(market.reserve1_atomic) / Decimal(market.reserve0_atomic)
-    expiry = min(authority.not_after_epoch_s - 30, now + 600)
-    if expiry - now < 240:
-        raise RuntimeError("insufficient grant window after SELL policy/deadline margins")
-    policy_doc = _successor_policy_doc(source_doc, spot=spot, now=now, expiry=expiry)
-    policy = parse_policy(policy_doc)
-
-    session_ordinal = int(
-        ledger.connection.execute(
-            "SELECT COALESCE(MAX(session_ordinal), -1) + 1 FROM execution_sessions"
-        ).fetchone()[0]
-    )
-    session = ExecutionSessionV0(
-        repository_commit=BOUND_REPOSITORY_COMMIT,
-        implementation_digest=BOUND_IMPLEMENTATION_DIGEST,
-        runtime_identity=f"cpython-{sys.version_info.major}.{sys.version_info.minor}",
-        db_schema_version=SCHEMA_VERSION,
-        policy_id=policy.policy_id,
-        authority_policy_digest=authority.authority_policy_digest,
-        taker_address=INK_V0F_TAKER_ADDRESS,
-        network_id=f"evm:{INK_CHAIN_ID}",
-        venue_id=VENUE_ID,
-        venue_adapter_version="ink-v0f",
-        started_at_epoch_s=now,
-        session_ordinal=session_ordinal,
-    )
+    if existing_prepare is None:
+        getcontext().prec = 80
+        spot = Decimal(market.reserve1_atomic) / Decimal(market.reserve0_atomic)
+        expiry = min(authority.not_after_epoch_s - 30, now + 600)
+        if expiry - now < 240:
+            raise RuntimeError("insufficient grant window after SELL policy/deadline margins")
+        policy_doc = _successor_policy_doc(source_doc, spot=spot, now=now, expiry=expiry)
+        policy = parse_policy(policy_doc)
+        session_ordinal = int(
+            ledger.connection.execute(
+                "SELECT COALESCE(MAX(session_ordinal), -1) + 1 FROM execution_sessions"
+            ).fetchone()[0]
+        )
+        session = ExecutionSessionV0(
+            repository_commit=BOUND_REPOSITORY_COMMIT,
+            implementation_digest=BOUND_IMPLEMENTATION_DIGEST,
+            runtime_identity=f"cpython-{sys.version_info.major}.{sys.version_info.minor}",
+            db_schema_version=SCHEMA_VERSION, policy_id=policy.policy_id,
+            authority_policy_digest=authority.authority_policy_digest,
+            taker_address=INK_V0F_TAKER_ADDRESS, network_id=f"evm:{INK_CHAIN_ID}",
+            venue_id=VENUE_ID, venue_adapter_version="ink-v0f",
+            started_at_epoch_s=now, session_ordinal=session_ordinal,
+        )
+    else:
+        plan = existing_prepare.plan
+        if plan.get("schema") != PREPARE_PLAN_SCHEMA:
+            raise RuntimeError("durable prepare plan schema differs")
+        if (
+            existing_prepare.authority_policy_digest != authority.authority_policy_digest
+            or existing_prepare.authority_receipt_id != receipt.receipt_id
+        ):
+            raise RuntimeError("authority receipt differs from durable prepare plan")
+        policy_doc = plan.get("policy_doc")
+        session_data = plan.get("session")
+        if not isinstance(policy_doc, dict) or not isinstance(session_data, dict):
+            raise RuntimeError("durable prepare plan is incomplete")
+        policy = parse_policy(policy_doc)
+        session = ExecutionSessionV0(**session_data)
+        if policy.policy_id != existing_prepare.successor_policy_id or session.policy_id != policy.policy_id:
+            raise RuntimeError("durable prepare policy/session binding differs")
     verified = verify_authority_grant(
         receipt=receipt,
         trusted_root=trusted,
@@ -666,11 +837,36 @@ def main() -> int:
     if native_balance < (approval_gas + sell_gas) * max_fee:
         raise RuntimeError("native balance cannot cover frozen approval + SELL fee ceilings")
 
-    # All external/read-only checks are complete before ledger continuity mutates.
-    # A prior failed prepare may have left exactly one SIMULATED zero-effect
-    # successor. Expire only that fully-proven pre-commitment action, then carry
-    # its unchanged inventory forward. Any signable/external residue was
-    # rejected above.
+    # Construct every fallible deterministic object in an isolated clone before
+    # recording the plan or carrying inventory in the real ledger.  A rerun
+    # never rebuilds from a changed market/clock: it consumes this exact plan.
+    if existing_prepare is None:
+        plan = _prospective_prepare_plan(
+            ledger=ledger, source_cycle_id=inventory_source_cycle_id, policy=policy,
+            session=session, verified=verified, live=live, risk_policy=risk_policy,
+            router_identity=router_identity, signer_nonce=signer_state.account_nonce,
+            approval_gas=approval_gas, sell_gas=sell_gas, max_fee=max_fee,
+            priority_fee=priority_fee, now=now,
+        )
+        prepare_record = runtime.record_prepare_plan(
+            operation_kind="INK_V0F_NATIVE_SELL", source_cycle_id=inventory_source_cycle_id,
+            successor_policy_id=policy.policy_id,
+            authority_policy_digest=authority.authority_policy_digest,
+            authority_receipt_id=receipt.receipt_id, plan=plan, now_epoch_s=now,
+        )
+    else:
+        plan = dict(existing_prepare.plan)
+        prepare_record = existing_prepare
+        request = plan.get("approval_request")
+        if not isinstance(request, dict):
+            raise RuntimeError("durable prepare approval request is missing")
+        approval_gas = int(request["gas_limit_ceiling"])
+        sell_gas = int(plan["envelope"]["gas_limit_ceiling"])
+        max_fee = int(request["max_fee_per_gas_ceiling"])
+        priority_fee = int(request["max_priority_fee_per_gas_ceiling"])
+
+    # The durable plan is now the recovery authority.  No later local failure
+    # can justify an expiry-gated successor or a second carry.
     if stale_partial_action_id is not None:
         ledger.transition(
             stale_partial_action_id,
@@ -679,43 +875,49 @@ def main() -> int:
             payload={"recovery": "abandon_failed_pre_sign_sell_prepare"},
         )
     ledger.admit_policy(policy)
-    successor_cycle_id = ledger.continue_inventory_into_successor_cycle(
-        inventory_source_cycle_id,
-        policy,
-        0,
-        now_epoch_s=now,
-    )
+    prepare_record = _advance_to_phase(runtime, prepare_record, "POLICY_ADMITTED", now=now)
+    successor_cycle_id = str(plan["cycle_id"])
+    cycle_row = ledger.connection.execute(
+        "SELECT policy_id FROM cycles WHERE cycle_id = ?", (successor_cycle_id,)
+    ).fetchone()
+    if cycle_row is None:
+        actual_cycle_id = ledger.continue_inventory_into_successor_cycle(
+            inventory_source_cycle_id, policy, 0, now_epoch_s=now,
+        )
+        if actual_cycle_id != successor_cycle_id:
+            raise RuntimeError("inventory carry produced another successor identity")
+    elif cycle_row["policy_id"] != policy.policy_id:
+        raise RuntimeError("durable successor cycle policy differs from plan")
+    prepare_record = _advance_to_phase(runtime, prepare_record, "INVENTORY_CARRIED", now=now)
     carried = ledger.inventory_atomic(successor_cycle_id)
     if carried != inventory:
         raise RuntimeError("successor cycle did not receive exact source inventory")
 
-    intent = build_intent(
-        policy,
-        successor_cycle_id,
-        policy.level("X1"),
-        now_epoch_s=now,
-        inventory_atomic=carried,
-    )
+    intent = build_intent(policy, successor_cycle_id, policy.level("X1"),
+                          now_epoch_s=session.started_at_epoch_s, inventory_atomic=carried)
     if intent.quote_exposure_atomic != 0 or intent.bounds.max_input_atomic != inventory:
         raise RuntimeError("successor X1 is not the exact full-inventory zero-exposure SELL")
-    ledger.create_intent(intent, now_epoch_s=now)
-    for target in (IntentState.TRIGGERED, IntentState.QUOTE_PINNED, IntentState.SIMULATED):
-        ledger.transition(intent.economic_action_id, target, now_epoch_s=now)
+    if not _persisted_intent_matches(ledger, intent):
+        ledger.create_intent(intent, now_epoch_s=now)
+    state = ledger.intent_state(intent.economic_action_id)
+    transitions = (IntentState.ARMED, IntentState.TRIGGERED, IntentState.QUOTE_PINNED, IntentState.SIMULATED)
+    while state in transitions and state is not IntentState.SIMULATED:
+        ledger.transition(intent.economic_action_id, transitions[transitions.index(state) + 1], now_epoch_s=now)
+        state = ledger.intent_state(intent.economic_action_id)
+    if state not in {IntentState.SIMULATED, IntentState.RESERVED}:
+        raise RuntimeError("durable intent state is not resumable")
+    prepare_record = _advance_to_phase(runtime, prepare_record, "INTENT_SIMULATED", now=now)
 
-    runtime = ExecutionRuntime(ledger)
     runtime.record_verified_authority(verified, accepted_at_epoch_s=now)
     runtime.create_execution_session(session, verified, now_epoch_s=now)
-    runtime.reserve_action(
-        intent.economic_action_id,
-        session=session,
-        verified_grant=verified,
-        now_epoch_s=now,
-    )
+    if ledger.intent_state(intent.economic_action_id) is IntentState.SIMULATED:
+        runtime.reserve_action(intent.economic_action_id, session=session, verified_grant=verified, now_epoch_s=now)
     if ledger.connection.execute(
         "SELECT COUNT(*) FROM budget_reservations WHERE economic_action_id = ?",
         (intent.economic_action_id,),
     ).fetchone()[0] != 0:
         raise RuntimeError("zero-exposure SELL unexpectedly created a budget reservation")
+    prepare_record = _advance_to_phase(runtime, prepare_record, "SESSION_RECORDED", now=now)
 
     approval, envelope = runtime.record_ink_v0f_native_sell_preauth_bundle(
         live_verifier=live,
@@ -728,9 +930,13 @@ def main() -> int:
         gas_limit_ceiling=sell_gas,
         max_fee_per_gas_ceiling=max_fee,
         max_priority_fee_per_gas_ceiling=priority_fee,
-        constructed_at_epoch_s=now,
+        constructed_at_epoch_s=session.started_at_epoch_s,
         now_epoch_s=now,
+        frozen_approval=ApprovalActionV0(**plan["approval"]),
+        frozen_envelope=ExecutionEnvelopeV0(**plan["envelope"]),
+        frozen_prepare_id=prepare_record.prepare_id,
     )
+    prepare_record = _advance_to_phase(runtime, prepare_record, "PREAUTH_RECORDED", now=now)
     if envelope.account_nonce != signer_state.account_nonce + 1:
         raise RuntimeError("SELL nonce is not exactly one after approval nonce")
     if envelope.max_input_atomic != inventory:
@@ -744,7 +950,7 @@ def main() -> int:
         gas_limit_ceiling=approval_gas,
         max_fee_per_gas_ceiling=max_fee,
         max_priority_fee_per_gas_ceiling=priority_fee,
-        constructed_at_epoch_s=now,
+        constructed_at_epoch_s=session.started_at_epoch_s,
     )
     sell_calldata = encode_swap_exact_tokens_for_eth(
         amount_in_atomic=envelope.max_input_atomic,
@@ -775,7 +981,7 @@ def main() -> int:
         "authority_root": str(authority_root),
         "receipt": str(receipt_path),
         "ledger": str(ledger_path),
-        "prepared_at_epoch_s": now,
+        "prepared_at_epoch_s": session.started_at_epoch_s,
         "source_cycle_id": inventory_source_cycle_id,
         "cycle_id": successor_cycle_id,
         "policy_doc": policy_doc,
@@ -793,7 +999,13 @@ def main() -> int:
         "expected_inventory_atomic": str(inventory),
         "buy_transaction_hash": EXPECTED_BUY_TX_HASH,
     }
-    _write_durable_state(state_path, state)
+    if state_path.exists():
+        existing_sidecar = _prepared_state(state_path)
+        if canonical_json_str(dict(existing_sidecar)) != canonical_json_str(state):
+            raise RuntimeError("prepared sidecar differs from durable ledger plan")
+    else:
+        _write_durable_state(state_path, state)
+    _advance_to_phase(runtime, prepare_record, "PREPARED", now=now)
 
     result = {
         "schema": "qntyspot.ops.ink_v0f_native_sell_roundtrip.signing_requests.v0",
