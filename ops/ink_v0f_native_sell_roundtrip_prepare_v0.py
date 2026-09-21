@@ -304,6 +304,59 @@ def _load_existing_prepare(
     return record
 
 
+
+def _assert_no_signed_prepare_residue(ledger, plan: object) -> None:
+    """A signed prepare has crossed into the execution/observation lane.
+
+    The resumable prepare state machine is allowed to reconstruct unsigned
+    deterministic material, but it must never re-emit signing requests after
+    either the approval or SELL action has durable signed-transaction state.
+    """
+    if not isinstance(plan, dict):
+        raise RuntimeError("durable prepare plan is malformed")
+    approval = plan.get("approval")
+    envelope = plan.get("envelope")
+    if not isinstance(approval, dict) or not isinstance(envelope, dict):
+        raise RuntimeError("durable prepare signed-state identities are missing")
+    approval_action_id = approval.get("approval_action_id")
+    economic_action_id = envelope.get("economic_action_id")
+    if (
+        not isinstance(approval_action_id, str)
+        or not approval_action_id
+        or not isinstance(economic_action_id, str)
+        or not economic_action_id
+    ):
+        raise RuntimeError("durable prepare signed-state identities are invalid")
+
+    signed_rows = ledger.connection.execute(
+        """
+        SELECT external_action_id
+          FROM signed_transactions
+         WHERE external_action_id IN (?, ?)
+        """,
+        (approval_action_id, economic_action_id),
+    ).fetchall()
+    if signed_rows:
+        raise RuntimeError(
+            "durable signed transaction exists; prepare cannot re-emit signing requests"
+        )
+
+    submission_rows = ledger.connection.execute(
+        """
+        SELECT st.submission_attempt_id
+          FROM submission_attempts AS st
+          JOIN signed_transactions AS sx
+            ON sx.signed_transaction_id = st.signed_transaction_id
+         WHERE sx.external_action_id IN (?, ?)
+        """,
+        (approval_action_id, economic_action_id),
+    ).fetchall()
+    if submission_rows:
+        raise RuntimeError(
+            "durable submission guard exists; prepare is no longer resumable"
+        )
+
+
 def _recoverable_inventory_source(
     ledger,
     *,
@@ -810,6 +863,7 @@ def main() -> int:
             ledger, first_buy_cycle_id=first_buy_cycle_id, now=now,
         )
     else:
+        _assert_no_signed_prepare_residue(ledger, existing_prepare.plan)
         inventory_source_cycle_id = existing_prepare.source_cycle_id
         stale_partial_action_id = None
     inventory = (
