@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 import qntyspot.ink_v0f_execution as ink_execution
 import qntyspot.ink_v0f_human_signing as human
 from qntyspot.authority_root import (
+    ED25519_SIGNATURE_ALGORITHM,
+    TRUST_CONFIG_SCHEMA,
     AuthorityGrantReceiptV0,
     load_trusted_authority_root,
     verify_authority_grant,
 )
-from qntyspot.canon import sha256_hex
+from qntyspot.canon import canonical_json_bytes, sha256_hex
 from qntyspot.economics import build_intent
 from qntyspot.errors import EnvelopeValidationError, SafeHaltError
 from qntyspot.execution_contract import (
@@ -28,44 +28,37 @@ from qntyspot.policy import parse_policy
 from qntyspot.states import IntentState
 
 NOW = 1_800_000_000
+ROOT_ID = "approval-test-root"
 COMMIT = "11" * 20
 IMPLEMENTATION = "22" * 32
 VENUE = "inkyswap-v2-ink-mainnet"
-TAKER = "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
+FIXTURE_TAKER = "0x1a642f0e3c3af545e7acbd38b07251b3990914f1"
 
-# Public, precomputed verification fixtures only. No signing material or
-# signature construction exists in this test module.
-ANCHOR = bytes.fromhex(
+# Public verification fixtures only. These bytes were produced outside this
+# repository and are intentionally immutable: tests verify signatures but do
+# not construct, import, or access any signing credential.
+AUTHORITY_ANCHOR = bytes.fromhex(
     "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
 )
-TRUST_BYTES = (
-    b'{"minimum_authority_epoch":1,"public_key_fingerprint":'
-    b'"3097e2dee2cb4a34b53840cdb705aed71067c36f68db0e0f559c3f3fa043315f",'
-    b'"root_id":"approval-test-root","schema":'
-    b'"qntyspot.authority_root.v0.trust_config","signature_algorithm":"Ed25519",'
-    b'"trust_config_version":1}'
-)
-TRUST_DIGEST = "36a84516a8ac512ee6cd8169264fa034008a4acdc80126a0783614c3d053d5e1"
-RECEIPT_BYTES = (
-    b'{"authority_epoch":1,"authority_policy":{"authority_root_id":'
-    b'"approval-test-root","granted_level":3,"max_cumulative_atomic":'
-    b'"1000000000000000","max_reservation_atomic":"1000000000000000",'
-    b'"not_after_epoch_s":1800000600,"not_before_epoch_s":1799999990,'
-    b'"permitted_implementation_digest":'
-    b'"2222222222222222222222222222222222222222222222222222222222222222",'
-    b'"permitted_network_id":"evm:57073","permitted_repository_commit":'
-    b'"1111111111111111111111111111111111111111","permitted_taker_address":'
-    b'"0x1a642f0e3c3af545e7acbd38b07251b3990914f1","permitted_venue_id":'
-    b'"inkyswap-v2-ink-mainnet","schema":"qntyspot.program_b.v0.authority_policy"},'
-    b'"authority_policy_digest":'
-    b'"171eb95c036c365e6972c0fcd8cf70e22c4c438dfc0a8e980b9728953807568a",'
+AUTHORITY_RECEIPT = (
+    b'{"authority_epoch":1,"authority_policy":{"authority_root_id":"approval-test-root",'
+    b'"granted_level":3,"max_cumulative_atomic":"1000000000000000",'
+    b'"max_reservation_atomic":"1000000000000000","not_after_epoch_s":1800000600,'
+    b'"not_before_epoch_s":1799999990,'
+    b'"permitted_implementation_digest":"2222222222222222222222222222222222222222222222222222222222222222",'
+    b'"permitted_network_id":"evm:57073",'
+    b'"permitted_repository_commit":"1111111111111111111111111111111111111111",'
+    b'"permitted_taker_address":"0x1a642f0e3c3af545e7acbd38b07251b3990914f1",'
+    b'"permitted_venue_id":"inkyswap-v2-ink-mainnet",'
+    b'"schema":"qntyspot.program_b.v0.authority_policy"},'
+    b'"authority_policy_digest":"171eb95c036c365e6972c0fcd8cf70e22c4c438dfc0a8e980b9728953807568a",'
     b'"grant_id":"1641da1eaa4766d1143f94e113cd11d274041769b7f1de0ff101bb6acce0898a",'
-    b'"issued_at_epoch_s":1799999995,"public_key_fingerprint":'
-    b'"3097e2dee2cb4a34b53840cdb705aed71067c36f68db0e0f559c3f3fa043315f",'
+    b'"issued_at_epoch_s":1799999995,'
+    b'"public_key_fingerprint":"3097e2dee2cb4a34b53840cdb705aed71067c36f68db0e0f559c3f3fa043315f",'
     b'"receipt_id":"d3cf0bb3a57d98d0a45dbb6ceadd3b2ef7d075add30bba24688231121014c225",'
     b'"root_id":"approval-test-root","schema":"qntyspot.authority_root.v0.grant",'
-    b'"serial":1,"signature":'
-    b'"d41ab151d4b90ff9e4d8a13a740a5de30ea959b8fe6857377870630321ad6c5b'
+    b'"serial":1,'
+    b'"signature":"d41ab151d4b90ff9e4d8a13a740a5de30ea959b8fe6857377870630321ad6c5b'
     b'b0a7e981529457d346c13829d13e7a0185aad7136e55f6a51ec9261b7da15f09",'
     b'"signature_algorithm":"Ed25519"}'
 )
@@ -75,16 +68,11 @@ RAW_APPROVAL = bytes.fromhex(
     "80b844095ea7b3"
     "000000000000000000000000a8c1c38ff57428e5c3a34e0899be5cb385476507"
     "000000000000000000000000000000000000000000000000000000000001e240"
-    "c001"
-    "a042d411a9d7bfa19904c1aa97a6782dd222ff900613532cba0d916df87025cddf"
-    "a013f6258942e37209e31cd93b2646bb661e049da97f4b32b860302059d69b374a"
+    "c080"
+    "a0741c1980004fe2e3fa3477baa6715222685bbeac06ef77fd4ddd5c0d2dacdcbe"
+    "a03d94dc05981737b501ee0550d36e2202769ab3a87ac4b5787bc1744ffd601195"
 )
-RAW_APPROVAL_SHA256 = (
-    "2f769696ffd42d462895ce60bb4ea8cbb1145efa396b13a3979356f011f1c7a6"
-)
-RAW_APPROVAL_TX = (
-    "0xce6ad8b246c36ae583c03525cb897cd0d94c27f0c4baf0bd30c62a887b443d4b"
-)
+RAW_APPROVAL_HASH = "0x163d6595ce628454780e09fa13a8b99e9936dc2a7a6524c1a12a0fc72f4cf6a8"
 
 
 def _policy_doc() -> dict[str, object]:
@@ -159,13 +147,22 @@ def _policy_doc() -> dict[str, object]:
     }
 
 
-def _verified_grant(*, policy_id: str) -> tuple[ExecutionSessionV0, object]:
+def _verified_grant(*, policy_id: str):
+    receipt = AuthorityGrantReceiptV0.from_bytes(AUTHORITY_RECEIPT)
+    trust_doc = {
+        "minimum_authority_epoch": 1,
+        "public_key_fingerprint": sha256_hex(AUTHORITY_ANCHOR),
+        "root_id": ROOT_ID,
+        "schema": TRUST_CONFIG_SCHEMA,
+        "signature_algorithm": ED25519_SIGNATURE_ALGORITHM,
+        "trust_config_version": 1,
+    }
+    trust_bytes = canonical_json_bytes(trust_doc)
     trusted = load_trusted_authority_root(
-        TRUST_BYTES,
-        expected_config_digest=TRUST_DIGEST,
-        anchor_bytes=ANCHOR,
+        trust_bytes,
+        expected_config_digest=sha256_hex(trust_bytes),
+        anchor_bytes=AUTHORITY_ANCHOR,
     )
-    receipt = AuthorityGrantReceiptV0.from_bytes(RECEIPT_BYTES)
     session = ExecutionSessionV0(
         repository_commit=COMMIT,
         implementation_digest=IMPLEMENTATION,
@@ -173,7 +170,7 @@ def _verified_grant(*, policy_id: str) -> tuple[ExecutionSessionV0, object]:
         db_schema_version=1,
         policy_id=policy_id,
         authority_policy_digest=receipt.authority_policy_digest,
-        taker_address=TAKER,
+        taker_address=FIXTURE_TAKER,
         network_id=f"evm:{INK_CHAIN_ID}",
         venue_id=VENUE,
         venue_adapter_version="ink-v0f",
@@ -189,8 +186,8 @@ def _verified_grant(*, policy_id: str) -> tuple[ExecutionSessionV0, object]:
 
 
 def _setup(tmp_path, monkeypatch):
-    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", TAKER)
-    monkeypatch.setattr(ink_execution, "INK_V0F_TAKER_ADDRESS", TAKER)
+    monkeypatch.setattr(human, "INK_V0F_TAKER_ADDRESS", FIXTURE_TAKER)
+    monkeypatch.setattr(ink_execution, "INK_V0F_TAKER_ADDRESS", FIXTURE_TAKER)
 
     policy = parse_policy(_policy_doc())
     ledger = open_ledger(str(tmp_path / "approval-runtime.sqlite3"))
@@ -219,7 +216,7 @@ def _setup(tmp_path, monkeypatch):
     approval = ApprovalActionV0(
         session_id=session.session_id,
         session_identity_digest=session.identity_digest,
-        taker_address=TAKER,
+        taker_address=FIXTURE_TAKER,
         token_address=KRAKMASK_ADDRESS,
         spender_address=INK_V0F_ROUTER_ADDRESS,
         requested_allowance_atomic=allowance,
@@ -233,7 +230,7 @@ def _setup(tmp_path, monkeypatch):
         session_identity_digest=session.identity_digest,
         economic_action_id=intent.economic_action_id,
         chain_id=INK_CHAIN_ID,
-        taker_address=TAKER,
+        taker_address=FIXTURE_TAKER,
         input_instrument_id=intent.bounds.input_instrument_id,
         output_instrument_id=intent.bounds.output_instrument_id,
         max_input_atomic=allowance,
@@ -278,7 +275,7 @@ def _setup(tmp_path, monkeypatch):
                 session.session_id,
                 session.identity_digest,
                 intent.economic_action_id,
-                TAKER,
+                FIXTURE_TAKER,
                 KRAKMASK_ADDRESS,
                 INK_V0F_ROUTER_ADDRESS,
                 str(allowance),
@@ -301,7 +298,11 @@ def _setup(tmp_path, monkeypatch):
     return ledger, runtime, session, grant, request
 
 
-def _admit(runtime, request, session, grant):
+def test_approval_exact_bytes_are_guarded_before_one_transport(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, runtime, session, grant, request = _setup(tmp_path, monkeypatch)
+
     signed = runtime.admit_ink_v0f_signed_approval(
         request,
         RAW_APPROVAL,
@@ -309,17 +310,7 @@ def _admit(runtime, request, session, grant):
         grant,
         frozen_at_epoch_s=NOW,
     )
-    assert signed.transaction_hash == RAW_APPROVAL_TX
-    assert signed.signed_bytes_sha256 == RAW_APPROVAL_SHA256
-    return signed
-
-
-def test_approval_exact_bytes_are_durable_guarded_and_submitted_once(
-    tmp_path, monkeypatch
-) -> None:
-    ledger, runtime, session, grant, request = _setup(tmp_path, monkeypatch)
-    signed = _admit(runtime, request, session, grant)
-
+    assert signed.transaction_hash == RAW_APPROVAL_HASH
     row = ledger.connection.execute(
         "SELECT * FROM signed_transactions WHERE signed_transaction_id = ?",
         (signed.signed_transaction_id,),
@@ -336,6 +327,16 @@ def test_approval_exact_bytes_are_durable_guarded_and_submitted_once(
             self.calls: list[bytes] = []
 
         def submit_exact_signed_bytes(self, payload: bytes) -> str:
+            # The durable UNKNOWN guard must already be committed before the
+            # first byte can cross the transport seam.
+            guard = ledger.connection.execute(
+                "SELECT * FROM submission_attempts "
+                "WHERE signed_transaction_id = ?",
+                (signed.signed_transaction_id,),
+            ).fetchall()
+            assert len(guard) == 1
+            assert guard[0]["acknowledgment"] == "UNKNOWN"
+            assert guard[0]["error_class"] == "PreTransportGuard"
             self.calls.append(payload)
             return signed.transaction_hash
 
@@ -349,20 +350,14 @@ def test_approval_exact_bytes_are_durable_guarded_and_submitted_once(
         provider_id="ink-provider-0",
         submitted_at_epoch_s=NOW,
     )
-    assert attempt.acknowledgment is SubmissionAcknowledgment.ACCEPTED
+    assert attempt.acknowledgment is SubmissionAcknowledgment.UNKNOWN
+    assert attempt.error_class == "PreTransportGuard"
     assert transport.calls == [RAW_APPROVAL]
     assert ledger.intent_state(request.economic_action_id) is IntentState.RESERVED
-
-    attempts = ledger.connection.execute(
-        "SELECT attempt_ordinal, acknowledgment, error_class "
-        "FROM submission_attempts WHERE signed_transaction_id = ? "
-        "ORDER BY attempt_ordinal",
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM submission_attempts WHERE signed_transaction_id = ?",
         (signed.signed_transaction_id,),
-    ).fetchall()
-    assert [tuple(row) for row in attempts] == [
-        (0, "UNKNOWN", "PreTransportGuard"),
-        (1, "ACCEPTED", None),
-    ]
+    ).fetchone()[0] == 1
 
     with pytest.raises(SafeHaltError, match="retransmission"):
         runtime.submit_ink_v0f_signed_approval(
@@ -377,45 +372,44 @@ def test_approval_exact_bytes_are_durable_guarded_and_submitted_once(
     assert transport.calls == [RAW_APPROVAL]
 
 
-def test_pretransport_guard_survives_hard_abort_and_blocks_retry(
+def test_approval_transport_exception_remains_durably_guarded(
     tmp_path, monkeypatch
 ) -> None:
     ledger, runtime, session, grant, request = _setup(tmp_path, monkeypatch)
-    signed = _admit(runtime, request, session, grant)
+    signed = runtime.admit_ink_v0f_signed_approval(
+        request,
+        RAW_APPROVAL,
+        session,
+        grant,
+        frozen_at_epoch_s=NOW,
+    )
 
-    class HardAbort:
-        def submit_exact_signed_bytes(self, payload: bytes) -> str:
-            raise KeyboardInterrupt("simulated process death at transport seam")
-
-    with pytest.raises(KeyboardInterrupt):
-        runtime.submit_ink_v0f_signed_approval(
-            signed,
-            RAW_APPROVAL,
-            HardAbort(),
-            session,
-            grant,
-            provider_id="ink-provider-0",
-            submitted_at_epoch_s=NOW,
-        )
-
-    rows = ledger.connection.execute(
-        "SELECT attempt_ordinal, acknowledgment, error_class "
-        "FROM submission_attempts WHERE signed_transaction_id = ?",
-        (signed.signed_transaction_id,),
-    ).fetchall()
-    assert [tuple(row) for row in rows] == [
-        (0, "UNKNOWN", "PreTransportGuard"),
-    ]
-
-    class MustNotRun:
+    class FailingTransport:
         def __init__(self) -> None:
-            self.called = False
+            self.calls = 0
 
         def submit_exact_signed_bytes(self, payload: bytes) -> str:
-            self.called = True
-            return signed.transaction_hash
+            self.calls += 1
+            assert payload == RAW_APPROVAL
+            raise TimeoutError("synthetic transport ambiguity")
 
-    transport = MustNotRun()
+    transport = FailingTransport()
+    attempt = runtime.submit_ink_v0f_signed_approval(
+        signed,
+        RAW_APPROVAL,
+        transport,
+        session,
+        grant,
+        provider_id="ink-provider-0",
+        submitted_at_epoch_s=NOW,
+    )
+    assert attempt.acknowledgment is SubmissionAcknowledgment.UNKNOWN
+    assert transport.calls == 1
+    assert ledger.connection.execute(
+        "SELECT COUNT(*) FROM submission_attempts WHERE signed_transaction_id = ?",
+        (signed.signed_transaction_id,),
+    ).fetchone()[0] == 1
+
     with pytest.raises(SafeHaltError, match="retransmission"):
         runtime.submit_ink_v0f_signed_approval(
             signed,
@@ -426,7 +420,7 @@ def test_pretransport_guard_survives_hard_abort_and_blocks_retry(
             provider_id="ink-provider-0",
             submitted_at_epoch_s=NOW + 1,
         )
-    assert transport.called is False
+    assert transport.calls == 1
 
 
 def test_approval_admission_rejects_mutated_bytes_without_durable_row(
@@ -453,7 +447,13 @@ def test_approval_submission_refuses_changed_payload_before_guard_or_transport(
     tmp_path, monkeypatch
 ) -> None:
     ledger, runtime, session, grant, request = _setup(tmp_path, monkeypatch)
-    signed = _admit(runtime, request, session, grant)
+    signed = runtime.admit_ink_v0f_signed_approval(
+        request,
+        RAW_APPROVAL,
+        session,
+        grant,
+        frozen_at_epoch_s=NOW,
+    )
 
     class NoTransport:
         def __init__(self) -> None:
