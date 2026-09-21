@@ -124,7 +124,7 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
     except Exception as exc:
         raise RuntimeError("explicit QntySpot root is not a readable Git checkout") from exc
     if head != BOUND_REPOSITORY_COMMIT:
-        raise RuntimeError("QntySpot worktree is not the V8-bound canonical commit")
+        raise RuntimeError("QntySpot worktree is not the V9-bound canonical commit")
     if dirty.strip():
         raise RuntimeError("bound QntySpot worktree has tracked modifications")
     imported = Path(qntyspot.__file__).resolve()
@@ -153,7 +153,7 @@ def _assert_bound_qntyspot_root(root: Path) -> None:
         )
         identity = json.loads(output.read_text(encoding="utf-8"))
     if identity.get("implementation_digest") != BOUND_IMPLEMENTATION_DIGEST:
-        raise RuntimeError("recomputed implementation digest differs from V8 binding")
+        raise RuntimeError("recomputed implementation digest differs from V9 binding")
 
 
 def _prepared_state(path: Path) -> Mapping[str, Any]:
@@ -356,7 +356,7 @@ def _authority_proof(
         authority.permitted_repository_commit != BOUND_REPOSITORY_COMMIT
         or authority.permitted_implementation_digest != BOUND_IMPLEMENTATION_DIGEST
     ):
-        raise RuntimeError("receipt no longer authorizes the prepared V8 runtime")
+        raise RuntimeError("receipt no longer authorizes the prepared V9 runtime")
 
     trusted = load_trusted_authority_root(
         (authority_root / "public/trusted-authority-root-v0.json").read_bytes(),
