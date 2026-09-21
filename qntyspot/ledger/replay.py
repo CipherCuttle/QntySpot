@@ -30,7 +30,7 @@ from ..canon import canonical_json_str, strict_json_loads
 from ..domain import CycleStatus, ReservationStatus, RuntimeStateV0, Side
 from ..errors import LedgerError, ReplayDivergenceError
 from ..policy import parse_policy
-from ..states import IntentState, assert_legal_transition
+from ..states import TERMINAL_STATES, IntentState, assert_legal_transition
 from .atomics import decode_atomic, encode_atomic
 from .schema import CYCLE_EVENT_TYPES, EventType
 from .store import SpotLedger, open_ledger
@@ -164,6 +164,68 @@ def replay_into(
             )
 
 
+def _replayed_cycle_inventory_atomic(conn: sqlite3.Connection, cycle_id: str) -> int:
+    """Inventory visible from already-replayed facts before a new carry event."""
+    rows = conn.execute(
+        """
+        SELECT i.side, i.state,
+               COALESCE(atomic_sum(f.input_atomic_filled), '0') AS in_filled,
+               COALESCE(atomic_sum(f.output_atomic_filled), '0') AS out_filled
+          FROM intents AS i
+          LEFT JOIN fill_receipts AS f
+            ON f.economic_action_id = i.economic_action_id
+         WHERE i.cycle_id = ?
+         GROUP BY i.economic_action_id
+        """,
+        (cycle_id,),
+    ).fetchall()
+    base_in = base_out = 0
+    for row in rows:
+        if row["state"] != IntentState.FILLED.value:
+            continue
+        filled_in = decode_atomic(row["in_filled"], field="replay in_filled")
+        filled_out = decode_atomic(row["out_filled"], field="replay out_filled")
+        if row["side"] == Side.BUY.value:
+            base_in += filled_out
+        else:
+            base_out += filled_in
+
+    opening = conn.execute(
+        "SELECT payload_json FROM state_events "
+        "WHERE cycle_id = ? AND event_type = ? ORDER BY seq ASC LIMIT 1",
+        (cycle_id, EventType.CYCLE_OPENED.value),
+    ).fetchone()
+    _require(opening is not None, f"cycle {cycle_id} has no replayed opening event")
+    opening_payload = strict_json_loads(opening["payload_json"])
+    carry = opening_payload.get("inventory_carry")
+    carry_in = 0
+    if carry is not None:
+        _require(
+            isinstance(carry, dict) and set(carry) == {"amount_atomic", "source_cycle_id"},
+            f"cycle {cycle_id} has malformed replayed inventory carry",
+        )
+        carry_in = decode_atomic(
+            carry["amount_atomic"], field="replayed carried inventory in"
+        )
+
+    carry_out = 0
+    for event in conn.execute(
+        "SELECT payload_json FROM state_events "
+        "WHERE event_type = ? ORDER BY seq ASC",
+        (EventType.CYCLE_OPENED.value,),
+    ):
+        payload = strict_json_loads(event["payload_json"])
+        outgoing = payload.get("inventory_carry")
+        if (
+            isinstance(outgoing, dict)
+            and outgoing.get("source_cycle_id") == cycle_id
+        ):
+            carry_out += decode_atomic(
+                outgoing["amount_atomic"], field="replayed carried inventory out"
+            )
+    return carry_in + base_in - base_out - carry_out
+
+
 def _apply_cycle_event(
     conn: sqlite3.Connection,
     etype: str,
@@ -173,11 +235,97 @@ def _apply_cycle_event(
     seq: int,
 ) -> None:
     if etype == EventType.CYCLE_OPENED.value:
+        _require(
+            set(payload) in ({"cycle_index"}, {"cycle_index", "inventory_carry"}),
+            f"event {seq}: malformed cycle-open payload",
+        )
+        carry = payload.get("inventory_carry")
+        if carry is not None:
+            _require(
+                isinstance(carry, dict)
+                and set(carry) == {"amount_atomic", "source_cycle_id"},
+                f"event {seq}: malformed inventory carry payload",
+            )
+            source_cycle_id = carry["source_cycle_id"]
+            _require(
+                isinstance(source_cycle_id, str)
+                and source_cycle_id
+                and source_cycle_id != cycle_id,
+                f"event {seq}: invalid inventory carry source cycle",
+            )
+            amount = decode_atomic(
+                carry["amount_atomic"], field="replayed carried inventory"
+            )
+            _require(amount > 0, f"event {seq}: carried inventory must be positive")
+
+            source = conn.execute(
+                """
+                SELECT c.status, c.policy_id,
+                       p.instrument_id, p.quote_instrument_id, p.network_id
+                  FROM cycles AS c
+                  JOIN policies AS p ON p.policy_id = c.policy_id
+                 WHERE c.cycle_id = ?
+                """,
+                (source_cycle_id,),
+            ).fetchone()
+            _require(source is not None, f"event {seq}: carry source cycle is unknown")
+            _require(
+                source["status"] == CycleStatus.COMPLETED.value,
+                f"event {seq}: carry source cycle is not COMPLETED",
+            )
+            target_policy = conn.execute(
+                "SELECT instrument_id, quote_instrument_id, network_id "
+                "FROM policies WHERE policy_id = ?",
+                (policy_id,),
+            ).fetchone()
+            _require(target_policy is not None, f"event {seq}: target policy is unknown")
+            _require(
+                source["instrument_id"] == target_policy["instrument_id"]
+                and source["quote_instrument_id"] == target_policy["quote_instrument_id"]
+                and source["network_id"] == target_policy["network_id"],
+                f"event {seq}: inventory carry changes asset or network",
+            )
+
+            states = [
+                IntentState(row[0])
+                for row in conn.execute(
+                    "SELECT state FROM intents WHERE cycle_id = ?", (source_cycle_id,)
+                ).fetchall()
+            ]
+            _require(
+                all(
+                    state in TERMINAL_STATES and state is not IntentState.SAFE_HALT
+                    for state in states
+                ),
+                f"event {seq}: carry source has nonterminal or ambiguous intent",
+            )
+
+            for prior in conn.execute(
+                "SELECT payload_json FROM state_events "
+                "WHERE event_type = ? ORDER BY seq ASC",
+                (EventType.CYCLE_OPENED.value,),
+            ):
+                prior_payload = strict_json_loads(prior["payload_json"])
+                prior_carry = prior_payload.get("inventory_carry")
+                _require(
+                    not (
+                        isinstance(prior_carry, dict)
+                        and prior_carry.get("source_cycle_id") == source_cycle_id
+                    ),
+                    f"event {seq}: source cycle inventory was carried twice",
+                )
+
+            _require(
+                _replayed_cycle_inventory_atomic(conn, source_cycle_id) == amount,
+                f"event {seq}: carried amount differs from source inventory",
+            )
+
         conn.execute(
             "INSERT INTO cycles (cycle_id, policy_id, cycle_index, status) VALUES (?,?,?,?)",
             (cycle_id, policy_id, int(payload["cycle_index"]), CycleStatus.OPEN.value),
         )
         return
+    _require(payload == {}, f"event {seq}: terminal cycle event payload is not empty")
     status = (
         CycleStatus.COMPLETED
         if etype == EventType.CYCLE_COMPLETED.value
@@ -188,7 +336,6 @@ def _apply_cycle_event(
         (status.value, cycle_id, CycleStatus.OPEN.value),
     )
     _require(cur.rowcount == 1, f"event {seq}: cycle {cycle_id} was not open")
-
 
 def _apply_intent_created(
     conn: sqlite3.Connection, action_id: str, payload: Mapping[str, Any], seq: int

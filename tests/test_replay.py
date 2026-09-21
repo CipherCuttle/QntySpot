@@ -5,9 +5,10 @@ from __future__ import annotations
 import pytest
 
 from conftest import NOW, PATH_TO_FILLED, base_policy_doc, drive, full_receipt
+from qntyspot.canon import canonical_json_str, strict_json_loads
 from qntyspot.domain import CycleStatus, FillReceiptV0
 from qntyspot.economics import build_intent
-from qntyspot.errors import ReplayDivergenceError
+from qntyspot.errors import LedgerError, ReplayDivergenceError
 from qntyspot.ledger import assert_replay_equivalence, open_ledger, reconstruct
 from qntyspot.ledger.replay import replay_into
 from qntyspot.policy import parse_policy
@@ -248,4 +249,239 @@ def test_replay_preserves_the_safe_halt_produced_by_an_out_of_bounds_fill() -> N
     # capital is quarantined rather than handed back to the pool.
     assert ledger.held_atomic() == intent.bounds.max_input_atomic
     ledger.integrity_check()
+    assert_replay_equivalence(ledger)
+
+
+def _filled_entry_with_successor():
+    source_policy = parse_policy(base_policy_doc())
+    ledger = open_ledger()
+    ledger.admit_policy(source_policy)
+    source_cycle = ledger.open_cycle(source_policy, 0, now_epoch_s=NOW)
+    entry = build_intent(
+        source_policy,
+        source_cycle,
+        source_policy.level("E1"),
+        now_epoch_s=NOW,
+    )
+    ledger.create_intent(entry, now_epoch_s=NOW)
+    drive(ledger, entry.economic_action_id, *PATH_TO_FILLED)
+    ledger.append_fill_receipt(
+        full_receipt(entry, ref="0xcarry-source"), now_epoch_s=NOW
+    )
+    drive(ledger, entry.economic_action_id, S.RECONCILED, S.FILLED)
+    source_inventory = ledger.inventory_atomic(source_cycle)
+    assert source_inventory > 0
+
+    successor_doc = base_policy_doc()
+    successor_doc["policy_name"] = "fixture-buy-renewed"
+    successor_doc["timing"] = {
+        "valid_from_epoch_s": NOW - 5,
+        "expiry_epoch_s": NOW + 10_000,
+        "quote_ttl_s": 300,
+    }
+    successor_policy = parse_policy(successor_doc)
+    assert successor_policy.policy_id != source_policy.policy_id
+    ledger.admit_policy(successor_policy)
+    return (
+        ledger,
+        source_policy,
+        source_cycle,
+        successor_policy,
+        source_inventory,
+    )
+
+
+def test_inventory_continuity_moves_exact_settled_inventory_and_replays() -> None:
+    (
+        ledger,
+        source_policy,
+        source_cycle,
+        successor_policy,
+        source_inventory,
+    ) = _filled_entry_with_successor()
+
+    successor_cycle = ledger.continue_inventory_into_successor_cycle(
+        source_cycle,
+        successor_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+
+    source_projection = ledger.cycle_projection(source_cycle)
+    target_projection = ledger.cycle_projection(successor_cycle)
+    assert source_projection["status"] == CycleStatus.COMPLETED.value
+    assert int(source_projection["filled_base_inventory_atomic"]) == 0
+    assert int(source_projection["carried_base_inventory_out_atomic"]) == source_inventory
+    assert int(target_projection["filled_base_inventory_atomic"]) == source_inventory
+    assert int(target_projection["carried_base_inventory_in_atomic"]) == source_inventory
+    assert int(target_projection["carried_base_inventory_out_atomic"]) == 0
+
+    exit_intent = build_intent(
+        successor_policy,
+        successor_cycle,
+        successor_policy.level("X1"),
+        now_epoch_s=NOW,
+        inventory_atomic=ledger.inventory_atomic(successor_cycle),
+    )
+    ledger.create_intent(exit_intent, now_epoch_s=NOW)
+    assert exit_intent.bounds.max_input_atomic == source_inventory // 2
+
+    assert_replay_equivalence(ledger)
+
+
+def test_inventory_continuity_refuses_second_carry_from_same_source() -> None:
+    ledger, _, source_cycle, successor_policy, _ = _filled_entry_with_successor()
+    ledger.continue_inventory_into_successor_cycle(
+        source_cycle,
+        successor_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+
+    second_doc = base_policy_doc()
+    second_doc["policy_name"] = "fixture-buy-renewed-again"
+    second_doc["timing"] = {
+        "valid_from_epoch_s": NOW - 5,
+        "expiry_epoch_s": NOW + 20_000,
+        "quote_ttl_s": 300,
+    }
+    second_policy = parse_policy(second_doc)
+    ledger.admit_policy(second_policy)
+    with pytest.raises(LedgerError, match="already COMPLETED|already continued"):
+        ledger.continue_inventory_into_successor_cycle(
+            source_cycle,
+            second_policy,
+            0,
+            now_epoch_s=NOW,
+        )
+
+
+def test_inventory_continuity_refuses_asset_or_network_change() -> None:
+    ledger, _, source_cycle, _, _ = _filled_entry_with_successor()
+    mismatch_doc = base_policy_doc()
+    mismatch_doc["policy_name"] = "different-base"
+    mismatch_doc["base"]["ref"]["contract_address"] = (
+        "0xc0ffee00000000000000000000000000000000aa"
+    )
+    mismatch_doc["timing"] = {
+        "valid_from_epoch_s": NOW - 5,
+        "expiry_epoch_s": NOW + 10_000,
+        "quote_ttl_s": 300,
+    }
+    mismatch = parse_policy(mismatch_doc)
+    ledger.admit_policy(mismatch)
+
+    with pytest.raises(LedgerError, match="asset or network"):
+        ledger.continue_inventory_into_successor_cycle(
+            source_cycle,
+            mismatch,
+            0,
+            now_epoch_s=NOW,
+        )
+
+
+def test_inventory_continuity_refuses_nonterminal_or_ambiguous_source() -> None:
+    source_policy = parse_policy(base_policy_doc())
+    ledger = open_ledger()
+    ledger.admit_policy(source_policy)
+    source_cycle = ledger.open_cycle(source_policy, 0, now_epoch_s=NOW)
+    entry = build_intent(
+        source_policy,
+        source_cycle,
+        source_policy.level("E1"),
+        now_epoch_s=NOW,
+    )
+    ledger.create_intent(entry, now_epoch_s=NOW)
+
+    successor_doc = base_policy_doc()
+    successor_doc["policy_name"] = "continuation-target"
+    successor_doc["timing"] = {
+        "valid_from_epoch_s": NOW - 5,
+        "expiry_epoch_s": NOW + 10_000,
+        "quote_ttl_s": 300,
+    }
+    successor = parse_policy(successor_doc)
+    ledger.admit_policy(successor)
+
+    with pytest.raises(LedgerError, match="nonterminal or ambiguous"):
+        ledger.continue_inventory_into_successor_cycle(
+            source_cycle,
+            successor,
+            0,
+            now_epoch_s=NOW,
+        )
+
+    ledger.transition(entry.economic_action_id, S.SAFE_HALT, now_epoch_s=NOW)
+    with pytest.raises(LedgerError, match="nonterminal or ambiguous"):
+        ledger.continue_inventory_into_successor_cycle(
+            source_cycle,
+            successor,
+            0,
+            now_epoch_s=NOW,
+        )
+
+
+def test_replay_rejects_tampered_inventory_carry_amount() -> None:
+    ledger, _, source_cycle, successor_policy, source_inventory = (
+        _filled_entry_with_successor()
+    )
+    successor_cycle = ledger.continue_inventory_into_successor_cycle(
+        source_cycle,
+        successor_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+    events = [dict(event) for event in ledger.events()]
+    opening = next(
+        event
+        for event in events
+        if event["cycle_id"] == successor_cycle
+        and event["event_type"] == "CYCLE_OPENED"
+    )
+    payload = strict_json_loads(opening["payload_json"])
+    payload["inventory_carry"]["amount_atomic"] = str(source_inventory + 1)
+    opening["payload_json"] = canonical_json_str(payload)
+
+    with open_ledger() as target:
+        with pytest.raises(
+            ReplayDivergenceError,
+            match="carried amount differs from source inventory",
+        ):
+            replay_into(
+                target,
+                canonical_policies=ledger.canonical_policies(),
+                events=events,
+            )
+
+
+def test_inventory_continuity_can_chain_through_an_empty_successor_cycle() -> None:
+    ledger, _, source_cycle, successor_policy, source_inventory = (
+        _filled_entry_with_successor()
+    )
+    middle_cycle = ledger.continue_inventory_into_successor_cycle(
+        source_cycle,
+        successor_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+    assert ledger.inventory_atomic(middle_cycle) == source_inventory
+
+    final_doc = base_policy_doc()
+    final_doc["policy_name"] = "fixture-buy-final-renewal"
+    final_doc["timing"] = {
+        "valid_from_epoch_s": NOW - 5,
+        "expiry_epoch_s": NOW + 30_000,
+        "quote_ttl_s": 300,
+    }
+    final_policy = parse_policy(final_doc)
+    ledger.admit_policy(final_policy)
+    final_cycle = ledger.continue_inventory_into_successor_cycle(
+        middle_cycle,
+        final_policy,
+        0,
+        now_epoch_s=NOW,
+    )
+
+    assert ledger.inventory_atomic(middle_cycle) == 0
+    assert ledger.inventory_atomic(final_cycle) == source_inventory
     assert_replay_equivalence(ledger)

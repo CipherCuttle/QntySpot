@@ -54,7 +54,7 @@ from ..errors import (
     LedgerError,
     SchemaVersionError,
 )
-from ..states import BUDGET_HOLDING_STATES, IntentState, assert_legal_transition
+from ..states import BUDGET_HOLDING_STATES, TERMINAL_STATES, IntentState, assert_legal_transition
 from .atomics import decode_atomic, encode_atomic
 from .schema import (
     SCHEMA_VERSION,
@@ -319,6 +319,191 @@ class SpotLedger:
                 now_epoch_s=now_epoch_s,
                 payload={},
             )
+
+    def continue_inventory_into_successor_cycle(
+        self,
+        source_cycle_id: str,
+        successor_policy: PolicyV0,
+        successor_cycle_index: int,
+        *,
+        now_epoch_s: int,
+    ) -> str:
+        """Atomically carry settled base inventory into a renewed policy cycle.
+
+        The source cycle is completed and the successor cycle is opened in the
+        same BEGIN IMMEDIATE transaction. No synthetic fill is created. The
+        successor CYCLE_OPENED event records the exact source cycle and carried
+        amount, and cycle_projection derives inventory from that immutable
+        event plus actual fills.
+
+        A source cycle can be carried at most once. Existing source intents
+        must all be terminal and none may be SAFE_HALT.
+        """
+
+        if type(successor_policy) is not PolicyV0:
+            raise LedgerError("successor_policy must be a parsed PolicyV0")
+        if (
+            not isinstance(successor_cycle_index, int)
+            or isinstance(successor_cycle_index, bool)
+            or successor_cycle_index < 0
+        ):
+            raise LedgerError("successor_cycle_index must be a non-negative int")
+        if successor_cycle_index >= successor_policy.max_cycles:
+            raise LedgerError(
+                f"cycle_index {successor_cycle_index} exceeds policy max_cycles "
+                f"{successor_policy.max_cycles}"
+            )
+        if (
+            not isinstance(now_epoch_s, int)
+            or isinstance(now_epoch_s, bool)
+            or now_epoch_s < 0
+        ):
+            raise LedgerError("now_epoch_s must be a non-negative int")
+        if not (
+            successor_policy.valid_from_epoch_s
+            <= now_epoch_s
+            < successor_policy.expiry_epoch_s
+        ):
+            raise LedgerError("successor policy is not current at inventory continuation")
+
+        successor_cycle_id = cycle_id_for(
+            successor_policy.policy_id, successor_cycle_index
+        )
+        with self._write() as conn:
+            successor_row = conn.execute(
+                """
+                SELECT policy_id, instrument_id, quote_instrument_id, network_id,
+                       canonical_json
+                  FROM policies
+                 WHERE policy_id = ?
+                """,
+                (successor_policy.policy_id,),
+            ).fetchone()
+            if successor_row is None:
+                raise LedgerError(
+                    "successor policy must be admitted before inventory continuation"
+                )
+            if successor_row["canonical_json"] != canonical_json_str(
+                dict(successor_policy.canonical)
+            ):
+                raise LedgerError("stored successor policy differs from caller policy")
+
+            source = conn.execute(
+                """
+                SELECT c.policy_id, c.status,
+                       p.instrument_id, p.quote_instrument_id, p.network_id
+                  FROM cycles AS c
+                  JOIN policies AS p ON p.policy_id = c.policy_id
+                 WHERE c.cycle_id = ?
+                """,
+                (source_cycle_id,),
+            ).fetchone()
+            if source is None:
+                raise LedgerError(f"unknown source cycle {source_cycle_id}")
+            if source["status"] != CycleStatus.OPEN.value:
+                raise LedgerError(
+                    f"source cycle {source_cycle_id} is already {source['status']}"
+                )
+            if successor_cycle_id == source_cycle_id:
+                raise LedgerError("successor cycle must differ from source cycle")
+            if (
+                source["instrument_id"] != successor_row["instrument_id"]
+                or source["quote_instrument_id"]
+                != successor_row["quote_instrument_id"]
+                or source["network_id"] != successor_row["network_id"]
+            ):
+                raise LedgerError(
+                    "successor policy changes the carried inventory asset or network"
+                )
+            if conn.execute(
+                "SELECT 1 FROM cycles WHERE cycle_id = ?", (successor_cycle_id,)
+            ).fetchone():
+                raise LedgerError(f"cycle {successor_cycle_id} already exists")
+
+            states = [
+                IntentState(row[0])
+                for row in conn.execute(
+                    "SELECT state FROM intents WHERE cycle_id = ?", (source_cycle_id,)
+                ).fetchall()
+            ]
+            if any(
+                state not in TERMINAL_STATES or state is IntentState.SAFE_HALT
+                for state in states
+            ):
+                raise LedgerError(
+                    "source cycle has nonterminal or ambiguous intents"
+                )
+
+            for row in conn.execute(
+                "SELECT payload_json FROM state_events "
+                "WHERE event_type = ? ORDER BY seq ASC",
+                (EventType.CYCLE_OPENED.value,),
+            ):
+                payload = strict_json_loads(row["payload_json"])
+                carry = payload.get("inventory_carry")
+                if (
+                    isinstance(carry, dict)
+                    and carry.get("source_cycle_id") == source_cycle_id
+                ):
+                    raise LedgerError(
+                        f"source cycle {source_cycle_id} inventory was already continued"
+                    )
+
+            carried = self.inventory_atomic(source_cycle_id)
+            if carried <= 0:
+                raise LedgerError("source cycle has no positive settled inventory to carry")
+
+            cursor = conn.execute(
+                "UPDATE cycles SET status = ? "
+                "WHERE cycle_id = ? AND status = ?",
+                (
+                    CycleStatus.COMPLETED.value,
+                    source_cycle_id,
+                    CycleStatus.OPEN.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise LedgerError("source cycle completion lost a concurrent race")
+            self._append_event(
+                conn,
+                event_type=EventType.CYCLE_COMPLETED,
+                policy_id=source["policy_id"],
+                cycle_id=source_cycle_id,
+                economic_action_id=None,
+                from_state=CycleStatus.OPEN.value,
+                to_state=CycleStatus.COMPLETED.value,
+                now_epoch_s=now_epoch_s,
+                payload={},
+            )
+
+            conn.execute(
+                "INSERT INTO cycles (cycle_id, policy_id, cycle_index, status) "
+                "VALUES (?,?,?,?)",
+                (
+                    successor_cycle_id,
+                    successor_policy.policy_id,
+                    successor_cycle_index,
+                    CycleStatus.OPEN.value,
+                ),
+            )
+            self._append_event(
+                conn,
+                event_type=EventType.CYCLE_OPENED,
+                policy_id=successor_policy.policy_id,
+                cycle_id=successor_cycle_id,
+                economic_action_id=None,
+                from_state=None,
+                to_state=CycleStatus.OPEN.value,
+                now_epoch_s=now_epoch_s,
+                payload={
+                    "cycle_index": successor_cycle_index,
+                    "inventory_carry": {
+                        "amount_atomic": str(carried),
+                        "source_cycle_id": source_cycle_id,
+                    },
+                },
+            )
+        return successor_cycle_id
 
     # -- intents -----------------------------------------------------------
 
@@ -1125,6 +1310,42 @@ class SpotLedger:
         ).fetchone()
         if cycle is None:
             raise LedgerError(f"unknown cycle {cycle_id}")
+
+        opening = self._conn.execute(
+            "SELECT payload_json FROM state_events "
+            "WHERE cycle_id = ? AND event_type = ? ORDER BY seq ASC LIMIT 1",
+            (cycle_id, EventType.CYCLE_OPENED.value),
+        ).fetchone()
+        if opening is None:
+            raise LedgerError(f"cycle {cycle_id} has no opening event")
+        opening_payload = strict_json_loads(opening["payload_json"])
+        carry_in = 0
+        carry = opening_payload.get("inventory_carry")
+        if carry is not None:
+            if (
+                not isinstance(carry, dict)
+                or set(carry) != {"amount_atomic", "source_cycle_id"}
+            ):
+                raise LedgerError(f"cycle {cycle_id} has malformed inventory carry")
+            carry_in = decode_atomic(
+                carry["amount_atomic"], field="carried inventory in"
+            )
+
+        carry_out = 0
+        for event in self._conn.execute(
+            "SELECT payload_json FROM state_events "
+            "WHERE event_type = ? ORDER BY seq ASC",
+            (EventType.CYCLE_OPENED.value,),
+        ):
+            payload = strict_json_loads(event["payload_json"])
+            outgoing = payload.get("inventory_carry")
+            if (
+                isinstance(outgoing, dict)
+                and outgoing.get("source_cycle_id") == cycle_id
+            ):
+                carry_out += decode_atomic(
+                    outgoing["amount_atomic"], field="carried inventory out"
+                )
         levels = self._conn.execute(
             "SELECT level_id, kind FROM ladder_levels WHERE policy_id = ? "
             "ORDER BY kind ASC, level_index ASC",
@@ -1148,9 +1369,13 @@ class SpotLedger:
             "policy_id": cycle["policy_id"],
             "status": cycle["status"],
             "requires_reconciliation": halted,
-            "filled_base_inventory_atomic": str(base_in - base_out),
+            "filled_base_inventory_atomic": str(
+                carry_in + base_in - base_out - carry_out
+            ),
             "base_acquired_atomic": str(base_in),
             "base_disposed_atomic": str(base_out),
+            "carried_base_inventory_in_atomic": str(carry_in),
+            "carried_base_inventory_out_atomic": str(carry_out),
             "realized_quote_proceeds_atomic": str(quote_in),
             "quote_spent_atomic": str(quote_out),
             "held_quote_atomic": str(self.held_atomic()),
