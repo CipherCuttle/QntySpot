@@ -214,26 +214,15 @@ def _recoverable_inventory_source(
     first_buy_cycle_id: str,
     now: int,
 ) -> tuple[str, str | None]:
-    """Find the exact inventory-bearing cycle after a failed pre-sign prepare.
+    """Find the unique inventory-bearing cycle after zero-effect prepare crashes.
 
-    The only recoverable non-pristine shape is the one produced by this helper
-    when it carried the BUY inventory, created one zero-exposure SELL intent,
-    reached SIMULATED, and then failed before authority/session/preauth state.
-    No external or signable state may exist.
+    Recovery may walk multiple inventory-carry hops, but every post-BUY hop must
+    remain provably pre-sign/pre-transport: exact inventory, expired policy,
+    at most one zero-exposure SELL intent in SIMULATED/EXPIRED, no execution
+    session, and no persisted reservation/approval/envelope/external/signed
+    state. The first OPEN hop is the only admissible recovery source.
     """
 
-    source = ledger.connection.execute(
-        "SELECT status FROM cycles WHERE cycle_id = ?",
-        (first_buy_cycle_id,),
-    ).fetchone()
-    if source is None:
-        raise RuntimeError("first-live BUY cycle is missing")
-    if source["status"] == "OPEN":
-        return first_buy_cycle_id, None
-    if source["status"] != "COMPLETED":
-        raise RuntimeError("first-live BUY cycle has an unrecoverable status")
-
-    candidates: list[dict[str, object]] = []
     rows = ledger.connection.execute(
         """
         SELECT cycle_id, payload_json
@@ -242,99 +231,141 @@ def _recoverable_inventory_source(
          ORDER BY seq
         """
     ).fetchall()
+    successors: dict[str, list[dict[str, object]]] = {}
     for row in rows:
         payload = strict_json_loads(row["payload_json"])
         carry = payload.get("inventory_carry") if isinstance(payload, dict) else None
-        if (
-            isinstance(carry, dict)
-            and carry.get("source_cycle_id") == first_buy_cycle_id
-        ):
-            candidates.append(
-                {
-                    "cycle_id": str(row["cycle_id"]),
-                    "amount_atomic": carry.get("amount_atomic"),
-                }
-            )
-    if len(candidates) != 1:
-        raise RuntimeError(
-            "completed first-live BUY must have exactly one inventory-carry successor"
+        if not isinstance(carry, dict):
+            continue
+        source_cycle_id = carry.get("source_cycle_id")
+        if not isinstance(source_cycle_id, str):
+            raise RuntimeError("inventory-carry event has malformed source cycle id")
+        successors.setdefault(source_cycle_id, []).append(
+            {
+                "cycle_id": str(row["cycle_id"]),
+                "amount_atomic": carry.get("amount_atomic"),
+            }
         )
 
-    carried_cycle_id = str(candidates[0]["cycle_id"])
-    if candidates[0]["amount_atomic"] != str(EXPECTED_INVENTORY_ATOMIC):
-        raise RuntimeError("partial prepare carried an unexpected inventory amount")
+    current_cycle_id = first_buy_cycle_id
+    visited: set[str] = set()
+    first = True
 
-    carried_cycle = ledger.connection.execute(
-        """
-        SELECT c.status, c.policy_id, p.canonical_json
-          FROM cycles AS c
-          JOIN policies AS p ON p.policy_id = c.policy_id
-         WHERE c.cycle_id = ?
-        """,
-        (carried_cycle_id,),
-    ).fetchone()
-    if carried_cycle is None or carried_cycle["status"] != "OPEN":
-        raise RuntimeError("partial prepare successor cycle is not the unique OPEN inventory source")
-    if ledger.inventory_atomic(carried_cycle_id) != EXPECTED_INVENTORY_ATOMIC:
-        raise RuntimeError("partial prepare successor inventory differs from the first-live BUY")
+    while True:
+        if current_cycle_id in visited:
+            raise RuntimeError("inventory-carry history contains a cycle")
+        visited.add(current_cycle_id)
 
-    old_policy = strict_json_loads(carried_cycle["canonical_json"])
-    if not isinstance(old_policy, dict):
-        raise RuntimeError("partial prepare successor policy is malformed")
-    timing = old_policy.get("timing")
-    if (
-        not isinstance(timing, dict)
-        or type(timing.get("expiry_epoch_s")) is not int
-        or timing["expiry_epoch_s"] > now
-    ):
-        raise RuntimeError("partial prepare successor policy is not expired")
+        cycle = ledger.connection.execute(
+            """
+            SELECT c.status, c.policy_id, p.canonical_json
+              FROM cycles AS c
+              JOIN policies AS p ON p.policy_id = c.policy_id
+             WHERE c.cycle_id = ?
+            """,
+            (current_cycle_id,),
+        ).fetchone()
+        if cycle is None:
+            raise RuntimeError("inventory-carry history references a missing cycle")
+        status = str(cycle["status"])
+        if status not in {"OPEN", "COMPLETED"}:
+            raise RuntimeError("inventory-carry cycle has an unrecoverable status")
 
-    intents = ledger.connection.execute(
-        """
-        SELECT economic_action_id, state, side, quote_exposure_atomic
-          FROM intents
-         WHERE cycle_id = ?
-        """,
-        (carried_cycle_id,),
-    ).fetchall()
-    if len(intents) != 1:
-        raise RuntimeError("partial prepare successor does not contain exactly one intent")
-    intent = intents[0]
-    if (
-        intent["side"] != "SELL"
-        or int(intent["quote_exposure_atomic"]) != 0
-        or intent["state"] not in {IntentState.SIMULATED.value, IntentState.EXPIRED.value}
-    ):
-        raise RuntimeError("partial prepare successor intent is not safely abandonable")
+        stale_action_id: str | None = None
+        if not first:
+            if ledger.inventory_atomic(current_cycle_id) != EXPECTED_INVENTORY_ATOMIC:
+                raise RuntimeError(
+                    "partial prepare successor inventory differs from the first-live BUY"
+                )
 
-    action_id = str(intent["economic_action_id"])
-    count_checks = (
-        ("budget_reservations", "economic_action_id"),
-        ("approval_actions", "economic_action_id"),
-        ("execution_envelopes", "economic_action_id"),
-        ("external_actions", "economic_action_id"),
-        ("signed_transactions", "external_action_id"),
-    )
-    for table, column in count_checks:
-        count = ledger.connection.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",
-            (action_id,),
-        ).fetchone()[0]
-        if count != 0:
-            raise RuntimeError(
-                f"partial prepare has persisted {table}; automatic recovery is forbidden"
+            old_policy = strict_json_loads(cycle["canonical_json"])
+            if not isinstance(old_policy, dict):
+                raise RuntimeError("partial prepare successor policy is malformed")
+            timing = old_policy.get("timing")
+            if (
+                not isinstance(timing, dict)
+                or type(timing.get("expiry_epoch_s")) is not int
+                or timing["expiry_epoch_s"] > now
+            ):
+                raise RuntimeError("partial prepare successor policy is not expired")
+
+            session_count = ledger.connection.execute(
+                "SELECT COUNT(*) FROM execution_sessions WHERE policy_id = ?",
+                (cycle["policy_id"],),
+            ).fetchone()[0]
+            if session_count != 0:
+                raise RuntimeError("partial prepare already has an execution session")
+
+            intents = ledger.connection.execute(
+                """
+                SELECT economic_action_id, state, side, quote_exposure_atomic
+                  FROM intents
+                 WHERE cycle_id = ?
+                """,
+                (current_cycle_id,),
+            ).fetchall()
+            if len(intents) > 1:
+                raise RuntimeError(
+                    "partial prepare successor contains more than one intent"
+                )
+            if intents:
+                intent = intents[0]
+                if (
+                    intent["side"] != "SELL"
+                    or int(intent["quote_exposure_atomic"]) != 0
+                    or intent["state"]
+                    not in {
+                        IntentState.SIMULATED.value,
+                        IntentState.EXPIRED.value,
+                    }
+                ):
+                    raise RuntimeError(
+                        "partial prepare successor intent is not safely abandonable"
+                    )
+                action_id = str(intent["economic_action_id"])
+                for table, column in (
+                    ("budget_reservations", "economic_action_id"),
+                    ("approval_actions", "economic_action_id"),
+                    ("execution_envelopes", "economic_action_id"),
+                    ("external_actions", "economic_action_id"),
+                    ("signed_transactions", "external_action_id"),
+                ):
+                    count = ledger.connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",
+                        (action_id,),
+                    ).fetchone()[0]
+                    if count != 0:
+                        raise RuntimeError(
+                            f"partial prepare has persisted {table}; "
+                            "automatic recovery is forbidden"
+                        )
+                if intent["state"] == IntentState.SIMULATED.value:
+                    stale_action_id = action_id
+                    if status != "OPEN":
+                        raise RuntimeError(
+                            "SIMULATED partial prepare cannot already be completed"
+                        )
+
+        outgoing = successors.get(current_cycle_id, [])
+        if status == "OPEN":
+            if outgoing:
+                raise RuntimeError("OPEN inventory source already has a carry successor")
+            return current_cycle_id, stale_action_id
+
+        if len(outgoing) != 1:
+            description = (
+                "completed first-live BUY"
+                if first
+                else "completed partial prepare cycle"
             )
-    session_count = ledger.connection.execute(
-        "SELECT COUNT(*) FROM execution_sessions WHERE policy_id = ?",
-        (carried_cycle["policy_id"],),
-    ).fetchone()[0]
-    if session_count != 0:
-        raise RuntimeError("partial prepare already has an execution session")
+            raise RuntimeError(
+                f"{description} must have exactly one inventory-carry successor"
+            )
+        if outgoing[0]["amount_atomic"] != str(EXPECTED_INVENTORY_ATOMIC):
+            raise RuntimeError("partial prepare carried an unexpected inventory amount")
 
-    stale_action_id = (
-        action_id if intent["state"] == IntentState.SIMULATED.value else None
-    )
-    return carried_cycle_id, stale_action_id
+        current_cycle_id = str(outgoing[0]["cycle_id"])
+        first = False
 
 
 def _successor_policy_doc(
