@@ -17,6 +17,7 @@ HELPER = ROOT / "ops" / "ink_v0f_native_sell_roundtrip_prepare_v0.py"
 
 
 EXECUTE_HELPER = ROOT / "ops" / "ink_v0f_native_sell_roundtrip_execute_v0.py"
+DRIVER_HELPER = ROOT / "ops" / "ink_v0f_native_sell_roundtrip_driver_v0.py"
 
 
 def _helper():
@@ -35,6 +36,70 @@ def _execute_helper():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _driver_helper():
+    spec = importlib.util.spec_from_file_location(
+        "ink_v0f_native_sell_roundtrip_driver_ops", DRIVER_HELPER
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_driver_atomically_reuses_exact_committed_grant_and_refuses_drift(
+    tmp_path: Path,
+) -> None:
+    driver = _driver_helper()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    receipt = tmp_path / "receipt.json"
+    receipt.write_bytes(b'{"serial":9}\n')
+    state_path = run_dir / "state.json"
+    state = {
+        "schema": driver.SCHEMA,
+        "phase": "PREFLIGHT_COMPLETE",
+        "receipt_path": str(receipt),
+    }
+
+    committed = driver._commit_grant_snapshot(
+        run_dir,
+        receipt,
+        state_path,
+        state,
+    )
+    snapshot = run_dir / "grant.json"
+    assert snapshot.read_bytes() == receipt.read_bytes()
+    assert committed["phase"] == "GRANT_COMMITTED"
+    assert committed["grant_sha256"] == driver._sha256(receipt.read_bytes())
+    assert os.stat(snapshot).st_mode & 0o077 == 0
+
+    resumed = driver._commit_grant_snapshot(
+        run_dir,
+        receipt,
+        state_path,
+        committed,
+    )
+    assert resumed["grant_sha256"] == committed["grant_sha256"]
+
+    receipt.write_bytes(b'{"serial":10}\n')
+    with pytest.raises(driver.DriverSafeStop, match="differs"):
+        driver._commit_grant_snapshot(
+            run_dir,
+            receipt,
+            state_path,
+            committed,
+        )
+
+
+def test_driver_has_no_grant_issuance_or_transaction_execution_surface() -> None:
+    source = DRIVER_HELPER.read_text(encoding="utf-8")
+    assert "issue_" not in source
+    assert "private_key" not in source.lower()
+    assert "ink_v0f_native_sell_roundtrip_execute_v0.py" not in source
+    assert "--receipt" in source
+    assert "--run-dir" in source
 
 
 def test_sell_prepare_is_bound_to_v9_runtime_and_exact_first_buy() -> None:
