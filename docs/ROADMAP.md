@@ -24,6 +24,7 @@ cannot produce signatures, and production live capital remains unauthorized.
 ```
 DEFERRED_LATER:
 OpenSea / NFT execution adapter
+Leveraged perpetuals execution lane
 ```
 
 ## V0A — Offline core (merged prerequisite)
@@ -131,6 +132,43 @@ grant. A zero-money Level-3 rehearsal is required before any dust execution.
 Uses QntyLab's exploratory research tooling to inform ladder/policy parameter
 choices. QntyLab remains exploratory-only per its own governance; V1 does not
 grant it trading authority.
+
+## Deferred: leveraged perpetuals execution lane
+
+Not scheduled against a `V0*`/`V1` milestone and **not** a leverage flag on
+the current spot executor. This is a separate derivatives execution/risk lane
+that may reuse validated signal, liquidity, quote-freshness, policy, receipt,
+and reconciliation concepts only after they survive the spot evidence path.
+
+Earliest admissible sequence:
+
+```
+real-money spot evidence
+-> net-expectancy / slippage / adverse-selection / MAE-MFE review
+-> QntyLab leveraged-perp shadow replay
+-> isolated-margin low-leverage dust canary
+-> evidence-gated scaling, if separately authorized
+```
+
+The shadow lane must model at least collateral, long/short position state,
+leverage, mark/index/oracle semantics, maintenance margin and liquidation,
+funding, unrealized/realized PnL, reduce-only close behavior, partial
+liquidation, and venue-specific failure/reconciliation semantics. Initial live
+work, if ever separately authorized, should use isolated margin rather than
+cross margin so one position cannot consume unrelated wallet collateral.
+
+A future implementation must choose leverage from explicit volatility,
+liquidity, signal-quality and liquidation-distance constraints rather than
+assuming a fixed multiplier is beneficial. The initial canary target discussed
+for later evaluation is approximately 1.5-2x isolated leverage at dust size,
+not 5x/10x production exposure.
+
+Nothing in the current QntySpot spot roadmap, V0F authority, AuthorityRoot
+receipt lineage, or successful spot execution grants derivatives, margin,
+borrowing, shorting, perpetual-futures, signing, broadcast, or live-capital
+authority. Any leveraged execution requires its own contract, venue adapter,
+risk/accounting state, shadow evidence, hostile review, and fresh explicit
+authority.
 
 ## Deferred: OpenSea / NFT execution adapter
 
