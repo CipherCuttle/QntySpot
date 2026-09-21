@@ -273,11 +273,6 @@ def _recoverable_inventory_source(
 
         stale_action_id: str | None = None
         if not first:
-            if ledger.inventory_atomic(current_cycle_id) != EXPECTED_INVENTORY_ATOMIC:
-                raise RuntimeError(
-                    "partial prepare successor inventory differs from the first-live BUY"
-                )
-
             old_policy = strict_json_loads(cycle["canonical_json"])
             if not isinstance(old_policy, dict):
                 raise RuntimeError("partial prepare successor policy is malformed")
@@ -324,6 +319,7 @@ def _recoverable_inventory_source(
                     )
                 action_id = str(intent["economic_action_id"])
                 for table, column in (
+                    ("fill_receipts", "economic_action_id"),
                     ("budget_reservations", "economic_action_id"),
                     ("approval_actions", "economic_action_id"),
                     ("execution_envelopes", "economic_action_id"),
@@ -350,6 +346,10 @@ def _recoverable_inventory_source(
         if status == "OPEN":
             if outgoing:
                 raise RuntimeError("OPEN inventory source already has a carry successor")
+            if ledger.inventory_atomic(current_cycle_id) != EXPECTED_INVENTORY_ATOMIC:
+                raise RuntimeError(
+                    "OPEN recovery source inventory differs from the first-live BUY"
+                )
             return current_cycle_id, stale_action_id
 
         if len(outgoing) != 1:
@@ -363,6 +363,10 @@ def _recoverable_inventory_source(
             )
         if outgoing[0]["amount_atomic"] != str(EXPECTED_INVENTORY_ATOMIC):
             raise RuntimeError("partial prepare carried an unexpected inventory amount")
+        if not first and ledger.inventory_atomic(current_cycle_id) != 0:
+            raise RuntimeError(
+                "completed recovery hop retains inventory after exact outgoing carry"
+            )
 
         current_cycle_id = str(outgoing[0]["cycle_id"])
         first = False
