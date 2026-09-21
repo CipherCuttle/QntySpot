@@ -412,15 +412,18 @@ def _verify_receipt_shape(receipt: AuthorityGrantReceiptV0, *, now: int) -> None
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--qntyspot-root", required=True)
-    parser.add_argument("--authority-root", required=True)
-    parser.add_argument("--receipt", required=True)
+    parser.add_argument("--authority-root")
+    parser.add_argument("--receipt")
     parser.add_argument("--ledger", required=True)
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="run all pre-grant read-only ledger/chain checks and exit",
+    )
     args = parser.parse_args()
 
     now = int(time.time())
     qntyspot_root = Path(args.qntyspot_root).resolve()
-    authority_root = Path(args.authority_root).resolve()
-    receipt_path = Path(args.receipt).resolve()
     ledger_path = Path(args.ledger).resolve()
     state_path = _state_path(ledger_path)
 
@@ -428,7 +431,118 @@ def main() -> int:
     if not ledger_path.is_file() or ledger_path.stat().st_size == 0:
         raise RuntimeError("SELL prepare requires the existing non-empty first-live BUY ledger")
     if state_path.exists():
-        raise RuntimeError("SELL prepared state already exists; do not prepare twice")
+        raise RuntimeError("SELL prepared state already exists; resume it instead of preparing again")
+
+    if args.preflight_only:
+        router_identity = consume_ink_v0f_router_artifact(
+            (
+                qntyspot_root
+                / "artifacts/ink_v0f/INK_V0F_ROUTER_IDENTITY_V0.json"
+            ).read_bytes()
+        )
+        providers = tuple(JsonRpcClient(endpoint) for endpoint in INK_RPC_ENDPOINTS)
+        if len(providers) != 2:
+            raise RuntimeError("SELL preflight requires exactly two canonical Ink providers")
+        live = InkV0FLiveVerifier((providers[0], providers[1]), router_identity)
+
+        ledger = open_ledger(str(ledger_path))
+        first_buy_cycle_id, source_policy_id = _source_buy(ledger)
+        inventory_source_cycle_id, stale_partial_action_id = _recoverable_inventory_source(
+            ledger,
+            first_buy_cycle_id=first_buy_cycle_id,
+            now=now,
+        )
+        inventory = ledger.inventory_atomic(inventory_source_cycle_id)
+        if inventory != EXPECTED_INVENTORY_ATOMIC:
+            raise RuntimeError(
+                f"ledger inventory {inventory} differs from first-live BUY output "
+                f"{EXPECTED_INVENTORY_ATOMIC}"
+            )
+
+        market = live.observe_market()
+        live_balance = _observe_token_balance(live, common_block=market.common_block)
+        if live_balance != inventory:
+            raise RuntimeError(
+                f"two-provider wallet balance {live_balance} differs from ledger inventory {inventory}"
+            )
+        allowance = live.observe_allowance_for_market(
+            market,
+            token_address=KRAKMASK_ADDRESS,
+        )
+        if allowance.allowance_atomic != 0:
+            raise RuntimeError("KRAKMASK router allowance is not zero before SELL prepare")
+        signer_state = observe_ink_v0f_signer_state_for_market(live, market)
+        if signer_state.account_nonce != EXPECTED_APPROVAL_NONCE:
+            raise RuntimeError(
+                f"wallet nonce {signer_state.account_nonce} differs from expected first SELL nonce "
+                f"{EXPECTED_APPROVAL_NONCE}"
+            )
+
+        source_policy_row = ledger.connection.execute(
+            "SELECT canonical_json FROM policies WHERE policy_id = ?",
+            (source_policy_id,),
+        ).fetchone()
+        if source_policy_row is None:
+            raise RuntimeError("source BUY policy is missing from ledger")
+        source_doc = strict_json_loads(source_policy_row["canonical_json"])
+        if not isinstance(source_doc, dict):
+            raise RuntimeError("source policy canonical JSON is not an object")
+
+        priority_fee = max(
+            1_000_000,
+            min(100_000_000, signer_state.base_fee_per_gas // 10),
+        )
+        max_fee = max(
+            1_000_000_000,
+            signer_state.base_fee_per_gas * 3 + priority_fee,
+        )
+        approval_gas = 80_000
+        sell_gas = 300_000
+        native_balance = int(
+            providers[0].request(
+                "eth_getBalance",
+                [INK_V0F_TAKER_ADDRESS, hex(market.common_block)],
+            ),
+            16,
+        )
+        native_balance_b = int(
+            providers[1].request(
+                "eth_getBalance",
+                [INK_V0F_TAKER_ADDRESS, hex(market.common_block)],
+            ),
+            16,
+        )
+        if native_balance != native_balance_b:
+            raise RuntimeError("Ink providers disagree on native wallet balance")
+        fee_headroom = (approval_gas + sell_gas) * max_fee
+        if native_balance < fee_headroom:
+            raise RuntimeError("native balance cannot cover frozen approval + SELL fee ceilings")
+
+        print(
+            canonical_json_str(
+                {
+                    "schema": "qntyspot.ops.ink_v0f_native_sell_roundtrip.pregrant_preflight.v0",
+                    "status": "PRE_GRANT_PREFLIGHT_PASS",
+                    "checked_at_epoch_s": now,
+                    "first_buy_cycle_id": first_buy_cycle_id,
+                    "inventory_source_cycle_id": inventory_source_cycle_id,
+                    "stale_partial_action_id": stale_partial_action_id,
+                    "inventory_atomic": str(inventory),
+                    "common_block": market.common_block,
+                    "wallet_nonce": signer_state.account_nonce,
+                    "router_allowance_atomic": str(allowance.allowance_atomic),
+                    "native_balance_wei": str(native_balance),
+                    "fee_headroom_wei": str(fee_headroom),
+                }
+            )
+        )
+        return 0
+
+    if args.authority_root is None or args.receipt is None:
+        raise RuntimeError("--authority-root and --receipt are required outside --preflight-only")
+
+    authority_root = Path(args.authority_root).resolve()
+    receipt_path = Path(args.receipt).resolve()
     try:
         receipt_path.relative_to(authority_root)
     except ValueError as exc:
