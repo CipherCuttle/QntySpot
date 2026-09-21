@@ -366,7 +366,7 @@ def test_approval_exact_bytes_are_guarded_before_one_transport(
             transport,
             session,
             grant,
-            provider_id="ink-provider-0",
+            provider_id="ink-provider-1",
             submitted_at_epoch_s=NOW + 1,
         )
     assert transport.calls == [RAW_APPROVAL]
