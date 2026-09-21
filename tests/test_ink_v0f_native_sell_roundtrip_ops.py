@@ -290,6 +290,44 @@ def test_durable_prepare_resume_rejects_disconnected_or_ambiguous_source() -> No
         )
 
 
+
+def test_prepare_resume_rejects_existing_signed_transaction_residue() -> None:
+    helper = _helper()
+    plan = {
+        "approval": {"approval_action_id": "aa" * 32},
+        "envelope": {"economic_action_id": "bb" * 32},
+    }
+
+    class Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class Connection:
+        def __init__(self, signed_rows):
+            self.signed_rows = signed_rows
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(sql.split())
+            if "FROM signed_transactions" in normalized and "JOIN" not in normalized:
+                assert params == ("aa" * 32, "bb" * 32)
+                return Result(self.signed_rows)
+            if "FROM submission_attempts AS st" in normalized:
+                return Result([])
+            raise AssertionError((normalized, params))
+
+    clean = SimpleNamespace(connection=Connection([]))
+    helper._assert_no_signed_prepare_residue(clean, plan)
+
+    signed = SimpleNamespace(
+        connection=Connection([{"external_action_id": "aa" * 32}])
+    )
+    with pytest.raises(RuntimeError, match="signed transaction exists"):
+        helper._assert_no_signed_prepare_residue(signed, plan)
+
+
 def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sell() -> None:
     helper = _helper()
     action_id = "aa" * 32
