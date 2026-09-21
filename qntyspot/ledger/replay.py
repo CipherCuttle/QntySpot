@@ -292,7 +292,6 @@ def _apply_cycle_event(
                     "SELECT state FROM intents WHERE cycle_id = ?", (source_cycle_id,)
                 ).fetchall()
             ]
-            _require(states, f"event {seq}: carry source has no economic history")
             _require(
                 all(
                     state in TERMINAL_STATES and state is not IntentState.SAFE_HALT
