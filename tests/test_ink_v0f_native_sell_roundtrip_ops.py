@@ -33,7 +33,7 @@ def _execute_helper():
     return module
 
 
-def test_sell_prepare_is_bound_to_v8_and_exact_first_buy() -> None:
+def test_sell_prepare_is_bound_to_v9_runtime_and_exact_first_buy() -> None:
     helper = _helper()
     assert helper.BOUND_REPOSITORY_COMMIT == "91ec941d7e89fc44da0e4501b52f47fc65962020"
     assert helper.BOUND_IMPLEMENTATION_DIGEST == (
@@ -99,6 +99,125 @@ def test_successor_policy_refresh_changes_only_episode_identity_price_and_timing
         "quote_ttl_s": 600,
     }
     assert result["reentry"]["max_cycles"] == 1
+
+
+def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sell() -> None:
+    helper = _helper()
+    buy_cycle = "buy-cycle"
+    partial_cycle = "partial-cycle"
+    action_id = "aa" * 32
+
+    class Result:
+        def __init__(self, *, one=None, all_rows=None):
+            self._one = one
+            self._all = all_rows
+
+        def fetchone(self):
+            return self._one
+
+        def fetchall(self):
+            return self._all if self._all is not None else []
+
+    class Connection:
+        def __init__(self):
+            self.residue = {}
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(sql.split())
+            if normalized.startswith("SELECT status FROM cycles WHERE cycle_id"):
+                assert params == (buy_cycle,)
+                return Result(one={"status": "COMPLETED"})
+            if "FROM state_events" in normalized:
+                return Result(
+                    all_rows=[
+                        {
+                            "cycle_id": partial_cycle,
+                            "payload_json": helper.canonical_json_str(
+                                {
+                                    "inventory_carry": {
+                                        "amount_atomic": str(
+                                            helper.EXPECTED_INVENTORY_ATOMIC
+                                        ),
+                                        "source_cycle_id": buy_cycle,
+                                    }
+                                }
+                            ),
+                        }
+                    ]
+                )
+            if "FROM cycles AS c JOIN policies AS p" in normalized:
+                assert params == (partial_cycle,)
+                return Result(
+                    one={
+                        "status": "OPEN",
+                        "policy_id": "partial-policy",
+                        "canonical_json": helper.canonical_json_str(
+                            {"timing": {"expiry_epoch_s": 100}}
+                        ),
+                    }
+                )
+            if "FROM intents" in normalized and "WHERE cycle_id" in normalized:
+                assert params == (partial_cycle,)
+                return Result(
+                    all_rows=[
+                        {
+                            "economic_action_id": action_id,
+                            "state": helper.IntentState.SIMULATED.value,
+                            "side": "SELL",
+                            "quote_exposure_atomic": "0",
+                        }
+                    ]
+                )
+            if normalized.startswith("SELECT COUNT(*) FROM"):
+                table = normalized.split("FROM ", 1)[1].split(" ", 1)[0]
+                return Result(one=(self.residue.get(table, 0),))
+            raise AssertionError((normalized, params))
+
+    class Ledger:
+        def __init__(self):
+            self.connection = Connection()
+
+        def inventory_atomic(self, cycle_id):
+            assert cycle_id == partial_cycle
+            return helper.EXPECTED_INVENTORY_ATOMIC
+
+    ledger = Ledger()
+    recovered_cycle, stale_action = helper._recoverable_inventory_source(
+        ledger,
+        first_buy_cycle_id=buy_cycle,
+        now=200,
+    )
+    assert recovered_cycle == partial_cycle
+    assert stale_action == action_id
+
+    ledger.connection.residue["approval_actions"] = 1
+    with pytest.raises(RuntimeError, match="approval_actions"):
+        helper._recoverable_inventory_source(
+            ledger,
+            first_buy_cycle_id=buy_cycle,
+            now=200,
+        )
+
+
+def test_partial_prepare_recovery_leaves_pristine_open_buy_untouched() -> None:
+    helper = _helper()
+
+    class Result:
+        def fetchone(self):
+            return {"status": "OPEN"}
+
+    class Connection:
+        def execute(self, sql, params=()):
+            assert "SELECT status FROM cycles" in sql
+            assert params == ("buy-cycle",)
+            return Result()
+
+    ledger = SimpleNamespace(connection=Connection())
+    assert helper._recoverable_inventory_source(
+        ledger,
+        first_buy_cycle_id="buy-cycle",
+        now=200,
+    ) == ("buy-cycle", None)
 
 
 def test_prepared_state_is_private_durable_and_exclusive(tmp_path: Path) -> None:
