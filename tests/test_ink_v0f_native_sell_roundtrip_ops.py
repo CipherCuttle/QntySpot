@@ -101,11 +101,9 @@ def test_successor_policy_refresh_changes_only_episode_identity_price_and_timing
     assert result["reentry"]["max_cycles"] == 1
 
 
-def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sell() -> None:
-    helper = _helper()
-    buy_cycle = "buy-cycle"
-    partial_cycle = "partial-cycle"
-    action_id = "aa" * 32
+def _recovery_ledger(helper, *, cycles, carries, intents, residue=None, sessions=None):
+    residue = residue or {}
+    sessions = sessions or {}
 
     class Result:
         def __init__(self, *, one=None, all_rows=None):
@@ -119,58 +117,38 @@ def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sel
             return self._all if self._all is not None else []
 
     class Connection:
-        def __init__(self):
-            self.residue = {}
-
         def execute(self, sql, params=()):
             normalized = " ".join(sql.split())
-            if normalized.startswith("SELECT status FROM cycles WHERE cycle_id"):
-                assert params == (buy_cycle,)
-                return Result(one={"status": "COMPLETED"})
             if "FROM state_events" in normalized:
-                return Result(
-                    all_rows=[
-                        {
-                            "cycle_id": partial_cycle,
-                            "payload_json": helper.canonical_json_str(
-                                {
-                                    "inventory_carry": {
-                                        "amount_atomic": str(
-                                            helper.EXPECTED_INVENTORY_ATOMIC
-                                        ),
-                                        "source_cycle_id": buy_cycle,
-                                    }
+                rows = [
+                    {
+                        "cycle_id": child,
+                        "payload_json": helper.canonical_json_str(
+                            {
+                                "inventory_carry": {
+                                    "amount_atomic": str(amount),
+                                    "source_cycle_id": source,
                                 }
-                            ),
-                        }
-                    ]
-                )
-            if "FROM cycles AS c JOIN policies AS p" in normalized:
-                assert params == (partial_cycle,)
-                return Result(
-                    one={
-                        "status": "OPEN",
-                        "policy_id": "partial-policy",
-                        "canonical_json": helper.canonical_json_str(
-                            {"timing": {"expiry_epoch_s": 100}}
+                            }
                         ),
                     }
-                )
+                    for source, child, amount in carries
+                ]
+                return Result(all_rows=rows)
+            if "FROM cycles AS c JOIN policies AS p" in normalized:
+                cycle_id = params[0]
+                row = cycles.get(cycle_id)
+                return Result(one=row)
+            if normalized.startswith(
+                "SELECT COUNT(*) FROM execution_sessions WHERE policy_id"
+            ):
+                return Result(one=(sessions.get(params[0], 0),))
             if "FROM intents" in normalized and "WHERE cycle_id" in normalized:
-                assert params == (partial_cycle,)
-                return Result(
-                    all_rows=[
-                        {
-                            "economic_action_id": action_id,
-                            "state": helper.IntentState.SIMULATED.value,
-                            "side": "SELL",
-                            "quote_exposure_atomic": "0",
-                        }
-                    ]
-                )
+                return Result(all_rows=intents.get(params[0], []))
             if normalized.startswith("SELECT COUNT(*) FROM"):
                 table = normalized.split("FROM ", 1)[1].split(" ", 1)[0]
-                return Result(one=(self.residue.get(table, 0),))
+                action = params[0]
+                return Result(one=(residue.get((table, action), 0),))
             raise AssertionError((normalized, params))
 
     class Ledger:
@@ -178,41 +156,179 @@ def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sel
             self.connection = Connection()
 
         def inventory_atomic(self, cycle_id):
-            assert cycle_id == partial_cycle
+            assert cycle_id != "buy-cycle"
             return helper.EXPECTED_INVENTORY_ATOMIC
 
-    ledger = Ledger()
-    recovered_cycle, stale_action = helper._recoverable_inventory_source(
-        ledger,
-        first_buy_cycle_id=buy_cycle,
-        now=200,
-    )
-    assert recovered_cycle == partial_cycle
-    assert stale_action == action_id
+    return Ledger()
 
-    ledger.connection.residue["approval_actions"] = 1
+
+def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sell() -> None:
+    helper = _helper()
+    action_id = "aa" * 32
+    cycles = {
+        "buy-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "buy-policy",
+            "canonical_json": "{}",
+        },
+        "partial-cycle": {
+            "status": "OPEN",
+            "policy_id": "partial-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 100}}
+            ),
+        },
+    }
+    intents = {
+        "partial-cycle": [
+            {
+                "economic_action_id": action_id,
+                "state": helper.IntentState.SIMULATED.value,
+                "side": "SELL",
+                "quote_exposure_atomic": "0",
+            }
+        ]
+    }
+    ledger = _recovery_ledger(
+        helper,
+        cycles=cycles,
+        carries=[
+            (
+                "buy-cycle",
+                "partial-cycle",
+                helper.EXPECTED_INVENTORY_ATOMIC,
+            )
+        ],
+        intents=intents,
+    )
+    assert helper._recoverable_inventory_source(
+        ledger,
+        first_buy_cycle_id="buy-cycle",
+        now=200,
+    ) == ("partial-cycle", action_id)
+
+    ledger = _recovery_ledger(
+        helper,
+        cycles=cycles,
+        carries=[
+            (
+                "buy-cycle",
+                "partial-cycle",
+                helper.EXPECTED_INVENTORY_ATOMIC,
+            )
+        ],
+        intents=intents,
+        residue={("approval_actions", action_id): 1},
+    )
     with pytest.raises(RuntimeError, match="approval_actions"):
         helper._recoverable_inventory_source(
             ledger,
-            first_buy_cycle_id=buy_cycle,
+            first_buy_cycle_id="buy-cycle",
+            now=200,
+        )
+
+
+def test_partial_prepare_recovery_walks_repeated_zero_effect_carry_chain() -> None:
+    helper = _helper()
+    old_action = "bb" * 32
+    cycles = {
+        "buy-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "buy-policy",
+            "canonical_json": "{}",
+        },
+        "serial5-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "serial5-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 100}}
+            ),
+        },
+        "serial6-cycle": {
+            "status": "OPEN",
+            "policy_id": "serial6-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 150}}
+            ),
+        },
+    }
+    ledger = _recovery_ledger(
+        helper,
+        cycles=cycles,
+        carries=[
+            ("buy-cycle", "serial5-cycle", helper.EXPECTED_INVENTORY_ATOMIC),
+            ("serial5-cycle", "serial6-cycle", helper.EXPECTED_INVENTORY_ATOMIC),
+        ],
+        intents={
+            "serial5-cycle": [
+                {
+                    "economic_action_id": old_action,
+                    "state": helper.IntentState.EXPIRED.value,
+                    "side": "SELL",
+                    "quote_exposure_atomic": "0",
+                }
+            ],
+            "serial6-cycle": [],
+        },
+    )
+    assert helper._recoverable_inventory_source(
+        ledger,
+        first_buy_cycle_id="buy-cycle",
+        now=200,
+    ) == ("serial6-cycle", None)
+
+
+def test_partial_prepare_recovery_rejects_session_on_empty_open_hop() -> None:
+    helper = _helper()
+    cycles = {
+        "buy-cycle": {
+            "status": "COMPLETED",
+            "policy_id": "buy-policy",
+            "canonical_json": "{}",
+        },
+        "partial-cycle": {
+            "status": "OPEN",
+            "policy_id": "partial-policy",
+            "canonical_json": helper.canonical_json_str(
+                {"timing": {"expiry_epoch_s": 100}}
+            ),
+        },
+    }
+    ledger = _recovery_ledger(
+        helper,
+        cycles=cycles,
+        carries=[
+            (
+                "buy-cycle",
+                "partial-cycle",
+                helper.EXPECTED_INVENTORY_ATOMIC,
+            )
+        ],
+        intents={"partial-cycle": []},
+        sessions={"partial-policy": 1},
+    )
+    with pytest.raises(RuntimeError, match="execution session"):
+        helper._recoverable_inventory_source(
+            ledger,
+            first_buy_cycle_id="buy-cycle",
             now=200,
         )
 
 
 def test_partial_prepare_recovery_leaves_pristine_open_buy_untouched() -> None:
     helper = _helper()
-
-    class Result:
-        def fetchone(self):
-            return {"status": "OPEN"}
-
-    class Connection:
-        def execute(self, sql, params=()):
-            assert "SELECT status FROM cycles" in sql
-            assert params == ("buy-cycle",)
-            return Result()
-
-    ledger = SimpleNamespace(connection=Connection())
+    ledger = _recovery_ledger(
+        helper,
+        cycles={
+            "buy-cycle": {
+                "status": "OPEN",
+                "policy_id": "buy-policy",
+                "canonical_json": "{}",
+            }
+        },
+        carries=[],
+        intents={},
+    )
     assert helper._recoverable_inventory_source(
         ledger,
         first_buy_cycle_id="buy-cycle",
