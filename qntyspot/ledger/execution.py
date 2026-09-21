@@ -1288,13 +1288,22 @@ class ExecutionRuntime:
                 "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
                 (action_id,),
             ).fetchone()
-            if reservation is None:
-                raise LedgerError("exact-byte submission requires a durable reservation")
-            if reservation["status"] != ReservationStatus.ACTIVE.value:
-                raise SafeHaltError(
-                    "exact-byte submission requires an ACTIVE reservation, got "
-                    f"{reservation['status']}"
-                )
+            quote_exposure_atomic = int(intent["quote_exposure_atomic"])
+            if quote_exposure_atomic == 0:
+                if reservation is not None:
+                    raise LedgerError(
+                        "zero-exposure exact-byte submission must not fabricate a reservation"
+                    )
+            else:
+                if reservation is None:
+                    raise LedgerError(
+                        "capital-consuming exact-byte submission requires a durable reservation"
+                    )
+                if reservation["status"] != ReservationStatus.ACTIVE.value:
+                    raise SafeHaltError(
+                        "capital-consuming exact-byte submission requires an ACTIVE "
+                        f"reservation, got {reservation['status']}"
+                    )
             contradictory = conn.execute(
                 "SELECT 1 FROM reconciliations WHERE external_action_id = ? LIMIT 1",
                 (action_id,),
@@ -1319,7 +1328,7 @@ class ExecutionRuntime:
         evidence_max_age_s: int,
         recovery_timestamp_epoch_s: int,
     ) -> ExactBytesResumeResultV0:
-        """Lift one narrow SAFE_HALT shape back to SIGNED with an ACTIVE reservation.
+        """Lift one narrow SAFE_HALT shape back to SIGNED without changing exposure.
 
         Admissible only for an externally admitted byte string that was
         quarantined before its first transport attempt. The effect is atomic and
@@ -1331,7 +1340,7 @@ class ExecutionRuntime:
         deterministically.
 
         Gates, all mechanical and durable, in one transaction: intent
-        ``SAFE_HALT``; reservation ``QUARANTINED``; signed transaction exists
+        ``SAFE_HALT``; capital-consuming actions have reservation ``QUARANTINED`` while zero-exposure actions have none; signed transaction exists
         with origin ``EXTERNAL_SIGNED_BYTES`` and exact digest/hash/chain/
         taker/nonce; session, economic-action, and authority-policy bindings
         exact; ``submission_attempts`` (including UNKNOWN),
@@ -1426,13 +1435,22 @@ class ExecutionRuntime:
                 "SELECT status FROM budget_reservations WHERE economic_action_id = ?",
                 (economic_action_id,),
             ).fetchone()
-            if reservation is None:
-                raise LedgerError("resume requires a durable reservation")
-            if reservation["status"] != ReservationStatus.QUARANTINED.value:
-                raise LedgerError(
-                    "resume requires a QUARANTINED reservation, got "
-                    f"{reservation['status']}"
-                )
+            quote_exposure_atomic = int(intent["quote_exposure_atomic"])
+            if quote_exposure_atomic == 0:
+                if reservation is not None:
+                    raise LedgerError(
+                        "zero-exposure resume must not fabricate a budget reservation"
+                    )
+            else:
+                if reservation is None:
+                    raise LedgerError(
+                        "capital-consuming resume requires a durable reservation"
+                    )
+                if reservation["status"] != ReservationStatus.QUARANTINED.value:
+                    raise LedgerError(
+                        "capital-consuming resume requires a QUARANTINED reservation, got "
+                        f"{reservation['status']}"
+                    )
             external = conn.execute(
                 "SELECT kind, session_id FROM external_actions WHERE external_action_id = ?",
                 (economic_action_id,),
@@ -1554,7 +1572,11 @@ class ExecutionRuntime:
                 "economic_action_id": economic_action_id,
                 "evidence_max_age_s": evidence_max_age_s,
                 "prior_intent_state": IntentState.SAFE_HALT.value,
-                "prior_reservation_status": ReservationStatus.QUARANTINED.value,
+                "prior_reservation_status": (
+                    None
+                    if quote_exposure_atomic == 0
+                    else ReservationStatus.QUARANTINED.value
+                ),
                 "recovered_at_epoch_s": recovery_timestamp_epoch_s,
                 "recovery_type": ZERO_SUBMISSION_EXACT_BYTES_RESUME,
                 "session_id": session.session_id,
@@ -1583,17 +1605,20 @@ class ExecutionRuntime:
                     IntentState.SAFE_HALT.value,
                 ),
             )
-            cursor = conn.execute(
-                "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
-                "WHERE economic_action_id = ? AND status = ?",
-                (
-                    ReservationStatus.ACTIVE.value,
-                    economic_action_id,
-                    ReservationStatus.QUARANTINED.value,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise LedgerError("atomic resume failed to restore the reservation")
+            if quote_exposure_atomic > 0:
+                cursor = conn.execute(
+                    "UPDATE budget_reservations SET status = ?, settled_seq = NULL "
+                    "WHERE economic_action_id = ? AND status = ?",
+                    (
+                        ReservationStatus.ACTIVE.value,
+                        economic_action_id,
+                        ReservationStatus.QUARANTINED.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise LedgerError(
+                        "atomic resume failed to restore the reservation"
+                    )
             return ExactBytesResumeResultV0(
                 economic_action_id=economic_action_id,
                 signed_transaction_id=str(signed["signed_transaction_id"]),
