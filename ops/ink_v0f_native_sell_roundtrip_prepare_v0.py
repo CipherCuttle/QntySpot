@@ -357,6 +357,74 @@ def _assert_no_signed_prepare_residue(ledger, plan: object) -> None:
         )
 
 
+def _preflight_inventory_state(
+    ledger,
+    *,
+    first_buy_cycle_id: str,
+    now: int,
+) -> tuple[str, str | None, int]:
+    """Resolve inventory without expiry-gating an already durable prepare.
+
+    Historical ledgers without the resumable prepare schema continue through
+    the narrow legacy recovery path.  Once a durable prepare exists, preflight
+    must inspect that same episode instead of treating its active successor as
+    an abandoned prepare that needs to expire.
+    """
+    prepare_table = ledger.connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prepare_records'"
+    ).fetchone()
+    existing_prepare = None
+    if prepare_table is not None:
+        runtime = ExecutionRuntime(ledger)
+        existing_prepare = _load_existing_prepare(
+            runtime,
+            ledger,
+            first_buy_cycle_id=first_buy_cycle_id,
+        )
+
+    if existing_prepare is None:
+        source_cycle_id, stale_action_id = _recoverable_inventory_source(
+            ledger,
+            first_buy_cycle_id=first_buy_cycle_id,
+            now=now,
+        )
+        return (
+            source_cycle_id,
+            stale_action_id,
+            ledger.inventory_atomic(source_cycle_id),
+        )
+
+    _assert_no_signed_prepare_residue(ledger, existing_prepare.plan)
+    plan = existing_prepare.plan
+    expected_raw = plan.get("expected_inventory_atomic")
+    successor_cycle_id = plan.get("cycle_id")
+    if (
+        not isinstance(expected_raw, str)
+        or not expected_raw.isdigit()
+        or not isinstance(successor_cycle_id, str)
+        or not successor_cycle_id
+    ):
+        raise RuntimeError("durable prepare inventory plan is malformed")
+    expected_inventory = int(expected_raw)
+
+    successor = ledger.connection.execute(
+        "SELECT policy_id FROM cycles WHERE cycle_id = ?",
+        (successor_cycle_id,),
+    ).fetchone()
+    if successor is None:
+        observed_inventory = ledger.inventory_atomic(existing_prepare.source_cycle_id)
+    else:
+        if successor["policy_id"] != existing_prepare.successor_policy_id:
+            raise RuntimeError("durable prepare successor policy differs during preflight")
+        observed_inventory = ledger.inventory_atomic(successor_cycle_id)
+
+    if observed_inventory != expected_inventory:
+        raise RuntimeError(
+            "durable prepare inventory location differs from immutable prepare plan"
+        )
+    return existing_prepare.source_cycle_id, None, expected_inventory
+
+
 def _recoverable_inventory_source(
     ledger,
     *,
@@ -725,12 +793,15 @@ def main() -> int:
 
         ledger = open_ledger(str(ledger_path))
         first_buy_cycle_id, source_policy_id = _source_buy(ledger)
-        inventory_source_cycle_id, stale_partial_action_id = _recoverable_inventory_source(
+        (
+            inventory_source_cycle_id,
+            stale_partial_action_id,
+            inventory,
+        ) = _preflight_inventory_state(
             ledger,
             first_buy_cycle_id=first_buy_cycle_id,
             now=now,
         )
-        inventory = ledger.inventory_atomic(inventory_source_cycle_id)
         if inventory != EXPECTED_INVENTORY_ATOMIC:
             raise RuntimeError(
                 f"ledger inventory {inventory} differs from first-live BUY output "
