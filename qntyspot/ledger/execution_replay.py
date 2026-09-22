@@ -29,6 +29,7 @@ __all__ = [
 ]
 
 _COPY_ORDER = (
+    "prepare_records",
     "execution_sessions",
     "authority_root_state",
     "approval_actions",
@@ -78,6 +79,7 @@ def execution_snapshot(source: SpotLedger) -> dict[str, Any]:
         "chain_observations": "observation_id",
         "reconciliations": "reconciliation_id",
         "operator_control_events": "seq",
+        "prepare_records": "prepare_id",
     }
     for table in EXECUTION_TABLES:
         tables[table] = [

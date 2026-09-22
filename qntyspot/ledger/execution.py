@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
-from ..canon import digest_object, parse_canonical_decimal, sha256_hex, strict_json_loads
+from ..canon import (
+    canonical_json_bytes,
+    digest_object,
+    parse_canonical_decimal,
+    sha256_hex,
+    strict_json_loads,
+)
 from ..domain import EconomicBounds, IntentV0, ReservationStatus, Side
 from ..errors import (
     AuthorityCeilingError,
@@ -79,6 +85,7 @@ from .execution_schema import (
     migrate_execution_schema_v2_to_v3,
     migrate_execution_schema_v3_to_v4,
     migrate_execution_schema_v4_to_v5,
+    migrate_execution_schema_v5_to_v6,
     read_execution_schema_version,
     validate_execution_schema_shape,
 )
@@ -88,6 +95,7 @@ from .store import SpotLedger
 __all__ = [
     "B1_O04_EXTERNAL_ROOT_BLOCKED",
     "ExactBytesResumeResultV0",
+    "PrepareRecordV0",
     "ExternalAuthorityProofV0",
     "verify_external_authority_proof",
     "ExecutionRuntime",
@@ -115,7 +123,36 @@ FAILURE_BOUNDARIES = (
     "reconciliation",
     "fill_accounting",
     "kill_switch",
+    "prepare_plan",
+    "prepare_phase",
 )
+
+_PREPARE_PHASES = (
+    "PLANNED",
+    "POLICY_ADMITTED",
+    "INVENTORY_CARRIED",
+    "INTENT_SIMULATED",
+    "SESSION_RECORDED",
+    "PREAUTH_RECORDED",
+    "PREPARED",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PrepareRecordV0:
+    """Canonical, ledger-resident plan for one resumable prepare episode."""
+
+    prepare_id: str
+    operation_kind: str
+    source_cycle_id: str
+    successor_policy_id: str
+    authority_policy_digest: str
+    authority_receipt_id: str
+    plan_sha256: str
+    plan: Mapping[str, Any]
+    phase: str
+    created_at_epoch_s: int
+    updated_at_epoch_s: int
 
 @dataclass(frozen=True, slots=True)
 class ExternalAuthorityProofV0:
@@ -258,6 +295,8 @@ class ExecutionRuntime:
                 migrate_execution_schema_v3_to_v4(self._conn)
             elif version == 4:
                 migrate_execution_schema_v4_to_v5(self._conn)
+            elif version == 5:
+                migrate_execution_schema_v5_to_v6(self._conn)
         if read_execution_schema_version(self._conn) != EXECUTION_SCHEMA_VERSION:
             raise LedgerError("unsupported execution schema version")
         validate_execution_schema_shape(self._conn)
@@ -368,6 +407,133 @@ class ExecutionRuntime:
             elif stored_level != level:
                 raise AuthorityVerificationError("stored effective authority disagrees")
         return level
+
+    @staticmethod
+    def _prepare_record_from_row(row: sqlite3.Row) -> PrepareRecordV0:
+        plan = strict_json_loads(row["plan_json"])
+        if not isinstance(plan, dict):
+            raise SafeHaltError("durable prepare plan is not an object")
+        encoded = canonical_json_bytes(plan)
+        if sha256_hex(encoded) != row["plan_sha256"]:
+            raise SafeHaltError("durable prepare plan digest differs")
+        phase = str(row["phase"])
+        if phase not in _PREPARE_PHASES:
+            raise SafeHaltError("durable prepare phase is unknown")
+        return PrepareRecordV0(
+            prepare_id=str(row["prepare_id"]),
+            operation_kind=str(row["operation_kind"]),
+            source_cycle_id=str(row["source_cycle_id"]),
+            successor_policy_id=str(row["successor_policy_id"]),
+            authority_policy_digest=str(row["authority_policy_digest"]),
+            authority_receipt_id=str(row["authority_receipt_id"]),
+            plan_sha256=str(row["plan_sha256"]),
+            plan=plan,
+            phase=phase,
+            created_at_epoch_s=int(row["created_at_epoch_s"]),
+            updated_at_epoch_s=int(row["updated_at_epoch_s"]),
+        )
+
+    def record_prepare_plan(
+        self,
+        *,
+        operation_kind: str,
+        source_cycle_id: str,
+        successor_policy_id: str,
+        authority_policy_digest: str,
+        authority_receipt_id: str,
+        plan: Mapping[str, Any],
+        now_epoch_s: int,
+    ) -> PrepareRecordV0:
+        """Persist one immutable plan before any prepare-side ledger mutation.
+
+        Reusing a source cycle returns only byte-identical plan material.  A
+        different authority, policy, nonce, or live observation therefore
+        stops safely instead of producing a second carry or signing request.
+        """
+        if operation_kind != "INK_V0F_NATIVE_SELL":
+            raise LedgerError("unknown prepare operation kind")
+        if not isinstance(now_epoch_s, int) or now_epoch_s < 0:
+            raise LedgerError("prepare time must be a non-negative integer")
+        if not all(isinstance(value, str) and value for value in (
+            source_cycle_id, successor_policy_id, authority_policy_digest, authority_receipt_id
+        )):
+            raise LedgerError("prepare identity fields must be non-empty strings")
+        encoded = canonical_json_bytes(dict(plan))
+        canonical_plan = strict_json_loads(encoded)
+        if not isinstance(canonical_plan, dict):  # defensive; canonical writer emitted an object
+            raise LedgerError("prepare plan must be an object")
+        plan_sha256 = sha256_hex(encoded)
+        prepare_id = digest_object(
+            {
+                "authority_policy_digest": authority_policy_digest,
+                "authority_receipt_id": authority_receipt_id,
+                "operation_kind": operation_kind,
+                "plan_sha256": plan_sha256,
+                "source_cycle_id": source_cycle_id,
+                "successor_policy_id": successor_policy_id,
+            }
+        )
+        with self._transaction("prepare_plan") as conn:
+            existing = conn.execute(
+                "SELECT * FROM prepare_records WHERE operation_kind = ? AND source_cycle_id = ?",
+                (operation_kind, source_cycle_id),
+            ).fetchone()
+            if existing is not None:
+                record = self._prepare_record_from_row(existing)
+                if (
+                    record.prepare_id != prepare_id
+                    or record.successor_policy_id != successor_policy_id
+                    or record.authority_policy_digest != authority_policy_digest
+                    or record.authority_receipt_id != authority_receipt_id
+                    or record.plan_sha256 != plan_sha256
+                ):
+                    raise SafeHaltError("existing prepare plan differs from deterministic resume")
+                return record
+            source = conn.execute("SELECT 1 FROM cycles WHERE cycle_id = ?", (source_cycle_id,)).fetchone()
+            if source is None:
+                raise LedgerError("prepare source cycle is missing")
+            conn.execute(
+                "INSERT INTO prepare_records (prepare_id,operation_kind,source_cycle_id,successor_policy_id,authority_policy_digest,authority_receipt_id,plan_sha256,plan_json,phase,created_at_epoch_s,updated_at_epoch_s) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (prepare_id, operation_kind, source_cycle_id, successor_policy_id,
+                 authority_policy_digest, authority_receipt_id, plan_sha256,
+                 encoded.decode("utf-8"), "PLANNED", now_epoch_s, now_epoch_s),
+            )
+        return PrepareRecordV0(
+            prepare_id=prepare_id, operation_kind=operation_kind,
+            source_cycle_id=source_cycle_id, successor_policy_id=successor_policy_id,
+            authority_policy_digest=authority_policy_digest,
+            authority_receipt_id=authority_receipt_id, plan_sha256=plan_sha256,
+            plan=canonical_plan, phase="PLANNED", created_at_epoch_s=now_epoch_s,
+            updated_at_epoch_s=now_epoch_s,
+        )
+
+    def load_prepare_plan(self, *, operation_kind: str, source_cycle_id: str) -> PrepareRecordV0 | None:
+        row = self._conn.execute(
+            "SELECT * FROM prepare_records WHERE operation_kind = ? AND source_cycle_id = ?",
+            (operation_kind, source_cycle_id),
+        ).fetchone()
+        return None if row is None else self._prepare_record_from_row(row)
+
+    def advance_prepare_phase(self, prepare_id: str, phase: str, *, now_epoch_s: int) -> PrepareRecordV0:
+        if phase not in _PREPARE_PHASES:
+            raise LedgerError("unknown prepare phase")
+        with self._transaction("prepare_phase") as conn:
+            row = conn.execute("SELECT * FROM prepare_records WHERE prepare_id = ?", (prepare_id,)).fetchone()
+            if row is None:
+                raise LedgerError("prepare record is missing")
+            record = self._prepare_record_from_row(row)
+            if record.phase == phase:
+                return record
+            expected = _PREPARE_PHASES[_PREPARE_PHASES.index(record.phase) + 1] if record.phase != "PREPARED" else None
+            if phase != expected:
+                raise SafeHaltError("prepare phase does not follow durable state")
+            conn.execute(
+                "UPDATE prepare_records SET phase = ?, updated_at_epoch_s = ? WHERE prepare_id = ?",
+                (phase, now_epoch_s, prepare_id),
+            )
+            updated = conn.execute("SELECT * FROM prepare_records WHERE prepare_id = ?", (prepare_id,)).fetchone()
+        assert updated is not None
+        return self._prepare_record_from_row(updated)
 
     def create_execution_session(
         self,
@@ -1846,6 +2012,9 @@ class ExecutionRuntime:
         max_priority_fee_per_gas_ceiling: int,
         constructed_at_epoch_s: int,
         now_epoch_s: int,
+        frozen_approval: ApprovalActionV0 | None = None,
+        frozen_envelope: ExecutionEnvelopeV0 | None = None,
+        frozen_prepare_id: str | None = None,
     ) -> tuple[ApprovalActionV0, ExecutionEnvelopeV0]:
         """Atomically derive and persist one exact approval+swap preauth bundle.
 
@@ -2375,6 +2544,9 @@ class ExecutionRuntime:
         max_priority_fee_per_gas_ceiling: int,
         constructed_at_epoch_s: int,
         now_epoch_s: int,
+        frozen_approval: ApprovalActionV0 | None = None,
+        frozen_envelope: ExecutionEnvelopeV0 | None = None,
+        frozen_prepare_id: str | None = None,
     ) -> tuple[ApprovalActionV0, ExecutionEnvelopeV0]:
         """Atomically persist exact KRAKMASK approval + native-ETH SELL envelope."""
 
@@ -2421,55 +2593,80 @@ class ExecutionRuntime:
             derive_live_ink_v0f_preview,
         )
 
-        live = derive_live_ink_v0f_preview(
-            live_verifier=live_verifier,
-            policy=risk_policy,
-            router_identity=router_identity,
-            ledger=self.ledger,
-            intent=intent,
-            session=session,
-            account_nonce=account_nonce,
-            gas_limit_ceiling=gas_limit_ceiling,
-            max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
-            max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
-            constructed_at_epoch_s=constructed_at_epoch_s,
-        )
-        if live.preview.side is not Side.SELL:
-            raise EnvelopeValidationError(
-                "native Ink V0F SELL live preview is not SELL"
+        if (frozen_approval is None) != (frozen_envelope is None):
+            raise EnvelopeValidationError("frozen native SELL preauth must include approval and envelope")
+        if frozen_approval is None and frozen_prepare_id is not None:
+            raise EnvelopeValidationError("live native SELL preauth cannot name a frozen prepare")
+        if frozen_approval is None:
+            live = derive_live_ink_v0f_preview(
+                live_verifier=live_verifier, policy=risk_policy,
+                router_identity=router_identity, ledger=self.ledger, intent=intent,
+                session=session, account_nonce=account_nonce,
+                gas_limit_ceiling=gas_limit_ceiling,
+                max_fee_per_gas_ceiling=max_fee_per_gas_ceiling,
+                max_priority_fee_per_gas_ceiling=max_priority_fee_per_gas_ceiling,
+                constructed_at_epoch_s=constructed_at_epoch_s,
             )
-        allowance_observation = live_verifier.observe_allowance_for_market(
-            live.market_observation,
-            token_address=live.preview.approval.token_address,
-        )
-        approval = build_ink_v0f_approval_action(
-            live.preview,
-            allowance_observation,
-            session,
-        )
-        token_envelope = build_ink_v0f_execution_envelope(
-            live.preview,
-            live.router_observation,
-            session,
-        )
-        native_preview = build_ink_v0f_native_sell_preview(
-            live.preview,
-            token_envelope,
-            live.router_observation,
-        )
-        envelope = build_ink_v0f_native_sell_envelope(native_preview)
-        assert_ink_v0f_approval_admissible(
-            approval,
-            live.preview,
-            allowance_observation,
-            session,
-            now_epoch_s=now_epoch_s,
-        )
-        assert_ink_v0f_native_sell_envelope_admissible(
-            envelope,
-            native_preview,
-            now_epoch_s=now_epoch_s,
-        )
+            if live.preview.side is not Side.SELL:
+                raise EnvelopeValidationError("native Ink V0F SELL live preview is not SELL")
+            allowance_observation = live_verifier.observe_allowance_for_market(
+                live.market_observation, token_address=live.preview.approval.token_address,
+            )
+            approval = build_ink_v0f_approval_action(live.preview, allowance_observation, session)
+            token_envelope = build_ink_v0f_execution_envelope(live.preview, live.router_observation, session)
+            native_preview = build_ink_v0f_native_sell_preview(live.preview, token_envelope, live.router_observation)
+            envelope = build_ink_v0f_native_sell_envelope(native_preview)
+            assert_ink_v0f_approval_admissible(approval, live.preview, allowance_observation, session, now_epoch_s=now_epoch_s)
+            assert_ink_v0f_native_sell_envelope_admissible(envelope, native_preview, now_epoch_s=now_epoch_s)
+        else:
+            approval = frozen_approval
+            envelope = frozen_envelope
+            if not isinstance(frozen_prepare_id, str) or not frozen_prepare_id:
+                raise EnvelopeValidationError("frozen native SELL preauth requires its durable prepare id")
+            prepare_row = self._conn.execute(
+                "SELECT plan_json FROM prepare_records WHERE prepare_id = ?", (frozen_prepare_id,)
+            ).fetchone()
+            if prepare_row is None:
+                raise EnvelopeValidationError("frozen native SELL prepare record is missing")
+            prepare_plan = strict_json_loads(prepare_row["plan_json"])
+            if not isinstance(prepare_plan, dict):
+                raise EnvelopeValidationError("frozen native SELL prepare plan is malformed")
+            expected_approval = prepare_plan.get("approval")
+            expected_envelope = prepare_plan.get("envelope")
+            actual_approval = {field.name: getattr(approval, field.name) for field in fields(approval)}
+            actual_envelope = {field.name: getattr(envelope, field.name) for field in fields(envelope)}
+            if (
+                not isinstance(expected_approval, dict)
+                or not isinstance(expected_envelope, dict)
+                or canonical_json_bytes(expected_approval) != canonical_json_bytes(actual_approval)
+                or canonical_json_bytes(expected_envelope) != canonical_json_bytes(actual_envelope)
+            ):
+                raise EnvelopeValidationError("frozen native SELL preauth differs from durable plan")
+            if (
+                approval.session_id != session.session_id
+                or envelope.session_id != session.session_id
+                or approval.session_identity_digest != session.identity_digest
+                or envelope.session_identity_digest != session.identity_digest
+            ):
+                raise EnvelopeValidationError("frozen native SELL preauth session differs")
+            if (
+                approval.economic_action_id != intent.economic_action_id
+                or envelope.economic_action_id != intent.economic_action_id
+                or approval.authority_policy_digest != session.authority_policy_digest
+                or envelope.authority_policy_digest != session.authority_policy_digest
+                or approval.taker_address != session.taker_address
+                or envelope.taker_address != session.taker_address
+                or approval.requested_allowance_atomic != envelope.max_input_atomic
+                or approval.deadline_epoch_s != envelope.deadline_epoch_s
+            ):
+                raise EnvelopeValidationError("frozen native SELL preauth action differs")
+            if (
+                envelope.account_nonce != account_nonce
+                or envelope.constructed_at_epoch_s != constructed_at_epoch_s
+                or envelope.chain_id != session.chain_id
+                or envelope.transaction_value_atomic != 0
+            ):
+                raise EnvelopeValidationError("frozen native SELL envelope construction differs")
 
         envelope_values = {
             "envelope_id": envelope.envelope_id,

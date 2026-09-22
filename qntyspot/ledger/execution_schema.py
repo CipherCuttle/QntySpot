@@ -68,6 +68,7 @@ __all__ = [
     "EXECUTION_SCHEMA_VERSION_V2",
     "EXECUTION_SCHEMA_VERSION_V3",
     "EXECUTION_SCHEMA_VERSION_V4",
+    "EXECUTION_SCHEMA_VERSION_V5",
     "EXECUTION_SCHEMA_SQL",
     "EXECUTION_TABLES",
     "EXECUTION_TABLES_V1",
@@ -76,6 +77,7 @@ __all__ = [
     "migrate_execution_schema_v2_to_v3",
     "migrate_execution_schema_v3_to_v4",
     "migrate_execution_schema_v4_to_v5",
+    "migrate_execution_schema_v5_to_v6",
     "validate_execution_schema_shape",
     "read_execution_schema_version",
 ]
@@ -84,7 +86,8 @@ EXECUTION_SCHEMA_VERSION_V1 = 1
 EXECUTION_SCHEMA_VERSION_V2 = 2
 EXECUTION_SCHEMA_VERSION_V3 = 3
 EXECUTION_SCHEMA_VERSION_V4 = 4
-EXECUTION_SCHEMA_VERSION = 5
+EXECUTION_SCHEMA_VERSION_V5 = 5
+EXECUTION_SCHEMA_VERSION = 6
 
 EXECUTION_TABLES_V1 = (
     "execution_sessions",
@@ -103,6 +106,7 @@ EXECUTION_TABLES = (
     *EXECUTION_TABLES_V1[:5],
     "external_transaction_refs",
     *EXECUTION_TABLES_V1[5:],
+    "prepare_records",
 )
 
 _APPEND_ONLY_TABLES = (
@@ -383,6 +387,30 @@ CREATE TABLE operator_control_events (
     occurred_epoch_s INTEGER NOT NULL CHECK (occurred_epoch_s >= 0),
     reason           TEXT NOT NULL
 ) STRICT;
+
+-- A prepare record is the durable source of truth for a resumable operator
+-- episode.  It is intentionally independent of execution_sessions: it must
+-- exist before a policy, carry, intent, session, approval, or envelope exists.
+CREATE TABLE prepare_records (
+    prepare_id             TEXT PRIMARY KEY,
+    operation_kind         TEXT NOT NULL CHECK (operation_kind = 'INK_V0F_NATIVE_SELL'),
+    source_cycle_id        TEXT NOT NULL REFERENCES cycles(cycle_id),
+    successor_policy_id    TEXT NOT NULL UNIQUE,
+    authority_policy_digest TEXT NOT NULL,
+    authority_receipt_id   TEXT NOT NULL,
+    plan_sha256            TEXT NOT NULL,
+    plan_json              TEXT NOT NULL,
+    phase                  TEXT NOT NULL CHECK (phase IN (
+                               'PLANNED','POLICY_ADMITTED','INVENTORY_CARRIED',
+                               'INTENT_SIMULATED','SESSION_RECORDED',
+                               'PREAUTH_RECORDED','PREPARED')),
+    created_at_epoch_s     INTEGER NOT NULL CHECK (created_at_epoch_s >= 0),
+    updated_at_epoch_s     INTEGER NOT NULL CHECK (updated_at_epoch_s >= 0),
+    CHECK (updated_at_epoch_s >= created_at_epoch_s)
+) STRICT;
+
+CREATE UNIQUE INDEX uq_prepare_active_source
+    ON prepare_records(operation_kind, source_cycle_id);
 """
 
 _APPEND_ONLY_TEMPLATE = """
@@ -611,6 +639,35 @@ WHEN NOT (
 )
 BEGIN
     SELECT RAISE(ABORT, 'approval_actions lifecycle regression');
+END;
+
+CREATE TRIGGER prepare_records_identity_guard
+BEFORE UPDATE OF prepare_id, operation_kind, source_cycle_id, successor_policy_id,
+                 authority_policy_digest, authority_receipt_id, plan_sha256, plan_json,
+                 created_at_epoch_s ON prepare_records
+BEGIN
+    SELECT RAISE(ABORT, 'prepare record identity is immutable');
+END;
+
+CREATE TRIGGER prepare_records_phase_guard
+BEFORE UPDATE OF phase ON prepare_records
+WHEN NOT (
+    NEW.phase = OLD.phase
+    OR (OLD.phase = 'PLANNED' AND NEW.phase = 'POLICY_ADMITTED')
+    OR (OLD.phase = 'POLICY_ADMITTED' AND NEW.phase = 'INVENTORY_CARRIED')
+    OR (OLD.phase = 'INVENTORY_CARRIED' AND NEW.phase = 'INTENT_SIMULATED')
+    OR (OLD.phase = 'INTENT_SIMULATED' AND NEW.phase = 'SESSION_RECORDED')
+    OR (OLD.phase = 'SESSION_RECORDED' AND NEW.phase = 'PREAUTH_RECORDED')
+    OR (OLD.phase = 'PREAUTH_RECORDED' AND NEW.phase = 'PREPARED')
+)
+BEGIN
+    SELECT RAISE(ABORT, 'prepare record phase regression or skip');
+END;
+
+CREATE TRIGGER prepare_records_no_delete
+BEFORE DELETE ON prepare_records
+BEGIN
+    SELECT RAISE(ABORT, 'prepare records are durable');
 END;
 """
 
@@ -1120,7 +1177,7 @@ def migrate_execution_schema_v4_to_v5(conn: sqlite3.Connection) -> None:
             validate_execution_schema_shape(conn)
         conn.execute(
             "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
-            (str(EXECUTION_SCHEMA_VERSION),),
+            (str(EXECUTION_SCHEMA_VERSION_V5),),
         )
         conn.execute(
             "UPDATE schema_meta SET value = ? WHERE key = 'execution_authority'",
@@ -1139,6 +1196,86 @@ def migrate_execution_schema_v4_to_v5(conn: sqlite3.Connection) -> None:
         raise
     finally:
         conn.execute("PRAGMA foreign_keys = ON")
+    migrate_execution_schema_v5_to_v6(conn)
+
+
+def migrate_execution_schema_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """Add the durable, immutable-plan prepare state machine."""
+    if read_execution_schema_version(conn) != EXECUTION_SCHEMA_VERSION_V5:
+        raise SchemaVersionError("migration requires execution schema version 5")
+    if conn.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        raise LedgerError("execution schema migration requires foreign keys enabled")
+    # Compatibility fixtures (and interrupted historical migrations) can
+    # retain the v6 table while their version marker is deliberately rewound.
+    # Never recreate or overwrite it: require the expected immutable-plan
+    # columns and merely restore the version marker.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'prepare_records'"
+    ).fetchone() is not None:
+        columns = tuple(row[1] for row in conn.execute("PRAGMA table_info(prepare_records)"))
+        expected = (
+            "prepare_id", "operation_kind", "source_cycle_id", "successor_policy_id",
+            "authority_policy_digest", "authority_receipt_id", "plan_sha256", "plan_json",
+            "phase", "created_at_epoch_s", "updated_at_epoch_s",
+        )
+        if columns != expected:
+            raise LedgerError("existing prepare_records has an unsupported shape")
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
+            (str(EXECUTION_SCHEMA_VERSION),),
+        )
+        validate_execution_schema_shape(conn)
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE prepare_records (
+                prepare_id TEXT PRIMARY KEY,
+                operation_kind TEXT NOT NULL CHECK (operation_kind = 'INK_V0F_NATIVE_SELL'),
+                source_cycle_id TEXT NOT NULL REFERENCES cycles(cycle_id),
+                successor_policy_id TEXT NOT NULL UNIQUE,
+                authority_policy_digest TEXT NOT NULL,
+                authority_receipt_id TEXT NOT NULL,
+                plan_sha256 TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                phase TEXT NOT NULL CHECK (phase IN ('PLANNED','POLICY_ADMITTED','INVENTORY_CARRIED','INTENT_SIMULATED','SESSION_RECORDED','PREAUTH_RECORDED','PREPARED')),
+                created_at_epoch_s INTEGER NOT NULL CHECK (created_at_epoch_s >= 0),
+                updated_at_epoch_s INTEGER NOT NULL CHECK (updated_at_epoch_s >= created_at_epoch_s)
+            ) STRICT;
+            CREATE UNIQUE INDEX uq_prepare_active_source ON prepare_records(operation_kind, source_cycle_id);
+            CREATE TRIGGER prepare_records_identity_guard
+            BEFORE UPDATE OF prepare_id, operation_kind, source_cycle_id, successor_policy_id,
+                             authority_policy_digest, authority_receipt_id, plan_sha256, plan_json,
+                             created_at_epoch_s ON prepare_records
+            BEGIN SELECT RAISE(ABORT, 'prepare record identity is immutable'); END;
+            CREATE TRIGGER prepare_records_phase_guard
+            BEFORE UPDATE OF phase ON prepare_records
+            WHEN NOT (NEW.phase = OLD.phase
+                OR (OLD.phase = 'PLANNED' AND NEW.phase = 'POLICY_ADMITTED')
+                OR (OLD.phase = 'POLICY_ADMITTED' AND NEW.phase = 'INVENTORY_CARRIED')
+                OR (OLD.phase = 'INVENTORY_CARRIED' AND NEW.phase = 'INTENT_SIMULATED')
+                OR (OLD.phase = 'INTENT_SIMULATED' AND NEW.phase = 'SESSION_RECORDED')
+                OR (OLD.phase = 'SESSION_RECORDED' AND NEW.phase = 'PREAUTH_RECORDED')
+                OR (OLD.phase = 'PREAUTH_RECORDED' AND NEW.phase = 'PREPARED'))
+            BEGIN SELECT RAISE(ABORT, 'prepare record phase regression or skip'); END;
+            CREATE TRIGGER prepare_records_no_delete
+            BEFORE DELETE ON prepare_records
+            BEGIN SELECT RAISE(ABORT, 'prepare records are durable'); END;
+            """
+        )
+        conn.execute(
+            "UPDATE schema_meta SET value = ? WHERE key = 'execution_schema_version'",
+            (str(EXECUTION_SCHEMA_VERSION),),
+        )
+        if conn.execute("PRAGMA foreign_key_check").fetchall():
+            raise LedgerError("execution schema migration introduced foreign-key violations")
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
+    validate_execution_schema_shape(conn)
 
 
 def migrate_execution_schema_v1_to_v2(conn: sqlite3.Connection) -> None:
@@ -1300,6 +1437,9 @@ def apply_execution_schema(conn: sqlite3.Connection) -> None:
                 return
             if version == EXECUTION_SCHEMA_VERSION_V4:
                 migrate_execution_schema_v4_to_v5(conn)
+                return
+            if version == EXECUTION_SCHEMA_VERSION_V5:
+                migrate_execution_schema_v5_to_v6(conn)
                 return
         raise LedgerError(f"execution schema already applied: {collisions}")
     conn.execute("PRAGMA recursive_triggers = ON")
