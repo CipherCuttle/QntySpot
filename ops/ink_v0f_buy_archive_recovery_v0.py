@@ -161,6 +161,10 @@ def inspect_archive(path: Path, case: Path, report: dict) -> None:
         for name in sqlite_names:
             item = members[name]
             source_member_size = item.file_size if is_zip else item.size
+            if extracted_bytes + source_member_size > MAX_EXTRACTED_BYTES_PER_ARCHIVE:
+                report["archive_errors"].append({"archive_path": str(path),
+                                                 "error_type": "TotalExtractionBudget"})
+                break
             if source_member_size > MAX_MEMBER_BYTES:
                 report["candidate_errors"].append({"archive_path": str(path), "member": name,
                                                   "error_type": "MemberSizeLimit"})
@@ -189,8 +193,11 @@ def inspect_archive(path: Path, case: Path, report: dict) -> None:
                         raise ValueError("duplicate sidecar member")
                     if sidecar_name in members:
                         m = members[sidecar_name]
-                        if (m.file_size if is_zip else m.size) > MAX_MEMBER_BYTES:
+                        companion_bytes = m.file_size if is_zip else m.size
+                        if companion_bytes > MAX_MEMBER_BYTES:
                             raise ValueError("sidecar exceeds the hard size limit")
+                        if extracted_bytes + companion_bytes > MAX_EXTRACTED_BYTES_PER_ARCHIVE:
+                            raise ValueError("archive extraction budget exceeded")
                         reported[suffix[1:] + "_snapshot"] = snapshot_member(
                             lambda m=m: opener(m), candidate_dir / ("candidate.sqlite3" + suffix),
                         )
