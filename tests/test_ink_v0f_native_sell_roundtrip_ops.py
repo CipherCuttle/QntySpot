@@ -409,6 +409,89 @@ def test_prepare_resume_rejects_existing_signed_transaction_residue() -> None:
         helper._assert_no_signed_prepare_residue(signed, plan)
 
 
+def test_preflight_resumes_existing_durable_prepare_without_expiry_gate(
+    monkeypatch,
+) -> None:
+    helper = _helper()
+    plan = {
+        "approval": {"approval_action_id": "aa" * 32},
+        "envelope": {"economic_action_id": "bb" * 32},
+        "expected_inventory_atomic": str(helper.EXPECTED_INVENTORY_ATOMIC),
+        "cycle_id": "successor-cycle",
+    }
+    record = SimpleNamespace(
+        source_cycle_id="buy-cycle",
+        successor_policy_id="successor-policy",
+        plan=plan,
+    )
+
+    class Result:
+        def __init__(self, *, one=None, rows=None):
+            self._one = one
+            self._rows = rows if rows is not None else []
+
+        def fetchone(self):
+            return self._one
+
+        def fetchall(self):
+            return self._rows
+
+    class Connection:
+        def execute(self, sql, params=()):
+            normalized = " ".join(sql.split())
+            if "FROM sqlite_master" in normalized:
+                return Result(one=(1,))
+            if "FROM prepare_records" in normalized:
+                return Result(rows=[{"source_cycle_id": "buy-cycle"}])
+            if "FROM state_events" in normalized:
+                return Result(rows=[])
+            if "FROM signed_transactions" in normalized and "JOIN" not in normalized:
+                return Result(rows=[])
+            if "FROM submission_attempts AS st" in normalized:
+                return Result(rows=[])
+            if normalized.startswith("SELECT policy_id FROM cycles"):
+                assert params == ("successor-cycle",)
+                return Result(one={"policy_id": "successor-policy"})
+            raise AssertionError((normalized, params))
+
+    class Ledger:
+        def __init__(self):
+            self.connection = Connection()
+
+        def inventory_atomic(self, cycle_id):
+            assert cycle_id == "successor-cycle"
+            return helper.EXPECTED_INVENTORY_ATOMIC
+
+    class Runtime:
+        def __init__(self, _ledger):
+            pass
+
+        def load_prepare_plan(self, *, operation_kind, source_cycle_id):
+            assert operation_kind == "INK_V0F_NATIVE_SELL"
+            assert source_cycle_id == "buy-cycle"
+            return record
+
+    monkeypatch.setattr(helper, "ExecutionRuntime", Runtime)
+
+    def forbidden_legacy_recovery(*_args, **_kwargs):
+        raise AssertionError("durable resume must not use expiry-gated legacy recovery")
+
+    monkeypatch.setattr(
+        helper,
+        "_recoverable_inventory_source",
+        forbidden_legacy_recovery,
+    )
+    assert helper._preflight_inventory_state(
+        Ledger(),
+        first_buy_cycle_id="buy-cycle",
+        now=1_800_000_000,
+    ) == (
+        "buy-cycle",
+        None,
+        helper.EXPECTED_INVENTORY_ATOMIC,
+    )
+
+
 def test_partial_prepare_recovery_accepts_only_zero_effect_expired_simulated_sell() -> None:
     helper = _helper()
     action_id = "aa" * 32
